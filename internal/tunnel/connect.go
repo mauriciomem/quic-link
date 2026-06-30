@@ -23,6 +23,10 @@ func Connect(
 	localLn net.Listener,
 ) error {
 	mgr := &connManager{t: t, serverAddr: serverAddr}
+	go func() {
+		<-ctx.Done()
+		localLn.Close()
+	}()
 	for {
 		tcpConn, err := localLn.Accept()
 		if err != nil {

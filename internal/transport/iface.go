@@ -1,4 +1,3 @@
-package transport
 // Package transport defines the Transport abstraction used by quic-link.
 // The QUIC implementation is the only concrete implementation shipped today.
 // See the TODO markers for TCP/wss fallback extension points.

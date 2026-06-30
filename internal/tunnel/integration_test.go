@@ -1,4 +1,3 @@
-package tunnel
 package tunnel_test
 
 import (

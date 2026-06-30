@@ -1,4 +1,3 @@
-package quiclink
 // Command quic-link is a minimal QUIC SSH tunnel.
 // Choose a role with a subcommand:
 //

@@ -1,4 +1,3 @@
-package tunnel
 // Package tunnel wires together the transport layer and local TCP services.
 package tunnel
 

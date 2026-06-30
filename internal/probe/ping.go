@@ -1,4 +1,3 @@
-package probe
 // Package probe implements the quic-link ping subcommand.
 package probe
 
@@ -15,10 +14,10 @@ import (
 // RTT terminology follows RFC 9002 §5 (QUIC Loss Detection and Congestion
 // Control):
 //
-//	- latest_rtt  (§5.1): most recent RTT sample from an ACK-bearing packet.
-//	- min_rtt     (§5.2): minimum RTT observed — a lower bound on one-way delay.
-//	- smoothed_rtt(§5.3): EWMA of RTT samples; the primary metric for
-//	                      retransmission and PTO calculation.
+//   - latest_rtt  (§5.1): most recent RTT sample from an ACK-bearing packet.
+//   - min_rtt     (§5.2): minimum RTT observed — a lower bound on one-way delay.
+//   - smoothed_rtt(§5.3): EWMA of RTT samples; the primary metric for
+//     retransmission and PTO calculation.
 type Result struct {
 	// HandshakeTime is the wall-clock time from Dial to HandshakeComplete.
 	// It includes one full round-trip (Initial + Handshake) and TLS processing.
