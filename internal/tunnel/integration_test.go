@@ -196,11 +196,32 @@ func TestMTLSRejection(t *testing.T) {
 	}
 	defer tr.Close()
 
-	_, err = tr.Dial(ctx, serverAddr)
-	if err == nil {
-		t.Fatal("expected dial to fail with an untrusted client cert, but it succeeded")
+	// With QUIC + TLS 1.3 mTLS, the client derives 1-RTT keys and Dial may
+	// return before the server's client-cert rejection (CONNECTION_CLOSE)
+	// propagates back. The rejection surfaces either at Dial or on first use.
+	conn, err := tr.Dial(ctx, serverAddr)
+	if err != nil {
+		t.Logf("correctly rejected at dial: %v", err)
+		return
 	}
-	t.Logf("correctly rejected: %v", err)
+	defer conn.CloseWithError(0, "test done") //nolint:errcheck
+
+	// Exercise the connection: opening a stream and reading must fail once the
+	// server tears the connection down for the untrusted client certificate.
+	stream, err := conn.OpenStream(ctx)
+	if err != nil {
+		t.Logf("correctly rejected at stream open: %v", err)
+		return
+	}
+	defer stream.Close() //nolint:errcheck
+
+	stream.Write([]byte("ping")) //nolint:errcheck
+	buf := make([]byte, 1)
+	if _, err := stream.Read(buf); err != nil {
+		t.Logf("correctly rejected on stream use: %v", err)
+		return
+	}
+	t.Fatal("expected mTLS rejection, but the connection was usable")
 }
 
 // ---- test helpers ------------------------------------------------------------
