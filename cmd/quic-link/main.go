@@ -154,8 +154,11 @@ func runConnect(ctx context.Context, args []string) error {
 		return fmt.Errorf("TLS config: %w", err)
 	}
 
-	// Ephemeral UDP port for outbound QUIC (any available local port).
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{})
+	// Ephemeral IPv4 UDP port for outbound QUIC (any available local port).
+	// Bind udp4 rather than a dual-stack [::] socket: on macOS a dual-stack
+	// socket fails to transmit IPv4-mapped datagrams to an on-link neighbor
+	// (no ARP is performed), silently dropping packets to LAN peers.
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		return fmt.Errorf("UDP socket: %w", err)
 	}
@@ -213,8 +216,9 @@ func runPing(ctx context.Context, args []string) error {
 	)
 
 	for i := 1; i <= *count; i++ {
-		// Each probe uses a fresh QUIC connection from a new UDP socket.
-		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{})
+		// Each probe uses a fresh QUIC connection from a new IPv4 UDP socket.
+		// udp4 (not dual-stack [::]) so on-link LAN peers are reachable on macOS.
+		udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 		if err != nil {
 			return fmt.Errorf("UDP socket: %w", err)
 		}
