@@ -1,0 +1,21 @@
+# Compiled binary (anchored to repo root so it does NOT match cmd/quic-link/ source dir)
+/quic-link
+
+# Go build/test artifacts
+*.test
+*.out
+*.exe
+
+# Local docs / notes (not versioned)
+HANDOFF.md
+CLAUDE.md
+notes/
+internal-docs/
+
+# Certificates and private keys (never commit)
+certs/
+*.key
+*.crt
+*.csr
+*.pem
+*.srl
