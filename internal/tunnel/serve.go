@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"time"
 
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
@@ -55,8 +56,14 @@ func serveStream(ctx context.Context, stream transport.Stream, serviceAddr strin
 		// Distinguish service-unreachable from other errors for operators.
 		return fmt.Errorf("service unreachable (%s): %w", serviceAddr, err)
 	}
+	start := time.Now()
+	slog.Info("stream proxying to service", "service", serviceAddr)
 	// pipe closes both stream and svc when done.
 	pipe(stream, svc)
+	slog.Info("stream closed",
+		"service", serviceAddr,
+		"duration", time.Since(start).Round(time.Millisecond),
+	)
 	return nil
 }
 

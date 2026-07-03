@@ -86,8 +86,7 @@ internal/probe/       ping: handshake timing + RTT (RFC 9002 §5)
 
 ## Cross-platform notes (Linux & macOS)
 
-The binary runs unchanged on both Linux and macOS. There is no platform-specific Go code, no cgo dependency, and no OS-specific syscalls beyond `syscall.SIGTERM`, which is available on both platforms. quic-go v0.60.0 handles all per-OS UDP differences (DPLPMTUD Don't-Fragment bit, ECN, and GSO on Linux) internally.
-No action is required in our code.
+The binary runs on both Linux and macOS. There is no platform-specific Go code, no cgo dependency, and no OS-specific syscalls beyond `syscall.SIGTERM`, which is available on both platforms. quic-go v0.60.0 handles all per-OS UDP differences (DPLPMTUD Don't-Fragment bit, ECN, and GSO on Linux) internally. The client binds an IPv4 (`udp4`) socket so on-link LAN peers are reachable on macOS (see the Local Network permission note below).
 
 The integration tests bind loopback (`127.0.0.1`) on ephemeral ports (`:0`), so they run without elevated privileges on both OSes.
 
@@ -117,3 +116,25 @@ quic-go may log a warning if it cannot raise the UDP receive buffer to ~7 MB. Th
   ```bash
   sudo sysctl -w kern.ipc.maxsockbuf=7340032
   ```
+
+### macOS Local Network permission (macOS 15 Sequoia and later)
+
+On macOS 15+, an app must be granted **Local Network** access before the OS will
+deliver its unicast traffic to LAN addresses (`192.168.x`, `10.x`). Until granted,
+packets to the local subnet are **silently dropped** while traffic to the public
+internet still flows — so `connect`/`ping` to a LAN server time out with
+`timeout: no recent network activity` even though the network is fine.
+
+- Grant your terminal app (Terminal, iTerm, or VS Code) Local Network access under
+  **System Settings → Privacy & Security → Local Network**, then re-run. If a
+  permission prompt appears on first run, click **Allow**.
+- Running the client under `sudo` bypasses the check (root changes the responsible
+  process), which is a quick way to confirm this is the cause.
+- The client binds an IPv4 socket (`udp4`) rather than a dual-stack `[::]` socket:
+  on macOS a dual-stack socket fails to transmit to an on-link IPv4 neighbour.
+
+### `--service-addr` must be a dial target
+
+`serve --service-addr` is the address the server *dials* to reach the upstream
+service (sshd), not a bind address. Use `127.0.0.1:22`, not `0.0.0.0:22`
+(`0.0.0.0` is a listen/wildcard address and is not a valid dial target).

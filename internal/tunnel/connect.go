@@ -47,6 +47,15 @@ func Connect(
 func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn) {
 	defer tcpConn.Close()
 
+	start := time.Now()
+	slog.Info("session opened", "local", tcpConn.RemoteAddr())
+	defer func() {
+		slog.Info("session closed",
+			"local", tcpConn.RemoteAddr(),
+			"duration", time.Since(start).Round(time.Millisecond),
+		)
+	}()
+
 	conn, err := mgr.get(ctx)
 	if err != nil {
 		slog.Warn("get QUIC conn", "err", err)
@@ -127,6 +136,7 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	slog.Info("QUIC connection established", "server", m.serverAddr)
 
 	// Monitor for connection drop and nil out m.current so the next caller
 	// triggers a fresh dial.
