@@ -39,7 +39,7 @@ func serveConn(ctx context.Context, conn transport.Conn, serviceAddr string) {
 		}
 		go func() {
 			if err := serveStream(ctx, stream, serviceAddr); err != nil {
-				slog.Debug("stream handler error", "err", err)
+				slog.Warn("stream handler error", "err", err)
 			}
 		}()
 	}
