@@ -67,23 +67,55 @@ func serveStream(ctx context.Context, stream transport.Stream, serviceAddr strin
 	return nil
 }
 
-// pipe bidirectionally copies between a and b, closing each side's write
-// direction when the other side signals EOF.  It blocks until both directions
-// are complete.
+// closeWrite half-closes the write side of c, propagating a clean EOF as a FIN.
+// *net.TCPConn exposes CloseWrite(); a *quic.Stream's Close() already closes
+// only the send direction, so Close() is the correct write-half-close for
+// streams. It leaves the read side open so replies keep flowing.
+func closeWrite(c io.Closer) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = c.Close()
+}
+
+// resetConn tears a connection down abruptly. A reset stays a reset —
+// SetLinger(0) makes a TCP Close() emit RST. QUIC stream reset codes
+// (02 §5.4, code 0x10) arrive with the framed protocol in Phase 1a and are
+// intentionally out of scope here (ADR-0009).
+func resetConn(c io.Closer) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = c.Close()
+}
+
+// pipe bidirectionally copies between a and b. A clean EOF in one direction
+// becomes a write-half-close on the peer so the other direction keeps
+// flowing — this is what lets scp, git, and request/response protocols finish
+// instead of truncating. Both ends are fully released only after both
+// directions complete.
 func pipe(a, b io.ReadWriteCloser) {
 	done := make(chan struct{}, 2)
 	go func() {
-		io.Copy(b, a) //nolint:errcheck
-		// Signal b that no more data is coming from a.
-		b.Close() //nolint:errcheck
+		if _, err := io.Copy(b, a); err != nil {
+			resetConn(b) // abrupt failure: reset, don't FIN
+		} else {
+			closeWrite(b) // clean EOF from a: no more writes are coming to b
+		}
 		done <- struct{}{}
 	}()
 	go func() {
-		io.Copy(a, b) //nolint:errcheck
-		// Signal a that no more data is coming from b.
-		a.Close() //nolint:errcheck
+		if _, err := io.Copy(a, b); err != nil {
+			resetConn(a)
+		} else {
+			closeWrite(a)
+		}
 		done <- struct{}{}
 	}()
 	<-done
 	<-done
+	// Both directions finished; release resources (idempotent; errors ignored).
+	_ = a.Close()
+	_ = b.Close()
 }

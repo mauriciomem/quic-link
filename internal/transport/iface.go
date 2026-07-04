@@ -10,9 +10,11 @@ import (
 	"time"
 )
 
-// ALPN is the TLS Application-Layer Protocol Negotiation identifier.
-// Both client and server MUST include this in tls.Config.NextProtos.
-const ALPN = "quic-link/1"
+// ALPN is the TLS Application-Layer Protocol Negotiation identifier for
+// Phase 0 (frameless streams, pre-protocol). Both client and server MUST
+// include this in tls.Config.NextProtos. "quic-link/1" is reserved for the
+// framed protocol v1 introduced in Phase 1a (ADR-0009).
+const ALPN = "quic-link/0"
 
 // ConnStats holds RTT measurements derived from the QUIC loss-detection
 // machinery (RFC 9002 §5).  All durations are 0 until at least one

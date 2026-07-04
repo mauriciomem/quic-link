@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -374,3 +375,158 @@ func mustPool(t *testing.T, certs ...*x509.Certificate) *x509.CertPool {
 	}
 	return pool
 }
+
+// TestReconnectSoak verifies that the connManager re-dials after the server
+// closes the QUIC connection and that goroutine count does not grow
+// monotonically across repeated reconnect cycles.
+func TestReconnectSoak(t *testing.T) {
+	t.Parallel()
+	const cycles = 5
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	caCert, caKey := mustGenCA(t)
+	caPool := mustPool(t, caCert)
+
+	serverTLSCert := mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
+	clientTLSCert := mustGenLeaf(t, caCert, caKey, "client", nil)
+
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{serverTLSCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		NextProtos:   []string{transport.ALPN},
+	}
+	clientTLS := &tls.Config{
+		Certificates: []tls.Certificate{clientTLSCert},
+		RootCAs:      caPool,
+		ServerName:   "127.0.0.1",
+		NextProtos:   []string{transport.ALPN},
+	}
+
+	// Echo service the tunnel will proxy to.
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { echoLn.Close() })
+	go runEchoServer(echoLn)
+
+	// Build a QUIC listener wrapped in a trackingListener so the test can
+	// intercept each accepted connection and force-close it.
+	serverUDP, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("server UDP: %v", err)
+	}
+	t.Cleanup(func() { serverUDP.Close() })
+	serverTr, err := transport.NewQUICTransport(serverUDP, serverTLS, nil)
+	if err != nil {
+		t.Fatalf("server transport: %v", err)
+	}
+	t.Cleanup(func() { serverTr.Close() })
+	innerLn, err := serverTr.Listen()
+	if err != nil {
+		t.Fatalf("server listen: %v", err)
+	}
+	t.Cleanup(func() { innerLn.Close() })
+
+	serverConns := make(chan transport.Conn, cycles+1)
+	trackedLn := &trackingListener{inner: innerLn, conns: serverConns}
+
+	// Start the serve tunnel with the tracking listener.
+	go tunnel.Serve(ctx, trackedLn, echoLn.Addr().String()) //nolint:errcheck
+
+	// Start the connect tunnel (client side).
+	localLn := mustStartConnect(t, ctx, clientTLS, innerLn.Addr().String())
+
+	// Prime: open a TCP connection so the client establishes its initial QUIC
+	// session. Close it immediately; we only need the QUIC connection live.
+	prime, err := net.DialTimeout("tcp", localLn.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("prime dial: %v", err)
+	}
+	prime.Close()
+
+	// Let the initial goroutines (drop-monitor, serveConn, pipe teardown) settle.
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	for i := range cycles {
+		// Wait for the server to have an accepted QUIC connection for this cycle.
+		// Cycle 0 uses the primed connection; cycle N uses the connection
+		// established by the previous cycle's echo dial.
+		var serverConn transport.Conn
+		select {
+		case serverConn = <-serverConns:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("cycle %d: timed out waiting for server connection", i)
+		}
+
+		// Force-close the server side; the client drop-monitor should fire.
+		if err := serverConn.CloseWithError(0, "soak-test drop"); err != nil {
+			t.Logf("cycle %d: CloseWithError: %v", i, err)
+		}
+
+		// Give the client drop-monitor time to detect the close and nil m.current.
+		time.Sleep(200 * time.Millisecond)
+
+		// A new TCP dial through the tunnel triggers a QUIC re-dial and verifies
+		// the reconnect succeeds end-to-end.
+		conn, err := net.DialTimeout("tcp", localLn.Addr().String(), 5*time.Second)
+		if err != nil {
+			t.Fatalf("cycle %d: dial after reconnect: %v", i, err)
+		}
+		msg := []byte("soak")
+		if _, err := conn.Write(msg); err != nil {
+			conn.Close()
+			t.Fatalf("cycle %d: write: %v", i, err)
+		}
+		got := make([]byte, len(msg))
+		if _, err := io.ReadFull(conn, got); err != nil {
+			conn.Close()
+			t.Fatalf("cycle %d: read: %v", i, err)
+		}
+		conn.Close()
+		if string(got) != string(msg) {
+			t.Fatalf("cycle %d: echo mismatch: got %q want %q", i, got, msg)
+		}
+	}
+
+	// Allow goroutines from the final cycle to settle.
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	after := runtime.NumGoroutine()
+
+	// Reject monotonic goroutine growth; allow a small constant for
+	// test infrastructure that may not have fully torn down yet.
+	const allowance = 10
+	if after > baseline+allowance {
+		t.Errorf("goroutine count grew: baseline=%d after=%d (allowance=%d)",
+			baseline, after, allowance)
+	}
+	t.Logf("goroutine count: baseline=%d after-soak=%d", baseline, after)
+}
+
+// trackingListener wraps a transport.Listener and sends each accepted Conn
+// to the conns channel before returning it to the caller, so tests can
+// force-close individual QUIC connections.
+type trackingListener struct {
+	inner transport.Listener
+	conns chan transport.Conn
+}
+
+func (l *trackingListener) Accept(ctx context.Context) (transport.Conn, error) {
+	conn, err := l.inner.Accept(ctx)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case l.conns <- conn:
+	default:
+	}
+	return conn, nil
+}
+
+func (l *trackingListener) Addr() net.Addr { return l.inner.Addr() }
+func (l *trackingListener) Close() error   { return l.inner.Close() }

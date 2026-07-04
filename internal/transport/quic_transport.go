@@ -17,8 +17,8 @@ func defaultQUICConfig() *quic.Config {
 	return &quic.Config{
 		// Send a PING every 15 s so idle connections are not dropped by NAT.
 		KeepAlivePeriod: 15 * time.Second,
-		// Drop the connection if nothing arrives for 30 s after handshake.
-		MaxIdleTimeout: 30 * time.Second,
+		// Drop the connection if nothing arrives for 60 s after handshake (02 §7).
+		MaxIdleTimeout: 60 * time.Second,
 		// Abort a handshake that takes longer than 5 s so blocked UDP is
 		// detected quickly rather than hanging for a long time.
 		HandshakeIdleTimeout: 5 * time.Second,
