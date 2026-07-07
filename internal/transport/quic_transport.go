@@ -81,6 +81,7 @@ func (t *QUICTransport) Close() error {
 
 // classifyDialError wraps connection-setup errors with actionable messages:
 //   - HandshakeTimeoutError  → UDP likely blocked by firewall
+//   - TransportError 0x178   → ALPN/version mismatch (rebuild both binaries)
 //   - TransportError 0x100–0x1ff → TLS certificate rejected (RFC 9001 §4.8)
 //   - ConnectionRefused → server actively refused (may be cert rejection)
 func classifyDialError(err error) error {
@@ -92,7 +93,18 @@ func classifyDialError(err error) error {
 	}
 	var transportErr *quic.TransportError
 	if errors.As(err, &transportErr) {
-		// TLS alert errors land in [0x100, 0x1ff] per RFC 9001 §4.8.
+		// TLS alerts map to QUIC codes 0x100+alert (RFC 9001 §4.8).
+		// no_application_protocol (alert 120) → 0x178 means the peers' ALPN
+		// identifiers differ — almost always mismatched binary versions
+		// (e.g. one still speaks quic-link/1). Name it distinctly so the
+		// operator rebuilds both binaries instead of chasing certificates.
+		if transportErr.ErrorCode == 0x178 {
+			return fmt.Errorf(
+				"protocol/version mismatch (TLS alert no_application_protocol"+
+					" 0x178; client and server ALPN differ — rebuild both"+
+					" binaries from the same version): %w", err)
+		}
+		// Other TLS alert errors land in [0x100, 0x1ff] per RFC 9001 §4.8.
 		if transportErr.ErrorCode >= 0x100 && transportErr.ErrorCode <= 0x1ff {
 			return fmt.Errorf(
 				"auth failed (TLS error 0x%x; ensure the client cert is signed"+
