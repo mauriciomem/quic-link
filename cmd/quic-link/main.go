@@ -134,6 +134,7 @@ func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	server := fs.String("server", "", "host:port of the quic-link server")
 	local := fs.String("local", "127.0.0.1:2222", "local TCP address to expose")
+	target := fs.String("target", "ssh", "logical target name to request from the agent (currently only \"ssh\" is supported)")
 	certFile := fs.String("cert", "", "Path to client TLS certificate (PEM)")
 	keyFile := fs.String("key", "", "Path to client TLS private key (PEM)")
 	serverCA := fs.String("server-ca", "", "Path to CA certificate used to verify the server (PEM)")
@@ -180,7 +181,7 @@ func runConnect(ctx context.Context, args []string) error {
 		"local", localLn.Addr(),
 		"server", *server,
 	)
-	return tunnel.Connect(ctx, t, *server, localLn)
+	return tunnel.Connect(ctx, t, *server, *target, localLn)
 }
 
 // runPing implements the ping subcommand.

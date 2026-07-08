@@ -3,18 +3,26 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
+// builtinTarget is the single logical target the agent understands for now.
+// Support for multiple targets (a route table) is planned; until then any
+// other target name yields status unknown_target.
+const builtinTarget = "ssh"
+
 // Serve accepts QUIC connections from ln and, for every stream opened by a
-// client, dials serviceAddr over TCP and bidirectionally proxies data.
-// It runs until ctx is cancelled or ln is closed.
+// client, reads a protocol-v1 header, resolves the named target, replies with
+// a response frame, and (on success) bidirectionally proxies data to
+// serviceAddr. It runs until ctx is cancelled or ln is closed.
 func Serve(ctx context.Context, ln transport.Listener, serviceAddr string) error {
 	for {
 		conn, err := ln.Accept(ctx)
@@ -46,31 +54,87 @@ func serveConn(ctx context.Context, conn transport.Conn, serviceAddr string) {
 	}
 }
 
-// serveStream proxies a single QUIC stream to the TCP service at serviceAddr.
-// pipe() owns the lifetime of both stream and svc.
+// serveStream reads the protocol-v1 header, resolves the target,
+// writes a response frame, and on status 0 proxies the stream to serviceAddr.
+// pipe() owns the lifetime of both stream and svc once splicing begins.
 func serveStream(ctx context.Context, stream transport.Stream, serviceAddr string) error {
+	h, err := proto.ReadHeader(stream)
+	if err != nil {
+		return replyHeaderError(stream, err)
+	}
+
+	// The agent currently resolves exactly one logical target over tcp.
+	if h.Kind != proto.KindTCP || h.Target != builtinTarget {
+		_ = proto.WriteResponse(stream, proto.Response{
+			Status: proto.StatusUnknownTarget,
+			Msg:    fmt.Sprintf("no target %q", h.Target),
+		})
+		_ = stream.Close()
+		return nil
+	}
+
 	svc, err := (&net.Dialer{}).DialContext(ctx, "tcp", serviceAddr)
 	if err != nil {
-		// Close the stream so the client gets an error instead of hanging.
-		stream.Close()
-		// Distinguish service-unreachable from other errors for operators.
+		_ = proto.WriteResponse(stream, proto.Response{
+			Status: proto.StatusDialFailed,
+			Msg:    fmt.Sprintf("dial %s: %v", serviceAddr, err),
+		})
+		_ = stream.Close()
 		return fmt.Errorf("service unreachable (%s): %w", serviceAddr, err)
 	}
+
+	if err := proto.WriteResponse(stream, proto.Response{Status: proto.StatusOK}); err != nil {
+		_ = svc.Close()
+		stream.Reset(proto.StreamResetCode)
+		return fmt.Errorf("write ok response: %w", err)
+	}
+
 	start := time.Now()
-	slog.Info("stream proxying to service", "service", serviceAddr)
+	slog.Info("stream proxying to service", "target", h.Target, "service", serviceAddr)
 	// pipe closes both stream and svc when done.
 	pipe(stream, svc)
 	slog.Info("stream closed",
+		"target", h.Target,
 		"service", serviceAddr,
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
 	return nil
 }
 
+// replyHeaderError maps a header read/parse failure to the protocol behavior
+// and returns the error for logging.
+func replyHeaderError(stream transport.Stream, err error) error {
+	switch {
+	case errors.Is(err, proto.ErrFrameTooLarge):
+		// Oversized frame: reset the stream, send no response.
+		stream.Reset(proto.StreamResetCode)
+		return fmt.Errorf("header: %w", err)
+	case errors.Is(err, proto.ErrUnsupportedVersion):
+		// Unsupported version: acceptor replies status 6.
+		_ = proto.WriteResponse(stream, proto.Response{
+			Status: proto.StatusUnsupportedVersion,
+			Msg:    "unsupported protocol version; rebuild the client",
+		})
+		_ = stream.Close()
+		return fmt.Errorf("header: %w", err)
+	case errors.Is(err, proto.ErrBadHeader):
+		// Malformed or missing header fields: status 5.
+		_ = proto.WriteResponse(stream, proto.Response{
+			Status: proto.StatusBadHeader,
+			Msg:    err.Error(),
+		})
+		_ = stream.Close()
+		return fmt.Errorf("header: %w", err)
+	default:
+		// I/O error before a full header arrived (e.g. peer vanished).
+		stream.Reset(proto.StreamResetCode)
+		return fmt.Errorf("read header: %w", err)
+	}
+}
+
 // closeWrite half-closes the write side of c, propagating a clean EOF as a FIN.
-// *net.TCPConn exposes CloseWrite(); a *quic.Stream's Close() already closes
-// only the send direction, so Close() is the correct write-half-close for
-// streams. It leaves the read side open so replies keep flowing.
+// *net.TCPConn exposes CloseWrite(); a transport.Stream's Close() closes only
+// its send direction, so Close() is the correct write-half-close for streams.
 func closeWrite(c io.Closer) {
 	if cw, ok := c.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
@@ -79,15 +143,19 @@ func closeWrite(c io.Closer) {
 	_ = c.Close()
 }
 
-// resetConn tears a connection down abruptly. A reset stays a reset —
-// SetLinger(0) makes a TCP Close() emit RST. QUIC stream reset codes
-// (02 §5.4, code 0x10) arrive with the framed protocol in Phase 1a and are
-// intentionally out of scope here (ADR-0009).
+// resetConn tears a connection down abruptly (a reset stays a reset).
+// SetLinger(0) makes a TCP Close() emit RST; a transport.Stream is reset with
+// the QUIC stream reset code.
 func resetConn(c io.Closer) {
-	if tc, ok := c.(*net.TCPConn); ok {
-		_ = tc.SetLinger(0)
+	switch v := c.(type) {
+	case *net.TCPConn:
+		_ = v.SetLinger(0)
+		_ = v.Close()
+	case transport.Stream:
+		v.Reset(proto.StreamResetCode)
+	default:
+		_ = c.Close()
 	}
-	_ = c.Close()
 }
 
 // pipe bidirectionally copies between a and b. A clean EOF in one direction

@@ -17,7 +17,7 @@ func defaultQUICConfig() *quic.Config {
 	return &quic.Config{
 		// Send a PING every 15 s so idle connections are not dropped by NAT.
 		KeepAlivePeriod: 15 * time.Second,
-		// Drop the connection if nothing arrives for 60 s after handshake (02 §7).
+		// Drop the connection if nothing arrives for 60 s after handshake.
 		MaxIdleTimeout: 60 * time.Second,
 		// Abort a handshake that takes longer than 5 s so blocked UDP is
 		// detected quickly rather than hanging for a long time.
@@ -82,7 +82,7 @@ func (t *QUICTransport) Close() error {
 // classifyDialError wraps connection-setup errors with actionable messages:
 //   - HandshakeTimeoutError  → UDP likely blocked by firewall
 //   - TransportError 0x178   → ALPN/version mismatch (rebuild both binaries)
-//   - TransportError 0x100–0x1ff → TLS certificate rejected (RFC 9001 §4.8)
+//   - TransportError 0x100–0x1ff → TLS certificate rejected (RFC 9001)
 //   - ConnectionRefused → server actively refused (may be cert rejection)
 func classifyDialError(err error) error {
 	var handshakeTimeout *quic.HandshakeTimeoutError
@@ -93,10 +93,10 @@ func classifyDialError(err error) error {
 	}
 	var transportErr *quic.TransportError
 	if errors.As(err, &transportErr) {
-		// TLS alerts map to QUIC codes 0x100+alert (RFC 9001 §4.8).
+		// TLS alerts map to QUIC codes 0x100+alert (RFC 9001).
 		// no_application_protocol (alert 120) → 0x178 means the peers' ALPN
 		// identifiers differ — almost always mismatched binary versions
-		// (e.g. one still speaks quic-link/1). Name it distinctly so the
+		// (e.g. one still speaks quic-link/0). Name it distinctly so the
 		// operator rebuilds both binaries instead of chasing certificates.
 		if transportErr.ErrorCode == 0x178 {
 			return fmt.Errorf(
@@ -104,7 +104,7 @@ func classifyDialError(err error) error {
 					" 0x178; client and server ALPN differ — rebuild both"+
 					" binaries from the same version): %w", err)
 		}
-		// Other TLS alert errors land in [0x100, 0x1ff] per RFC 9001 §4.8.
+		// Other TLS alert errors land in [0x100, 0x1ff] per RFC 9001.
 		if transportErr.ErrorCode >= 0x100 && transportErr.ErrorCode <= 0x1ff {
 			return fmt.Errorf(
 				"auth failed (TLS error 0x%x; ensure the client cert is signed"+
@@ -143,24 +143,43 @@ type quicConn struct {
 	c *quic.Conn
 }
 
+// ---- quicStream wraps *quic.Stream ------------------------------------------
+
+// quicStream adapts *quic.Stream to transport.Stream. Read/Write/Close pass
+// through (Close sends a FIN on the send direction only); Reset issues a QUIC
+// stream reset on both directions.
+type quicStream struct {
+	s *quic.Stream
+}
+
+func (q *quicStream) Read(p []byte) (int, error)  { return q.s.Read(p) }
+func (q *quicStream) Write(p []byte) (int, error) { return q.s.Write(p) }
+func (q *quicStream) Close() error                { return q.s.Close() }
+
+func (q *quicStream) Reset(code uint64) {
+	ec := quic.StreamErrorCode(code)
+	q.s.CancelWrite(ec)
+	q.s.CancelRead(ec)
+}
+
 // OpenStream opens a new bidirectional QUIC stream (blocks until stream limit
-// allows it or ctx is cancelled).
+// allows it or ctx is cancelled); the stream is wrapped by quicStream.
 func (c *quicConn) OpenStream(ctx context.Context) (Stream, error) {
 	s, err := c.c.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// *quic.Stream satisfies io.ReadWriteCloser; Close() sends STREAM FIN.
-	return s, nil
+	return &quicStream{s: s}, nil
 }
 
-// AcceptStream waits for the peer to open a new bidirectional stream.
+// AcceptStream waits for the peer to open a new bidirectional stream;
+// the stream is wrapped by quicStream.
 func (c *quicConn) AcceptStream(ctx context.Context) (Stream, error) {
 	s, err := c.c.AcceptStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return s, nil
+	return &quicStream{s: s}, nil
 }
 
 // Stats returns RTT statistics from the QUIC connection.

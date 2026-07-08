@@ -11,23 +11,25 @@ import (
 )
 
 // ALPN is the TLS Application-Layer Protocol Negotiation identifier for
-// Phase 0 (frameless streams, pre-protocol). Both client and server MUST
-// include this in tls.Config.NextProtos. "quic-link/1" is reserved for the
-// framed protocol v1 introduced in Phase 1a (ADR-0009).
-const ALPN = "quic-link/0"
+// protocol v1 (framed streams). Both client and agent MUST include
+// this in tls.Config.NextProtos. A version mismatch fails the QUIC handshake
+// at ALPN (TLS alert no_application_protocol, QUIC 0x178) rather than
+// misparsing — see transport.classifyDialError. "quic-link/0" was the earlier
+// frameless tunnel; it is intentionally incompatible with v1.
+const ALPN = "quic-link/1"
 
 // ConnStats holds RTT measurements derived from the QUIC loss-detection
-// machinery (RFC 9002 §5).  All durations are 0 until at least one
+// machinery (RFC 9002).  All durations are 0 until at least one
 // round-trip has been measured.
 type ConnStats struct {
 	// MinRTT is the minimum RTT observed since the connection was established
-	// (RFC 9002 §5.2: min_rtt is a lower bound on the end-to-end RTT).
+	// (RFC 9002: min_rtt is a lower bound on the end-to-end RTT).
 	MinRTT time.Duration
 	// SmoothedRTT is an exponentially weighted moving average of RTT samples
-	// (RFC 9002 §5.3: smoothed_rtt).  Best metric for sustained connections.
+	// (RFC 9002: smoothed_rtt).  Best metric for sustained connections.
 	SmoothedRTT time.Duration
 	// LatestRTT is the most recent RTT sample derived from an ACK frame
-	// (RFC 9002 §5.1: latest_rtt = ack_delay subtracted from send-to-ack time).
+	// (RFC 9002: latest_rtt = ack_delay subtracted from send-to-ack time).
 	LatestRTT time.Duration
 }
 
@@ -37,6 +39,10 @@ type ConnStats struct {
 // the whole TCP connection as one stream.
 type Stream interface {
 	io.ReadWriteCloser
+	// Reset abruptly terminates both directions of the stream with the given
+	// application error code — a QUIC stream reset. Unlike
+	// Close (a clean FIN on the send side), Reset stays a reset.
+	Reset(code uint64)
 }
 
 // Conn is an established transport connection that can carry multiple Streams.

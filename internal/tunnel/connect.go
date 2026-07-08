@@ -8,11 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
 // Connect accepts TCP connections on localLn and forwards each one to the
-// QUIC server at serverAddr via t as a single QUIC stream.
+// QUIC agent at serverAddr via t as a single QUIC stream. Each stream is
+// prefixed with a protocol-v1 header naming the logical target; the
+// client waits for the agent's response before any payload flows.
 // A single QUIC connection is shared across all TCP sessions and is
 // re-established automatically if it drops (capped exponential backoff).
 // Runs until ctx is cancelled or localLn is closed.
@@ -20,6 +23,7 @@ func Connect(
 	ctx context.Context,
 	t transport.Transport,
 	serverAddr string,
+	target string,
 	localLn net.Listener,
 ) error {
 	mgr := &connManager{t: t, serverAddr: serverAddr}
@@ -37,18 +41,19 @@ func Connect(
 				return fmt.Errorf("local accept: %w", err)
 			}
 		}
-		go forwardTCP(ctx, mgr, tcpConn)
+		go forwardTCP(ctx, mgr, tcpConn, target)
 	}
 }
 
-// forwardTCP opens a QUIC stream to the server and proxies data between
-// tcpConn and the stream.  It retries once if the first stream open fails
-// (handles the race where the QUIC connection dropped between get and use).
-func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn) {
+// forwardTCP opens a QUIC stream to the agent, stamps the protocol header,
+// waits for a success response, and then proxies data between tcpConn and the
+// stream. It retries the stream open once if the first attempt fails (handles
+// the race where the QUIC connection dropped between get and use).
+func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn, target string) {
 	defer tcpConn.Close()
 
 	start := time.Now()
-	slog.Info("session opened", "local", tcpConn.RemoteAddr())
+	slog.Info("session opened", "local", tcpConn.RemoteAddr(), "target", target)
 	defer func() {
 		slog.Info("session closed",
 			"local", tcpConn.RemoteAddr(),
@@ -77,8 +82,70 @@ func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn) {
 			return
 		}
 	}
+
+	// Name a logical target; never an ip:port.
+	if err := proto.WriteHeader(stream, proto.Header{Kind: proto.KindTCP, Target: target}); err != nil {
+		slog.Warn("write header", "err", err, "target", target)
+		stream.Reset(proto.StreamResetCode)
+		resetConn(tcpConn)
+		return
+	}
+
+	// Wait for the response (10s deadline) before sending any payload.
+	resp, err := awaitResponse(ctx, stream, proto.ResponseDeadline)
+	if err != nil {
+		slog.Warn("await response", "err", err, "target", target)
+		resetConn(tcpConn) // stream already reset by awaitResponse
+		return
+	}
+	if resp.Status != proto.StatusOK {
+		// Surface the agent's message verbatim.
+		slog.Warn("agent refused stream",
+			"target", target,
+			"status", uint(resp.Status),
+			"status_name", resp.Status.String(),
+			"msg", resp.Msg,
+		)
+		stream.Reset(proto.StreamResetCode)
+		resetConn(tcpConn)
+		return
+	}
+
 	// pipe closes tcpConn (a) and stream (b) when done.
 	pipe(tcpConn, stream)
+}
+
+// awaitResponse reads the agent's response frame, enforcing the response
+// deadline. On timeout, context cancellation, or a read error it resets the
+// stream (which also unblocks the read goroutine) and returns an error.
+func awaitResponse(ctx context.Context, stream transport.Stream, d time.Duration) (proto.Response, error) {
+	type result struct {
+		resp proto.Response
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		resp, err := proto.ReadResponse(stream)
+		ch <- result{resp, err}
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			stream.Reset(proto.StreamResetCode)
+			return proto.Response{}, res.err
+		}
+		return res.resp, nil
+	case <-timer.C:
+		stream.Reset(proto.StreamResetCode)
+		return proto.Response{}, fmt.Errorf("timed out after %s waiting for response", d)
+	case <-ctx.Done():
+		stream.Reset(proto.StreamResetCode)
+		return proto.Response{}, ctx.Err()
+	}
 }
 
 // connManager maintains a single persistent QUIC connection to serverAddr.

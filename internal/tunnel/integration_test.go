@@ -61,7 +61,7 @@ func TestTunnelRoundTrip(t *testing.T) {
 	serverAddr := mustStartServe(t, ctx, serverTLS, echoLn.Addr().String())
 
 	// Start the QUIC connect tunnel (exposes a local TCP port).
-	localLn := mustStartConnect(t, ctx, clientTLS, serverAddr)
+	localLn := mustStartConnect(t, ctx, clientTLS, serverAddr, "ssh")
 
 	// Dial through the local TCP port and verify round-trip.
 	conn, err := net.DialTimeout("tcp", localLn.Addr().String(), 5*time.Second)
@@ -84,7 +84,58 @@ func TestTunnelRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPingNonZeroRTT verifies that the ping probe returns a non-zero
+// TestUnknownTarget verifies that when the client names a target the agent
+// does not know, the agent replies unknown_target and the local connection is
+// closed without data flowing (status 1, end-to-end).
+func TestUnknownTarget(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	caCert, caKey := mustGenCA(t)
+	caPool := mustPool(t, caCert)
+	serverTLSCert := mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
+	clientTLSCert := mustGenLeaf(t, caCert, caKey, "client", nil)
+
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{serverTLSCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		NextProtos:   []string{transport.ALPN},
+	}
+	clientTLS := &tls.Config{
+		Certificates: []tls.Certificate{clientTLSCert},
+		RootCAs:      caPool,
+		ServerName:   "127.0.0.1",
+		NextProtos:   []string{transport.ALPN},
+	}
+
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { echoLn.Close() })
+	go runEchoServer(echoLn)
+
+	serverAddr := mustStartServe(t, ctx, serverTLS, echoLn.Addr().String())
+	// Client names a target the agent does not serve.
+	localLn := mustStartConnect(t, ctx, clientTLS, serverAddr, "bogus")
+
+	conn, err := net.DialTimeout("tcp", localLn.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("TCP dial: %v", err)
+	}
+	defer conn.Close()
+
+	// The agent refuses; the client resets the local leg. A read must return
+	// an error (EOF or reset) rather than echoed data.
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("expected the local connection to be closed on unknown_target, but read succeeded")
+	}
+}
+
 // HandshakeTime and a non-zero SmoothedRTT on loopback.
 func TestPingNonZeroRTT(t *testing.T) {
 	t.Parallel()
@@ -255,7 +306,7 @@ func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, serv
 
 // mustStartConnect starts a QUIC connect tunnel and returns the local TCP
 // Listener (port is ephemeral). Cleanup is registered with t.
-func mustStartConnect(t *testing.T, ctx context.Context, tlsConf *tls.Config, serverAddr string) net.Listener {
+func mustStartConnect(t *testing.T, ctx context.Context, tlsConf *tls.Config, serverAddr, target string) net.Listener {
 	t.Helper()
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
@@ -275,7 +326,7 @@ func mustStartConnect(t *testing.T, ctx context.Context, tlsConf *tls.Config, se
 	}
 	t.Cleanup(func() { localLn.Close() })
 
-	go tunnel.Connect(ctx, tr, serverAddr, localLn) //nolint:errcheck
+	go tunnel.Connect(ctx, tr, serverAddr, target, localLn) //nolint:errcheck
 	return localLn
 }
 
@@ -437,7 +488,7 @@ func TestReconnectSoak(t *testing.T) {
 	go tunnel.Serve(ctx, trackedLn, echoLn.Addr().String()) //nolint:errcheck
 
 	// Start the connect tunnel (client side).
-	localLn := mustStartConnect(t, ctx, clientTLS, innerLn.Addr().String())
+	localLn := mustStartConnect(t, ctx, clientTLS, innerLn.Addr().String(), "ssh")
 
 	// Prime: open a TCP connection so the client establishes its initial QUIC
 	// session. Close it immediately; we only need the QUIC connection live.
