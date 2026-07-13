@@ -8,11 +8,23 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
+)
+
+const (
+	// controlOpenDeadline bounds how long after a session is established the
+	// client may take to open its control stream. Past it, the agent closes
+	// the session with 0x03 (02 §2.4).
+	controlOpenDeadline = 5 * time.Second
+	// agentVersionMsg is carried in the control stream's ok response (02 §2.4).
+	// Placeholder until the build version is wired through in 1a.5.
+	agentVersionMsg = "quic-link agent"
 )
 
 // Serve accepts QUIC connections from ln and, for every stream opened by a
@@ -36,7 +48,9 @@ func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router) error
 }
 
 // serveConn derives the peer identity once (INV-3) and handles all streams on a
-// single accepted QUIC connection.
+// single accepted QUIC connection. It also enforces the control-stream open
+// deadline (02 §2.4): if the client does not open a control stream within
+// controlOpenDeadline, the session is closed with 0x03.
 func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router) {
 	peer, err := router.IdentityFromCerts(conn.PeerCertificates())
 	if err != nil {
@@ -45,6 +59,15 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router) {
 		return
 	}
 	slog.Info("session established", "peer", peer.Short())
+
+	cs := &controlState{}
+	openTimer := time.AfterFunc(controlOpenDeadline, func() {
+		if !cs.isOpen() {
+			_ = conn.CloseWithError(0x03, "control stream not opened within deadline")
+		}
+	})
+	defer openTimer.Stop()
+
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -52,21 +75,33 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router) {
 			return
 		}
 		go func() {
-			if err := serveStream(ctx, stream, peer, rtr); err != nil {
+			if err := serveStream(ctx, conn, stream, peer, rtr, cs, openTimer); err != nil {
 				slog.Warn("stream handler error", "err", err)
 			}
 		}()
 	}
 }
 
-// serveStream reads the protocol-v1 header, resolves and authorizes the target
-// via rtr, writes a response frame, and on status 0 proxies the stream to the
-// dialed connection. pipe() owns the lifetime of both stream and svc once
-// splicing begins.
-func serveStream(ctx context.Context, stream transport.Stream, peer router.Identity, rtr *router.Router) error {
+// serveStream reads the protocol-v1 header and dispatches: a control stream to
+// serveControl, otherwise a data stream resolved and authorized via rtr, then
+// on status 0 spliced to the dialed connection. pipe() owns the lifetime of
+// both stream and svc once splicing begins.
+func serveStream(
+	ctx context.Context,
+	conn transport.Conn,
+	stream transport.Stream,
+	peer router.Identity,
+	rtr *router.Router,
+	cs *controlState,
+	openTimer *time.Timer,
+) error {
 	h, err := proto.ReadHeader(stream)
 	if err != nil {
 		return replyHeaderError(stream, err)
+	}
+
+	if h.Kind == proto.KindControl {
+		return serveControl(ctx, conn, stream, peer, h, cs, openTimer)
 	}
 
 	svc, err := rtr.Dial(ctx, peer, h)
@@ -90,6 +125,78 @@ func serveStream(ctx context.Context, stream transport.Stream, peer router.Ident
 		"duration", time.Since(start).Round(time.Millisecond),
 	)
 	return nil
+}
+
+// serveControl handles the single per-session control stream (02 §4.3/§6): it
+// validates the control proto version, enforces exactly-one-per-session, replies
+// ok, and then serves gRPC until the stream closes — at which point the whole
+// session is torn down (02 §5: control-stream closure is session death).
+func serveControl(
+	ctx context.Context,
+	conn transport.Conn,
+	stream transport.Stream,
+	peer router.Identity,
+	h proto.Header,
+	cs *controlState,
+	openTimer *time.Timer,
+) error {
+	if h.Meta["proto"] != "1" {
+		_ = proto.WriteResponse(stream, proto.Response{
+			Status: proto.StatusUnsupportedVersion,
+			Msg:    `control proto must be "1"`,
+		})
+		_ = stream.Close()
+		_ = conn.CloseWithError(0x04, "unsupported control proto")
+		return nil
+	}
+	if !cs.markOpen() {
+		// A control stream is already open on this session (02 §4.3).
+		_ = proto.WriteResponse(stream, proto.Response{
+			Status: proto.StatusBadHeader,
+			Msg:    "control stream already open",
+		})
+		_ = stream.Close()
+		return nil
+	}
+	openTimer.Stop()
+
+	if err := proto.WriteResponse(stream, proto.Response{Status: proto.StatusOK, Msg: agentVersionMsg}); err != nil {
+		stream.Reset(proto.StreamResetCode)
+		_ = conn.CloseWithError(0x03, "control response write failed")
+		return fmt.Errorf("control: write ok: %w", err)
+	}
+
+	slog.Info("control stream opened", "peer", peer.Short())
+	// Serve gRPC until the control stream dies; then the session is dead.
+	_ = control.Serve(ctx, stream)
+	slog.Info("control stream closed; tearing down session", "peer", peer.Short())
+	_ = conn.CloseWithError(0x00, "control stream closed")
+	return nil
+}
+
+// controlState tracks whether this session's one-per-session control stream has
+// been opened, so the open deadline can be cancelled and a duplicate refused.
+type controlState struct {
+	mu   sync.Mutex
+	open bool
+}
+
+// markOpen records the control stream as open, returning true only the first
+// time (a second call — a duplicate control stream — returns false).
+func (c *controlState) markOpen() (firstTime bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.open {
+		return false
+	}
+	c.open = true
+	return true
+}
+
+func (c *controlState) isOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.open
 }
 
 // replyDialError maps a router.Dial failure to the protocol response and

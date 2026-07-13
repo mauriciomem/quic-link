@@ -237,6 +237,8 @@ func runPing(ctx context.Context, args []string) error {
 		totalHandshake float64
 		totalSmoothed  float64
 		totalMin       float64
+		successfulRPC  int
+		totalRPC       float64
 	)
 
 	for i := 1; i <= *count; i++ {
@@ -269,6 +271,16 @@ func runPing(ctx context.Context, args []string) error {
 			res.MinRTT.Round(time.Microsecond),
 			res.LatestRTT.Round(time.Microsecond),
 		)
+		// Application-level control-stream RPC round-trip, labeled distinctly
+		// from the transport RTT (02 §6). A control failure is non-fatal: the
+		// transport numbers above are still meaningful.
+		if res.RPCErr != nil {
+			fmt.Printf("           control_rpc: FAILED (%v)\n", res.RPCErr)
+		} else {
+			fmt.Printf("           control_rpc_rtt=%v\n", res.RPCRoundTrip.Round(time.Microsecond))
+			totalRPC += float64(res.RPCRoundTrip)
+			successfulRPC++
+		}
 		successful++
 		totalHandshake += float64(res.HandshakeTime)
 		totalSmoothed += float64(res.SmoothedRTT)
@@ -286,6 +298,12 @@ func runPing(ctx context.Context, args []string) error {
 		time.Duration(totalSmoothed/n).Round(time.Microsecond),
 		time.Duration(totalMin/n).Round(time.Microsecond),
 	)
+	if successfulRPC > 0 {
+		fmt.Printf("avg: control_rpc_rtt=%v (%d/%d ok)\n",
+			time.Duration(totalRPC/float64(successfulRPC)).Round(time.Microsecond),
+			successfulRPC, successful,
+		)
+	}
 	return nil
 }
 

@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package quiclink.v1;
+
+option go_package = "github.com/mauriciomem/quic-link/internal/control/proto;controlpb";
+
+// Control is the agent's management plane, served over the single per-session
+// control stream (02 §6). Ping lands in Phase 1a; GetStatus in Phase 1b.
+// Additive changes (new RPCs/fields) do NOT bump the wire ProtoVersion;
+// changing an existing field's semantics does (INV-5).
+service Control {
+  rpc Ping(PingRequest) returns (PingResponse);                 // Phase 1a
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);  // Phase 1b
+}
+
+message PingRequest {
+  // nonce is echoed back verbatim so the client can match a reply to its
+  // request. RTT is measured on the client from its own send/receive clock;
+  // the agent's clock is informational only (agent_unix_ms).
+  int64 nonce = 1;
+}
+
+message PingResponse {
+  int64 nonce = 1;
+  int64 agent_unix_ms = 2;
+}
+
+message GetStatusRequest {}
+
+message GetStatusResponse {
+  string version = 1;
+  int64 started_unix_ms = 2;
+  repeated RouteInfo routes = 3;
+}
+
+message RouteInfo {
+  string target = 1;
+  string address = 2;
+  bool builtin = 3;
+}

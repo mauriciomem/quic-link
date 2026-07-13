@@ -157,6 +157,14 @@ func (q *quicStream) Read(p []byte) (int, error)  { return q.s.Read(p) }
 func (q *quicStream) Write(p []byte) (int, error) { return q.s.Write(p) }
 func (q *quicStream) Close() error                { return q.s.Close() }
 
+// SetDeadline/SetReadDeadline/SetWriteDeadline delegate to the underlying QUIC
+// stream, which supports them natively. They are not part of the transport.Stream
+// interface (the splice engine never needs them); the control-plane net.Conn
+// adapter type-asserts for them so gRPC gets real deadlines.
+func (q *quicStream) SetDeadline(t time.Time) error      { return q.s.SetDeadline(t) }
+func (q *quicStream) SetReadDeadline(t time.Time) error  { return q.s.SetReadDeadline(t) }
+func (q *quicStream) SetWriteDeadline(t time.Time) error { return q.s.SetWriteDeadline(t) }
+
 func (q *quicStream) Reset(code uint64) {
 	ec := quic.StreamErrorCode(code)
 	q.s.CancelWrite(ec)

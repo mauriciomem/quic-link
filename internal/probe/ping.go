@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
@@ -28,11 +29,21 @@ type Result struct {
 	MinRTT time.Duration
 	// LatestRTT is the most recent RTT sample (RFC 9002).
 	LatestRTT time.Duration
+	// RPCRoundTrip is the application-level round-trip of a control-stream
+	// Ping RPC (02 §6). It includes gRPC/HTTP2 encoding and agent scheduling,
+	// so it is always >= the transport RTT. Zero if RPCErr is non-nil.
+	RPCRoundTrip time.Duration
+	// RPCErr records why the control-stream Ping failed, if it did. The
+	// transport measurements are still valid when this is set.
+	RPCErr error
 }
 
-// Ping establishes a QUIC connection to serverAddr, waits for the handshake
-// to complete, reads RTT statistics, and returns the measurements.
-// The caller is responsible for closing the Transport after Ping returns.
+// Ping establishes a QUIC connection to serverAddr, waits for the handshake to
+// complete, reads transport RTT statistics, then opens the control stream and
+// times a Ping RPC. The transport measurements are always returned; a
+// control-stream failure is reported in Result.RPCErr rather than failing the
+// whole probe. The caller is responsible for closing the Transport after Ping
+// returns.
 func Ping(ctx context.Context, t transport.Transport, serverAddr string) (*Result, error) {
 	start := time.Now()
 	conn, err := t.Dial(ctx, serverAddr)
@@ -52,10 +63,27 @@ func Ping(ctx context.Context, t transport.Transport, serverAddr string) (*Resul
 	elapsed := time.Since(start)
 	stats := conn.Stats()
 
-	return &Result{
+	res := &Result{
 		HandshakeTime: elapsed,
 		SmoothedRTT:   stats.SmoothedRTT,
 		MinRTT:        stats.MinRTT,
 		LatestRTT:     stats.LatestRTT,
-	}, nil
+	}
+
+	// Application round-trip over the control stream (02 §6). control.Open
+	// already issues one establishing Ping; a second, timed Ping isolates the
+	// steady-state RPC latency.
+	client, err := control.Open(ctx, conn, "quic-link ping")
+	if err != nil {
+		res.RPCErr = err
+		return res, nil
+	}
+	defer client.Close() //nolint:errcheck
+	rtt, err := client.PingRTT(ctx)
+	if err != nil {
+		res.RPCErr = err
+		return res, nil
+	}
+	res.RPCRoundTrip = rtt
+	return res, nil
 }

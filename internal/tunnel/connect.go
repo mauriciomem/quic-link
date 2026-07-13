@@ -8,9 +8,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
+
+// clientVersion is advertised in the control stream header meta (02 §2.4).
+// Placeholder until the build version is wired through in 1a.5.
+const clientVersion = "quic-link client"
 
 // Forward binds a local listener to a logical agent target. Connect opens one
 // QUIC stream per accepted connection on Listener, naming Target.
@@ -182,16 +187,20 @@ func awaitResponse(ctx context.Context, stream transport.Stream, d time.Duration
 	}
 }
 
-// connManager maintains a single persistent QUIC connection to serverAddr.
-// Concurrent callers share one in-flight dial via a single-flight mechanism.
+// connManager maintains a single persistent QUIC connection to serverAddr,
+// together with the session's control stream (opened right after each dial;
+// its presence satisfies the agent's control-open deadline and its closure
+// signals session death). Concurrent callers share one in-flight dial via a
+// single-flight mechanism.
 type connManager struct {
-	mu         sync.Mutex
-	current    transport.Conn
-	dialErr    error
-	dialing    bool
-	dialDone   chan struct{}
-	t          transport.Transport
-	serverAddr string
+	mu            sync.Mutex
+	current       transport.Conn
+	controlClient *control.Client
+	dialErr       error
+	dialing       bool
+	dialDone      chan struct{}
+	t             transport.Transport
+	serverAddr    string
 }
 
 // get returns the current QUIC connection or dials a new one.  If a dial is
@@ -227,8 +236,20 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 
 	conn, err := m.dialWithBackoff(ctx)
 
+	// Open the session's control stream immediately after a successful dial
+	// (02 §2.4): the agent closes the session if it does not arrive in time.
+	var cclient *control.Client
+	if err == nil {
+		cclient, err = control.Open(ctx, conn, clientVersion)
+		if err != nil {
+			_ = conn.CloseWithError(0x03, "control open failed")
+			conn = nil
+		}
+	}
+
 	m.mu.Lock()
 	m.current = conn
+	m.controlClient = cclient
 	m.dialErr = err
 	m.dialing = false
 	m.mu.Unlock()
@@ -240,16 +261,20 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 	slog.Info("QUIC connection established", "server", m.serverAddr)
 
 	// Monitor for connection drop and nil out m.current so the next caller
-	// triggers a fresh dial.
-	go func() {
+	// triggers a fresh dial; close the control client bound to this conn.
+	go func(cc *control.Client) {
 		<-conn.Context().Done()
 		m.mu.Lock()
 		if m.current == conn {
 			m.current = nil
+			m.controlClient = nil
 		}
 		m.mu.Unlock()
+		if cc != nil {
+			_ = cc.Close()
+		}
 		slog.Info("QUIC connection dropped; will re-dial on next request")
-	}()
+	}(cclient)
 
 	return conn, nil
 }
