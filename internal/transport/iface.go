@@ -5,6 +5,7 @@ package transport
 
 import (
 	"context"
+	"crypto/x509"
 	"io"
 	"net"
 	"time"
@@ -64,6 +65,10 @@ type Conn interface {
 	Context() context.Context
 	// CloseWithError closes the connection with an application-level error.
 	CloseWithError(code uint64, msg string) error
+	// PeerCertificates returns the verified peer certificate chain from the
+	// completed TLS handshake (leaf first). Empty if the peer presented no
+	// certificate. The agent derives the peer Identity from it (INV-3).
+	PeerCertificates() []*x509.Certificate
 }
 
 // Listener accepts inbound Conn connections.

@@ -12,36 +12,70 @@ import (
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
-// Connect accepts TCP connections on localLn and forwards each one to the
-// QUIC agent at serverAddr via t as a single QUIC stream. Each stream is
-// prefixed with a protocol-v1 header naming the logical target; the
-// client waits for the agent's response before any payload flows.
-// A single QUIC connection is shared across all TCP sessions and is
-// re-established automatically if it drops (capped exponential backoff).
-// Runs until ctx is cancelled or localLn is closed.
+// Forward binds a local listener to a logical agent target. Connect opens one
+// QUIC stream per accepted connection on Listener, naming Target.
+type Forward struct {
+	Listener net.Listener
+	Target   string
+}
+
+// Connect forwards each TCP connection accepted on every Forward's listener to
+// the QUIC agent at serverAddr via t as a single QUIC stream naming that
+// forward's logical target. All forwards share one persistent QUIC connection,
+// re-established automatically if it drops (capped exponential backoff). One
+// accept-loop goroutine runs per forward; the first non-ctx accept error
+// cancels the others and is returned. All listeners are closed on ctx.Done.
+// Runs until ctx is cancelled or a listener fails.
 func Connect(
 	ctx context.Context,
 	t transport.Transport,
 	serverAddr string,
-	target string,
-	localLn net.Listener,
+	forwards []Forward,
 ) error {
 	mgr := &connManager{t: t, serverAddr: serverAddr}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	go func() {
 		<-ctx.Done()
-		localLn.Close()
+		for _, f := range forwards {
+			f.Listener.Close()
+		}
 	}()
+
+	errCh := make(chan error, len(forwards))
+	var wg sync.WaitGroup
+	for _, f := range forwards {
+		wg.Add(1)
+		go func(f Forward) {
+			defer wg.Done()
+			errCh <- acceptLoop(ctx, mgr, f)
+		}(f)
+	}
+
+	// First loop to exit wins; cancel the rest and drain before returning.
+	err := <-errCh
+	cancel()
+	wg.Wait()
+	return err
+}
+
+// acceptLoop accepts local connections on f.Listener and forwards each to the
+// agent as a stream naming f.Target. A failure caused by ctx cancellation is
+// reported as ctx.Err().
+func acceptLoop(ctx context.Context, mgr *connManager, f Forward) error {
 	for {
-		tcpConn, err := localLn.Accept()
+		tcpConn, err := f.Listener.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
-				return fmt.Errorf("local accept: %w", err)
+				return fmt.Errorf("local accept (%s): %w", f.Target, err)
 			}
 		}
-		go forwardTCP(ctx, mgr, tcpConn, target)
+		go forwardTCP(ctx, mgr, tcpConn, f.Target)
 	}
 }
 

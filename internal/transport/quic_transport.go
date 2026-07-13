@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -202,4 +203,10 @@ func (c *quicConn) Context() context.Context {
 
 func (c *quicConn) CloseWithError(code uint64, msg string) error {
 	return c.c.CloseWithError(quic.ApplicationErrorCode(code), msg)
+}
+
+// PeerCertificates returns the verified peer certificate chain from the QUIC
+// connection's completed TLS handshake (leaf first).
+func (c *quicConn) PeerCertificates() []*x509.Certificate {
+	return c.c.ConnectionState().TLS.PeerCertificates
 }

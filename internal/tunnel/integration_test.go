@@ -9,14 +9,18 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/probe"
+	"github.com/mauriciomem/quic-link/internal/proto"
+	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
@@ -58,7 +62,8 @@ func TestTunnelRoundTrip(t *testing.T) {
 	go runEchoServer(echoLn)
 
 	// Start the QUIC serve tunnel.
-	serverAddr := mustStartServe(t, ctx, serverTLS, echoLn.Addr().String())
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 
 	// Start the QUIC connect tunnel (exposes a local TCP port).
 	localLn := mustStartConnect(t, ctx, clientTLS, serverAddr, "ssh")
@@ -117,7 +122,8 @@ func TestUnknownTarget(t *testing.T) {
 	t.Cleanup(func() { echoLn.Close() })
 	go runEchoServer(echoLn)
 
-	serverAddr := mustStartServe(t, ctx, serverTLS, echoLn.Addr().String())
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 	// Client names a target the agent does not serve.
 	localLn := mustStartConnect(t, ctx, clientTLS, serverAddr, "bogus")
 
@@ -162,7 +168,8 @@ func TestPingNonZeroRTT(t *testing.T) {
 	t.Cleanup(func() { echoLn.Close() })
 	go runEchoServer(echoLn)
 
-	serverAddr := mustStartServe(t, ctx, serverTLS, echoLn.Addr().String())
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 
 	// Create a fresh client transport for the ping probe.
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
@@ -222,7 +229,8 @@ func TestMTLSRejection(t *testing.T) {
 	t.Cleanup(func() { echoLn.Close() })
 	go runEchoServer(echoLn)
 
-	serverAddr := mustStartServe(t, ctx, serverTLS, echoLn.Addr().String())
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 
 	// Client uses a cert from a DIFFERENT, untrusted CA.
 	untrustedCA, untrustedKey := mustGenCA(t)
@@ -278,9 +286,9 @@ func TestMTLSRejection(t *testing.T) {
 
 // ---- test helpers ------------------------------------------------------------
 
-// mustStartServe starts a QUIC serve tunnel and returns the server's UDP addr
-// string (host:port). Cleanup is registered with t.
-func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, serviceAddr string) string {
+// mustStartServe starts a QUIC serve tunnel backed by rtr and returns the
+// server's UDP addr string (host:port). Cleanup is registered with t.
+func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, rtr *router.Router) string {
 	t.Helper()
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
@@ -300,12 +308,23 @@ func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, serv
 	}
 	t.Cleanup(func() { ln.Close() })
 
-	go tunnel.Serve(ctx, ln, serviceAddr) //nolint:errcheck
+	go tunnel.Serve(ctx, ln, rtr) //nolint:errcheck
 	return ln.Addr().String()
 }
 
-// mustStartConnect starts a QUIC connect tunnel and returns the local TCP
-// Listener (port is ephemeral). Cleanup is registered with t.
+// mustRouter builds a Router from overrides+policy or fails the test.
+func mustRouter(t *testing.T, overrides map[string]string, policy router.Policy) *router.Router {
+	t.Helper()
+	r, err := router.New(overrides, policy)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	return r
+}
+
+// mustStartConnect starts a QUIC connect tunnel with a single forward and
+// returns the local TCP Listener (port is ephemeral). Cleanup is registered
+// with t.
 func mustStartConnect(t *testing.T, ctx context.Context, tlsConf *tls.Config, serverAddr, target string) net.Listener {
 	t.Helper()
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
@@ -326,7 +345,7 @@ func mustStartConnect(t *testing.T, ctx context.Context, tlsConf *tls.Config, se
 	}
 	t.Cleanup(func() { localLn.Close() })
 
-	go tunnel.Connect(ctx, tr, serverAddr, target, localLn) //nolint:errcheck
+	go tunnel.Connect(ctx, tr, serverAddr, []tunnel.Forward{{Listener: localLn, Target: target}}) //nolint:errcheck
 	return localLn
 }
 
@@ -485,7 +504,8 @@ func TestReconnectSoak(t *testing.T) {
 	trackedLn := &trackingListener{inner: innerLn, conns: serverConns}
 
 	// Start the serve tunnel with the tracking listener.
-	go tunnel.Serve(ctx, trackedLn, echoLn.Addr().String()) //nolint:errcheck
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	go tunnel.Serve(ctx, trackedLn, rtr) //nolint:errcheck
 
 	// Start the connect tunnel (client side).
 	localLn := mustStartConnect(t, ctx, clientTLS, innerLn.Addr().String(), "ssh")
@@ -581,3 +601,145 @@ func (l *trackingListener) Accept(ctx context.Context) (transport.Conn, error) {
 
 func (l *trackingListener) Addr() net.Addr { return l.inner.Addr() }
 func (l *trackingListener) Close() error   { return l.inner.Close() }
+
+// ---- wire-level tests --------------------------------------------------------
+
+// mustClientTLS builds a standard loopback client tls.Config from a CA pool and
+// a client leaf certificate.
+func mustClientTLS(caPool *x509.CertPool, clientCert tls.Certificate) *tls.Config {
+	return &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		RootCAs:      caPool,
+		ServerName:   "127.0.0.1",
+		NextProtos:   []string{transport.ALPN},
+	}
+}
+
+// mustServerTLS builds a standard loopback server tls.Config that requires and
+// verifies a client certificate.
+func mustServerTLS(caPool *x509.CertPool, serverCert tls.Certificate) *tls.Config {
+	return &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		NextProtos:   []string{transport.ALPN},
+	}
+}
+
+// openClientStream dials the agent directly, opens one stream carrying h, and
+// returns the stream plus the agent's response frame. Cleanup is registered
+// with t.
+func openClientStream(t *testing.T, ctx context.Context, tlsConf *tls.Config, serverAddr string, h proto.Header) (transport.Stream, proto.Response) {
+	t.Helper()
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("client UDP: %v", err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+	tr, err := transport.NewQUICTransport(udpConn, tlsConf, nil)
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	t.Cleanup(func() { tr.Close() })
+	conn, err := tr.Dial(ctx, serverAddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { conn.CloseWithError(0, "test done") }) //nolint:errcheck
+	stream, err := conn.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	if err := proto.WriteHeader(stream, h); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	resp, err := proto.ReadResponse(stream)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return stream, resp
+}
+
+// TestWireUnknownTarget verifies that a target absent from the route table
+// yields status 1 (unknown_target) on the wire.
+func TestWireUnknownTarget(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	caCert, caKey := mustGenCA(t)
+	caPool := mustPool(t, caCert)
+	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
+	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+
+	_, resp := openClientStream(t, ctx, clientTLS, serverAddr, proto.Header{Kind: proto.KindTCP, Target: "bogus"})
+	if resp.Status != proto.StatusUnknownTarget {
+		t.Fatalf("got status %v, want unknown_target (1)", resp.Status)
+	}
+}
+
+// TestWireUnauthorized verifies that an injected deny policy yields status 2
+// (unauthorized) on the wire — the mandatory authz check-point (INV-3).
+func TestWireUnauthorized(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	caCert, caKey := mustGenCA(t)
+	caPool := mustPool(t, caCert)
+	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
+	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+
+	deny := router.PolicyFunc(func(router.Identity, proto.Header) error { return errors.New("test deny") })
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, deny)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+
+	_, resp := openClientStream(t, ctx, clientTLS, serverAddr, proto.Header{Kind: proto.KindTCP, Target: "ssh"})
+	if resp.Status != proto.StatusUnauthorized {
+		t.Fatalf("got status %v, want unauthorized (2)", resp.Status)
+	}
+}
+
+// TestWireDockerUnixRoundTrip verifies unix-socket dialing: a "docker" target
+// routed to a unix-socket echo server returns status 0 and round-trips bytes.
+func TestWireDockerUnixRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	caCert, caKey := mustGenCA(t)
+	caPool := mustPool(t, caCert)
+	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
+	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+
+	sockPath := filepath.Join(t.TempDir(), "d.sock")
+	unixLn, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("unix listen: %v", err)
+	}
+	t.Cleanup(func() { unixLn.Close() })
+	go runEchoServer(unixLn)
+
+	rtr := mustRouter(t, map[string]string{"docker": "unix://" + sockPath}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+
+	stream, resp := openClientStream(t, ctx, clientTLS, serverAddr, proto.Header{Kind: proto.KindTCP, Target: "docker"})
+	if resp.Status != proto.StatusOK {
+		t.Fatalf("got status %v, want ok (0)", resp.Status)
+	}
+
+	payload := []byte("docker-through-unix")
+	if _, err := stream.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(stream, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo mismatch: got %q want %q", got, payload)
+	}
+}

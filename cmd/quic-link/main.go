@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/probe"
+	"github.com/mauriciomem/quic-link/internal/proto"
+	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
@@ -82,7 +84,8 @@ func main() {
 func runServe(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := fs.String("listen", ":443", "UDP address to listen on")
-	serviceAddr := fs.String("service-addr", "127.0.0.1:22", "TCP address of the upstream service")
+	serviceAddr := fs.String("service-addr", "127.0.0.1:22", "TCP address of the ssh service (host:port)")
+	dockerAddr := fs.String("docker-addr", "unix:///var/run/docker.sock", "docker daemon address (unix:///path or tcp://host:port)")
 	certFile := fs.String("cert", "", "Path to server TLS certificate (PEM)")
 	keyFile := fs.String("key", "", "Path to server TLS private key (PEM)")
 	clientCA := fs.String("client-ca", "", "Path to CA certificate used to verify client certs (PEM)")
@@ -101,6 +104,14 @@ func runServe(ctx context.Context, args []string) error {
 	tlsConf, err := buildServerTLS(*certFile, *keyFile, *clientCA)
 	if err != nil {
 		return fmt.Errorf("TLS config: %w", err)
+	}
+
+	rtr, err := router.New(map[string]string{
+		"ssh":    "tcp://" + *serviceAddr,
+		"docker": *dockerAddr,
+	}, router.AllowAll{})
+	if err != nil {
+		return fmt.Errorf("router: %w", err)
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", *listen)
@@ -125,16 +136,17 @@ func runServe(ctx context.Context, args []string) error {
 	}
 	defer ln.Close()
 
-	slog.Info("quic-link serve ready", "listen", ln.Addr(), "service", *serviceAddr)
-	return tunnel.Serve(ctx, ln, *serviceAddr)
+	slog.Info("quic-link serve ready", "listen", ln.Addr(), "targets", rtr.Targets())
+	return tunnel.Serve(ctx, ln, rtr)
 }
 
 // runConnect implements the connect subcommand.
 func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	server := fs.String("server", "", "host:port of the quic-link server")
-	local := fs.String("local", "127.0.0.1:2222", "local TCP address to expose")
-	target := fs.String("target", "ssh", "logical target name to request from the agent (currently only \"ssh\" is supported)")
+	local := fs.String("local", "127.0.0.1:2222", "local TCP address for the ssh target")
+	localDocker := fs.String("local-docker", "127.0.0.1:2375", "local TCP address for the docker target")
+	sshTarget := fs.String("ssh-target", "ssh", "logical target for the --local port (advanced; for manual unknown-target checks)")
 	certFile := fs.String("cert", "", "Path to client TLS certificate (PEM)")
 	keyFile := fs.String("key", "", "Path to client TLS private key (PEM)")
 	serverCA := fs.String("server-ca", "", "Path to CA certificate used to verify the server (PEM)")
@@ -171,17 +183,28 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 	defer t.Close()
 
-	localLn, err := net.Listen("tcp", *local)
+	sshLn, err := net.Listen("tcp", *local)
 	if err != nil {
-		return fmt.Errorf("local listen %s: %w", *local, err)
+		return fmt.Errorf("bind ssh port %s: %w", *local, err)
 	}
-	defer localLn.Close()
+	defer sshLn.Close()
+
+	dockerLn, err := net.Listen("tcp", *localDocker)
+	if err != nil {
+		return fmt.Errorf("bind docker port %s: %w", *localDocker, err)
+	}
+	defer dockerLn.Close()
 
 	slog.Info("quic-link connect ready",
-		"local", localLn.Addr(),
+		"ssh_local", sshLn.Addr(),
+		"docker_local", dockerLn.Addr(),
 		"server", *server,
 	)
-	return tunnel.Connect(ctx, t, *server, *target, localLn)
+	forwards := []tunnel.Forward{
+		{Listener: sshLn, Target: *sshTarget},
+		{Listener: dockerLn, Target: "docker"},
+	}
+	return tunnel.Connect(ctx, t, *server, forwards)
 }
 
 // runPing implements the ping subcommand.
@@ -267,6 +290,25 @@ func runPing(ctx context.Context, args []string) error {
 }
 
 // ---- TLS helpers ---------------------------------------------------------------
+
+// exitCodeForStatus maps an agent response status to a process exit code per
+// the 06 §Global exit-code CONTRACT (INV-9): 0 ok · 4 auth/authz failure · 5
+// remote refused (unknown target, dial failed, draining) · 1 anything
+// unexpected. No verb consumes it yet — the stdio plumbing verb wires it in at
+// 1a.5 — but the mapping is a locked contract, so it lands with the codes it
+// names rather than being invented later.
+func exitCodeForStatus(s proto.Status) int {
+	switch s {
+	case proto.StatusOK:
+		return 0
+	case proto.StatusUnauthorized:
+		return 4
+	case proto.StatusUnknownTarget, proto.StatusDialFailed, proto.StatusDraining:
+		return 5
+	default:
+		return 1
+	}
+}
 
 // buildServerTLS creates a tls.Config for the server side:
 // presents a certificate, requires and verifies the client certificate.
