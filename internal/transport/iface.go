@@ -67,7 +67,7 @@ type Conn interface {
 	CloseWithError(code uint64, msg string) error
 	// PeerCertificates returns the verified peer certificate chain from the
 	// completed TLS handshake (leaf first). Empty if the peer presented no
-	// certificate. The agent derives the peer Identity from it (INV-3).
+	// certificate. The agent derives the peer Identity from it.
 	PeerCertificates() []*x509.Certificate
 }
 

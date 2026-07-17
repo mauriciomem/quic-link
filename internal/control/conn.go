@@ -1,8 +1,8 @@
-// Package control implements the quic-link control plane: gRPC (02 §6) served
-// over the single per-session control stream. It provides the net.Conn adapter
-// that lets gRPC run its HTTP/2 framing over one QUIC stream, a
-// single-connection net.Listener for the agent-side gRPC server, and the
-// server/client wiring for the Control service.
+// Package control implements the quic-link control plane: gRPC served over the
+// single per-session control stream. It provides the net.Conn adapter that lets
+// gRPC run its HTTP/2 framing over one QUIC stream, a single-connection
+// net.Listener for the agent-side gRPC server, and the server/client wiring for
+// the Control service.
 package control
 
 import (
@@ -30,7 +30,7 @@ type deadliner interface {
 }
 
 // streamConn adapts a transport.Stream to net.Conn so gRPC can run its HTTP/2
-// framing over a single QUIC stream (02 §6). Deadlines are delegated to the
+// framing over a single QUIC stream. Deadlines are delegated to the
 // stream when it supports them; otherwise they are no-ops, which is safe
 // because gRPC drives its own timeouts via context and keepalive PINGs.
 type streamConn struct {

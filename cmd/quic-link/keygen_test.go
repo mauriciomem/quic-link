@@ -101,7 +101,7 @@ func TestDefaultKeyPath(t *testing.T) {
 }
 
 // readMetaCreated parses the created = "..." RFC3339 value from a key.pem.meta
-// sidecar without pulling in a TOML dependency (the loader arrives at 1a.5).
+// sidecar without pulling in a TOML dependency.
 func readMetaCreated(t *testing.T, path string) time.Time {
 	t.Helper()
 	data, err := os.ReadFile(path)

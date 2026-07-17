@@ -20,10 +20,10 @@ import (
 const (
 	// controlOpenDeadline bounds how long after a session is established the
 	// client may take to open its control stream. Past it, the agent closes
-	// the session with 0x03 (02 §2.4).
+	// the session with 0x03.
 	controlOpenDeadline = 5 * time.Second
-	// agentVersionMsg is carried in the control stream's ok response (02 §2.4).
-	// Placeholder until the build version is wired through in 1a.5.
+	// agentVersionMsg is carried in the control stream's ok response.
+	// TODO: replace with the build version once it is wired through.
 	agentVersionMsg = "quic-link agent"
 )
 
@@ -47,14 +47,16 @@ func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router) error
 	}
 }
 
-// serveConn derives the peer identity once (INV-3) and handles all streams on a
+// serveConn derives the peer identity once and handles all streams on a
 // single accepted QUIC connection. It also enforces the control-stream open
-// deadline (02 §2.4): if the client does not open a control stream within
+// deadline: if the client does not open a control stream within
 // controlOpenDeadline, the session is closed with 0x03.
 func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router) {
 	peer, err := router.IdentityFromCerts(conn.PeerCertificates())
 	if err != nil {
-		// No authenticated identity: refuse the whole connection.
+		// Should be unreachable: the pinning handshake already requires a client
+		// certificate, so a peer without one never completes a connection. Kept
+		// as defense-in-depth.
 		_ = conn.CloseWithError(0x02, "no peer identity")
 		return
 	}
@@ -127,10 +129,10 @@ func serveStream(
 	return nil
 }
 
-// serveControl handles the single per-session control stream (02 §4.3/§6): it
+// serveControl handles the single per-session control stream: it
 // validates the control proto version, enforces exactly-one-per-session, replies
 // ok, and then serves gRPC until the stream closes — at which point the whole
-// session is torn down (02 §5: control-stream closure is session death).
+// session is torn down (control-stream closure is session death).
 func serveControl(
 	ctx context.Context,
 	conn transport.Conn,
@@ -150,7 +152,7 @@ func serveControl(
 		return nil
 	}
 	if !cs.markOpen() {
-		// A control stream is already open on this session (02 §4.3).
+		// A control stream is already open on this session.
 		_ = proto.WriteResponse(stream, proto.Response{
 			Status: proto.StatusBadHeader,
 			Msg:    "control stream already open",

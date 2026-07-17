@@ -5,12 +5,11 @@ package quiclink.v1;
 option go_package = "github.com/mauriciomem/quic-link/internal/control/proto;controlpb";
 
 // Control is the agent's management plane, served over the single per-session
-// control stream (02 §6). Ping lands in Phase 1a; GetStatus in Phase 1b.
-// Additive changes (new RPCs/fields) do NOT bump the wire ProtoVersion;
-// changing an existing field's semantics does (INV-5).
+// control stream. Additive changes (new RPCs/fields) do NOT bump the wire
+// ProtoVersion; changing an existing field's semantics does.
 service Control {
-  rpc Ping(PingRequest) returns (PingResponse);                 // Phase 1a
-  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);  // Phase 1b
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);  // not yet implemented
 }
 
 message PingRequest {

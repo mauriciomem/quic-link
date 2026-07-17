@@ -30,7 +30,7 @@ type Result struct {
 	// LatestRTT is the most recent RTT sample (RFC 9002).
 	LatestRTT time.Duration
 	// RPCRoundTrip is the application-level round-trip of a control-stream
-	// Ping RPC (02 §6). It includes gRPC/HTTP2 encoding and agent scheduling,
+	// Ping RPC. It includes gRPC/HTTP2 encoding and agent scheduling,
 	// so it is always >= the transport RTT. Zero if RPCErr is non-nil.
 	RPCRoundTrip time.Duration
 	// RPCErr records why the control-stream Ping failed, if it did. The
@@ -70,7 +70,7 @@ func Ping(ctx context.Context, t transport.Transport, serverAddr string) (*Resul
 		LatestRTT:     stats.LatestRTT,
 	}
 
-	// Application round-trip over the control stream (02 §6). control.Open
+	// Application round-trip over the control stream. control.Open
 	// already issues one establishing Ping; a second, timed Ping isolates the
 	// steady-state RPC latency.
 	client, err := control.Open(ctx, conn, "quic-link ping")

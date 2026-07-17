@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"net"
@@ -16,7 +17,7 @@ import (
 	"time"
 )
 
-// TestPinEquality asserts the critical invariant (02 §2.2): for one key, the pin
+// TestPinEquality asserts the critical invariant: for one key, the pin
 // computed from its public key, from a carrier certificate over it, and from
 // keygen's PinForKey are all identical. This is what makes "keygen prints pin X"
 // and "peer computed pin X from the carrier" the same value.
@@ -117,11 +118,28 @@ func TestParsePin(t *testing.T) {
 			t.Fatalf("ParsePin(%q): want error, got nil", bad)
 		}
 	}
+
+	// A non-canonical base64 spelling (trailing bits set) of a valid 32-byte
+	// digest must normalize to the canonical pin, so it still matches the pin
+	// computed during the handshake.
+	zeros := make([]byte, 32)
+	canonical := base64.StdEncoding.EncodeToString(zeros)
+	nonCanonical := canonical[:len(canonical)-2] + "B" + canonical[len(canonical)-1:]
+	if nonCanonical == canonical {
+		t.Fatal("test setup: non-canonical variant equals canonical")
+	}
+	got, err := ParsePin(nonCanonical)
+	if err != nil {
+		t.Fatalf("ParsePin(non-canonical): %v", err)
+	}
+	if got != canonical {
+		t.Fatalf("ParsePin did not canonicalize: %q -> %q, want %q", nonCanonical, got, canonical)
+	}
 }
 
-// TestPinningHandshake verifies at the TLS layer (over net.Pipe) that a mutual
-// pinning handshake succeeds iff both sides' pins match, and that a mismatch on
-// either side aborts with ErrPinMismatch.
+// TestPinningHandshake verifies at the TLS layer (over a loopback TCP
+// connection) that a mutual pinning handshake succeeds iff both sides' pins
+// match, and that a mismatch on either side aborts the handshake.
 func TestPinningHandshake(t *testing.T) {
 	serverKey, err := Generate()
 	if err != nil {
@@ -205,7 +223,7 @@ func TestPinningHandshake(t *testing.T) {
 func TestServerTLSRejectsEmptyAuthorized(t *testing.T) {
 	key := mustKey(t)
 	if _, err := ServerTLS(key, nil); err == nil {
-		t.Fatal("ServerTLS accepted an empty authorized set (INV-3)")
+		t.Fatal("ServerTLS accepted an empty authorized set")
 	}
 }
 

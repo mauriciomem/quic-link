@@ -13,10 +13,21 @@ import (
 )
 
 // ErrAuthFailed is a typed sentinel wrapped by classifyDialError when the peer
-// rejects the pinning handshake (02 §2.2). main() maps it to exit 4
-// (authentication/authorization failure, 06 §Global). A wrong pin never
-// self-heals, so the reconnect loop treats it as non-retriable.
+// rejects the pinning handshake. main() maps it to the authentication-failure
+// exit code. A wrong pin never self-heals, so the reconnect loop treats it as
+// non-retriable.
 var ErrAuthFailed = errors.New("transport: peer authentication failed (pin rejected)")
+
+// TLS alerts map to QUIC transport error codes 0x100 + alert (RFC 9001).
+const (
+	// tlsAlertBase is the offset QUIC adds to a TLS alert number.
+	tlsAlertBase = 0x100
+	// tlsAlertMax is the top of the TLS-alert code range.
+	tlsAlertMax = 0x1ff
+	// alertNoAppProtocol is 0x100 + no_application_protocol (alert 120): the
+	// peers negotiated different ALPN identifiers, i.e. mismatched versions.
+	alertNoAppProtocol = 0x178
+)
 
 // defaultQUICConfig returns the recommended quic.Config for quic-link.
 // DPLPMTUD (RFC 8899) remains enabled (DisablePathMTUDiscovery is false).
@@ -88,8 +99,8 @@ func (t *QUICTransport) Close() error {
 
 // classifyDialError wraps connection-setup errors with actionable messages:
 //   - HandshakeTimeoutError  → UDP likely blocked by firewall
-//   - TransportError 0x178   → ALPN/version mismatch (rebuild both binaries)
-//   - TransportError 0x100–0x1ff → pin rejected (wraps ErrAuthFailed → exit 4)
+//   - TransportError alertNoAppProtocol → ALPN/version mismatch (rebuild both)
+//   - TransportError in the TLS-alert range → pin rejected (wraps ErrAuthFailed)
 //   - ConnectionRefused → server actively refused (may be a pin mismatch)
 func classifyDialError(err error) error {
 	var handshakeTimeout *quic.HandshakeTimeoutError
@@ -100,23 +111,21 @@ func classifyDialError(err error) error {
 	}
 	var transportErr *quic.TransportError
 	if errors.As(err, &transportErr) {
-		// TLS alerts map to QUIC codes 0x100+alert (RFC 9001).
-		// no_application_protocol (alert 120) → 0x178 means the peers' ALPN
-		// identifiers differ — almost always mismatched binary versions
-		// (e.g. one still speaks quic-link/0). Name it distinctly so the
-		// operator rebuilds both binaries instead of chasing pins. This is a
-		// real, distinct failure — NOT an auth error (INV-5).
-		if transportErr.ErrorCode == 0x178 {
+		// A differing ALPN identifier fails the handshake with
+		// no_application_protocol — almost always mismatched binary versions.
+		// Name it distinctly so the operator rebuilds both binaries instead of
+		// chasing pins. This is a real, distinct failure — not an auth error.
+		if transportErr.ErrorCode == alertNoAppProtocol {
 			return fmt.Errorf(
 				"protocol/version mismatch (TLS alert no_application_protocol"+
 					" 0x178; client and server ALPN differ — rebuild both"+
 					" binaries from the same version): %w", err)
 		}
-		// Other TLS alert errors land in [0x100, 0x1ff] per RFC 9001. Under
-		// raw-public-key pinning (02 §2.2) this is the peer rejecting the pin
-		// (e.g. bad_certificate from our VerifyPeerCertificate callback). Wrap
-		// ErrAuthFailed so main() exits 4 and the reconnect loop stops retrying.
-		if transportErr.ErrorCode >= 0x100 && transportErr.ErrorCode <= 0x1ff {
+		// Any other TLS alert (RFC 9001) under raw-public-key pinning is the
+		// peer rejecting the pin (e.g. bad_certificate from our
+		// VerifyPeerCertificate callback). Wrap ErrAuthFailed so main() exits
+		// with the auth-failure code and the reconnect loop stops retrying.
+		if transportErr.ErrorCode >= tlsAlertBase && transportErr.ErrorCode <= tlsAlertMax {
 			return fmt.Errorf(
 				"%w (TLS error 0x%x; the peer pin was not accepted — verify"+
 					" --pin (client) and --authorized-client (agent) on both"+

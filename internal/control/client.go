@@ -42,8 +42,8 @@ func (c *Client) PingRTT(ctx context.Context) (time.Duration, error) {
 
 // NewClient builds a Control client that speaks gRPC over the given control
 // stream. The stream MUST already be past its header/response handshake (the
-// remaining bytes are the HTTP/2 byte stream, 02 §6). TLS is provided by the
-// QUIC layer, so the gRPC transport itself is insecure.
+// remaining bytes are the HTTP/2 byte stream). TLS is provided by the QUIC
+// layer, so the gRPC transport itself is insecure.
 func NewClient(stream transport.Stream) (*Client, error) {
 	conn := NewConn(stream)
 	used := false

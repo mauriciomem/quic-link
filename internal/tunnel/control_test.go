@@ -69,7 +69,7 @@ func TestControlPingE2E(t *testing.T) {
 }
 
 // TestControlSecondStreamRejected verifies that a second control stream on the
-// same session is refused with status 5 (02 §4.3).
+// same session is refused with status 5.
 func TestControlSecondStreamRejected(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -113,7 +113,7 @@ func TestControlSecondStreamRejected(t *testing.T) {
 }
 
 // TestControlBadProto verifies that a control header with proto != "1" yields
-// status 6 and the agent closes the session (02 §2.4).
+// status 6 and the agent closes the session.
 func TestControlBadProto(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

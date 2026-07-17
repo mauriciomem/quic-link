@@ -28,9 +28,8 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // Control is the agent's management plane, served over the single per-session
-// control stream (02 §6). Ping lands in Phase 1a; GetStatus in Phase 1b.
-// Additive changes (new RPCs/fields) do NOT bump the wire ProtoVersion;
-// changing an existing field's semantics does (INV-5).
+// control stream. Additive changes (new RPCs/fields) do NOT bump the wire
+// ProtoVersion; changing an existing field's semantics does.
 type ControlClient interface {
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingResponse, error)
 	GetStatus(ctx context.Context, in *GetStatusRequest, opts ...grpc.CallOption) (*GetStatusResponse, error)
@@ -69,9 +68,8 @@ func (c *controlClient) GetStatus(ctx context.Context, in *GetStatusRequest, opt
 // for forward compatibility.
 //
 // Control is the agent's management plane, served over the single per-session
-// control stream (02 §6). Ping lands in Phase 1a; GetStatus in Phase 1b.
-// Additive changes (new RPCs/fields) do NOT bump the wire ProtoVersion;
-// changing an existing field's semantics does (INV-5).
+// control stream. Additive changes (new RPCs/fields) do NOT bump the wire
+// ProtoVersion; changing an existing field's semantics does.
 type ControlServer interface {
 	Ping(context.Context, *PingRequest) (*PingResponse, error)
 	GetStatus(context.Context, *GetStatusRequest) (*GetStatusResponse, error)

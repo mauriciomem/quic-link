@@ -6,13 +6,14 @@
 //	quic-link connect -- QUIC client; exposes the tunnel as a local TCP port
 //	quic-link ping    -- measures handshake time and RTT to a server
 //
-// Authentication is mutual raw-public-key pinning (ADR-0004, 02 §2.2): each end
-// holds an Ed25519 key (quic-link keygen), exchanges pins out of band, and
-// verifies the peer's pin during the TLS handshake. There are no CA files.
+// Authentication is mutual raw-public-key pinning: each end holds an Ed25519 key
+// (quic-link keygen), exchanges pins out of band, and verifies the peer's pin
+// during the TLS handshake. There are no CA files.
 package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -60,8 +61,8 @@ Examples:
   quic-link ping --server myserver.example.com:443 --count 5 --pin <server-pin>
 `
 
-// errUsage marks an error as a usage/validation failure so main() exits 2
-// (06 §Global: exit 2 = usage error).
+// errUsage marks an error as a usage/validation failure so main() exits with
+// the usage-error code (2).
 var errUsage = errors.New("usage error")
 
 func usageErrorf(format string, args ...any) error {
@@ -70,8 +71,8 @@ func usageErrorf(format string, args ...any) error {
 
 // defaultKeyPath resolves ~/.config/quic-link/key.pem on EVERY OS. It uses
 // os.UserHomeDir, NOT os.UserConfigDir (which on macOS returns
-// ~/Library/Application Support — 05 §4 mandates the same ~/.config scheme
-// everywhere).
+// ~/Library/Application Support) — the same ~/.config scheme is used on every
+// platform.
 func defaultKeyPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -108,6 +109,20 @@ func (p *pinList) Set(v string) error {
 	return nil
 }
 
+// clientTLSFromFlags loads the Ed25519 identity key and builds the client-side
+// pinning tls.Config for the expected server pin. Shared by connect and ping.
+func clientTLSFromFlags(keyFile, serverPin string) (*tls.Config, error) {
+	key, err := identity.LoadKey(expandTilde(keyFile))
+	if err != nil {
+		return nil, fmt.Errorf("load identity key: %w", err)
+	}
+	tlsConf, err := identity.ClientTLS(key, serverPin)
+	if err != nil {
+		return nil, fmt.Errorf("TLS config: %w", err)
+	}
+	return tlsConf, nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usageText)
@@ -140,9 +155,8 @@ func main() {
 	}
 }
 
-// exitCodeForError maps a fatal error to a process exit code per 06 §Global:
+// exitCodeForError maps a fatal error to a process exit code:
 // 2 usage error · 4 authentication/authorization failure · 1 anything else.
-// (Full status-driven exit-code wiring for stdio is 1a.5.)
 func exitCodeForError(err error) int {
 	switch {
 	case errors.Is(err, transport.ErrAuthFailed):
@@ -156,9 +170,9 @@ func exitCodeForError(err error) int {
 
 // runKeygen implements the keygen subcommand: create an Ed25519 identity if
 // absent (idempotent — an existing key prints its pin and exits 0; --force
-// rotates with a warning) and print the CONTRACT line "pin: <base64>" last
-// (06 §Phase-1a). It also writes the "<key>.meta" creation-time sidecar
-// (ADR-0004 "Key age"). It creates only quic-link's own files (INV-2).
+// rotates with a warning) and print the CONTRACT line "pin: <base64>" last.
+// It also writes the "<key>.meta" creation-time sidecar. It creates only
+// quic-link's own files.
 func runKeygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
 	out := fs.String("out", defaultKeyPath(), "path to the Ed25519 identity key (PKCS#8 PEM)")
@@ -228,15 +242,14 @@ func runServe(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	// INV-3: no unauthenticated listener. An empty authorized set is a usage
-	// error (exit 2).
+	// No unauthenticated listener: an empty authorized set is a usage error.
 	if len(authorized) == 0 {
 		fs.Usage()
-		return usageErrorf("at least one --authorized-client pin is required (INV-3)")
+		return usageErrorf("at least one --authorized-client pin is required")
 	}
 
 	// Authentication (the pinning handshake) is enforced here; authorization
-	// (the router policy) stays allow-all per ADR-0008 — two separate gates.
+	// (the router policy) stays allow-all — two separate gates.
 	key, err := identity.LoadKey(expandTilde(*keyFile))
 	if err != nil {
 		return fmt.Errorf("load identity key: %w", err)
@@ -311,13 +324,9 @@ func runConnect(ctx context.Context, args []string) error {
 		return usageErrorf("--pin is required and must be a valid pin: %v", err)
 	}
 
-	key, err := identity.LoadKey(expandTilde(*keyFile))
+	tlsConf, err := clientTLSFromFlags(*keyFile, serverPin)
 	if err != nil {
-		return fmt.Errorf("load identity key: %w", err)
-	}
-	tlsConf, err := identity.ClientTLS(key, serverPin)
-	if err != nil {
-		return fmt.Errorf("TLS config: %w", err)
+		return err
 	}
 
 	// Ephemeral IPv4 UDP port for outbound QUIC (any available local port).
@@ -384,13 +393,9 @@ func runPing(ctx context.Context, args []string) error {
 		return usageErrorf("--pin is required and must be a valid pin: %v", err)
 	}
 
-	key, err := identity.LoadKey(expandTilde(*keyFile))
+	tlsConf, err := clientTLSFromFlags(*keyFile, serverPin)
 	if err != nil {
-		return fmt.Errorf("load identity key: %w", err)
-	}
-	tlsConf, err := identity.ClientTLS(key, serverPin)
-	if err != nil {
-		return fmt.Errorf("TLS config: %w", err)
+		return err
 	}
 
 	var (
@@ -437,7 +442,7 @@ func runPing(ctx context.Context, args []string) error {
 			res.LatestRTT.Round(time.Microsecond),
 		)
 		// Application-level control-stream RPC round-trip, labeled distinctly
-		// from the transport RTT (02 §6). A control failure is non-fatal: the
+		// from the transport RTT. A control failure is non-fatal: the
 		// transport numbers above are still meaningful.
 		if res.RPCErr != nil {
 			fmt.Printf("           control_rpc: FAILED (%v)\n", res.RPCErr)
@@ -479,12 +484,10 @@ func runPing(ctx context.Context, args []string) error {
 
 // ---- exit-code mapping ---------------------------------------------------------
 
-// exitCodeForStatus maps an agent response status to a process exit code per
-// the 06 §Global exit-code CONTRACT (INV-9): 0 ok · 4 auth/authz failure · 5
-// remote refused (unknown target, dial failed, draining) · 1 anything
-// unexpected. No verb consumes it yet — the stdio plumbing verb wires it in at
-// 1a.5 — but the mapping is a locked contract, so it lands with the codes it
-// names rather than being invented later.
+// exitCodeForStatus maps an agent response status to a process exit code:
+// 0 ok · 4 auth/authz failure · 5 remote refused (unknown target, dial failed,
+// draining) · 1 anything unexpected. No verb consumes it yet, but the mapping is
+// a locked contract, so it lands with the codes it names.
 func exitCodeForStatus(s proto.Status) int {
 	switch s {
 	case proto.StatusOK:

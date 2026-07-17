@@ -158,7 +158,7 @@ func TestPingNonZeroRTT(t *testing.T) {
 }
 
 // TestPinRejection verifies the pinning handshake refuses a peer whose pin is
-// not accepted (02 §2.2, ADR-0004). Two directions:
+// not accepted. Two directions:
 //   - the client expects the WRONG server pin → the CLIENT aborts the handshake
 //     and Dial returns transport.ErrAuthFailed (→ exit 4). Reliable at dial.
 //   - the client's pin is NOT in the agent's authorized set → the SERVER aborts.
@@ -328,7 +328,7 @@ func runEchoServer(ln net.Listener) {
 // ---- pinning identity helpers ------------------------------------------------
 
 // mustGenIdentity generates a fresh Ed25519 identity and returns the key and its
-// pin (02 §2.2). The whole test suite pairs peers by exchanging these pins.
+// pin. The whole test suite pairs peers by exchanging these pins.
 func mustGenIdentity(t *testing.T) (ed25519.PrivateKey, string) {
 	t.Helper()
 	key, err := identity.Generate()
@@ -487,7 +487,7 @@ func (l *trackingListener) Close() error   { return l.inner.Close() }
 // ---- wire-level tests --------------------------------------------------------
 
 // mustClientTLS builds a client pinning tls.Config that presents key's carrier
-// cert and expects the given server pin (02 §2.2).
+// cert and expects the given server pin.
 func mustClientTLS(t *testing.T, key ed25519.PrivateKey, serverPin string) *tls.Config {
 	t.Helper()
 	c, err := identity.ClientTLS(key, serverPin)
@@ -498,7 +498,7 @@ func mustClientTLS(t *testing.T, key ed25519.PrivateKey, serverPin string) *tls.
 }
 
 // mustServerTLS builds an agent pinning tls.Config that presents key's carrier
-// cert and authorizes the given client pins (02 §2.2).
+// cert and authorizes the given client pins.
 func mustServerTLS(t *testing.T, key ed25519.PrivateKey, authorized []string) *tls.Config {
 	t.Helper()
 	c, err := identity.ServerTLS(key, authorized)
@@ -564,7 +564,7 @@ func TestWireUnknownTarget(t *testing.T) {
 }
 
 // TestWireUnauthorized verifies that an injected deny policy yields status 2
-// (unauthorized) on the wire — the mandatory authz check-point (INV-3).
+// (unauthorized) on the wire — the mandatory authorization check-point.
 func TestWireUnauthorized(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

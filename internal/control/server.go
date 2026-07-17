@@ -13,8 +13,9 @@ import (
 )
 
 // server implements controlpb.ControlServer. Ping echoes the client's nonce and
-// stamps the agent's clock; GetStatus is Phase 1b (left Unimplemented for now,
-// so a 1b client gets a clean codes.Unimplemented rather than a broken stream).
+// stamps the agent's clock; GetStatus is not yet implemented (left Unimplemented
+// so a client requesting it gets a clean codes.Unimplemented rather than a
+// broken stream).
 type server struct {
 	controlpb.UnimplementedControlServer
 }
@@ -30,8 +31,8 @@ func (server) Ping(_ context.Context, req *controlpb.PingRequest) (*controlpb.Pi
 }
 
 // connEndWatcher signals done when the single gRPC connection ends, so Serve
-// can return the moment the control stream dies (02 §5: control-stream closure
-// is session death).
+// can return the moment the control stream dies (control-stream closure is
+// session death).
 type connEndWatcher struct {
 	done chan struct{}
 	once sync.Once
@@ -53,7 +54,7 @@ func (w *connEndWatcher) HandleConn(_ context.Context, s stats.ConnStats) {
 // Serve runs a single-connection gRPC server over the control stream and blocks
 // until the stream closes or ctx is cancelled. It always returns nil-or-context
 // error; the important signal to the caller is simply that it RETURNED — the
-// control stream is dead and the session MUST be torn down (02 §5).
+// control stream is dead and the session MUST be torn down.
 func Serve(ctx context.Context, stream transport.Stream) error {
 	watcher := &connEndWatcher{done: make(chan struct{})}
 	gs := grpc.NewServer(grpc.StatsHandler(watcher))

@@ -11,10 +11,10 @@ import (
 
 // Open establishes the session's control stream against an established QUIC
 // connection: it opens a stream, performs the protocol-v1 header/response
-// handshake (02 §2.4, kind "control", meta proto:"1"), builds a gRPC Control
-// client over the post-response bytes, and eagerly brings the HTTP/2 connection
-// up with one Ping (so the agent's transport is live and does not sit waiting
-// for a preface). version is advertised in the header meta.
+// handshake (kind "control", meta proto:"1"), builds a gRPC Control client over
+// the post-response bytes, and eagerly brings the HTTP/2 connection up with one
+// Ping (so the agent's transport is live and does not sit waiting for a
+// preface). version is advertised in the header meta.
 //
 // On any failure the stream is reset and a non-nil error is returned; the
 // caller should treat the session as unusable.

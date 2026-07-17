@@ -14,8 +14,8 @@ import (
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
-// clientVersion is advertised in the control stream header meta (02 §2.4).
-// Placeholder until the build version is wired through in 1a.5.
+// clientVersion is advertised in the control stream header meta.
+// TODO: replace with the build version once it is wired through.
 const clientVersion = "quic-link client"
 
 // Forward binds a local listener to a logical agent target. Connect opens one
@@ -237,8 +237,8 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 
 	conn, err := m.dialWithBackoff(ctx)
 
-	// Open the session's control stream immediately after a successful dial
-	// (02 §2.4): the agent closes the session if it does not arrive in time.
+	// Open the session's control stream immediately after a successful dial:
+	// the agent closes the session if it does not arrive in time.
 	var cclient *control.Client
 	if err == nil {
 		cclient, err = control.Open(ctx, conn, clientVersion)
