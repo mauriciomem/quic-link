@@ -12,6 +12,12 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
+// ErrAuthFailed is a typed sentinel wrapped by classifyDialError when the peer
+// rejects the pinning handshake (02 §2.2). main() maps it to exit 4
+// (authentication/authorization failure, 06 §Global). A wrong pin never
+// self-heals, so the reconnect loop treats it as non-retriable.
+var ErrAuthFailed = errors.New("transport: peer authentication failed (pin rejected)")
+
 // defaultQUICConfig returns the recommended quic.Config for quic-link.
 // DPLPMTUD (RFC 8899) remains enabled (DisablePathMTUDiscovery is false).
 func defaultQUICConfig() *quic.Config {
@@ -83,8 +89,8 @@ func (t *QUICTransport) Close() error {
 // classifyDialError wraps connection-setup errors with actionable messages:
 //   - HandshakeTimeoutError  → UDP likely blocked by firewall
 //   - TransportError 0x178   → ALPN/version mismatch (rebuild both binaries)
-//   - TransportError 0x100–0x1ff → TLS certificate rejected (RFC 9001)
-//   - ConnectionRefused → server actively refused (may be cert rejection)
+//   - TransportError 0x100–0x1ff → pin rejected (wraps ErrAuthFailed → exit 4)
+//   - ConnectionRefused → server actively refused (may be a pin mismatch)
 func classifyDialError(err error) error {
 	var handshakeTimeout *quic.HandshakeTimeoutError
 	if errors.As(err, &handshakeTimeout) {
@@ -98,24 +104,29 @@ func classifyDialError(err error) error {
 		// no_application_protocol (alert 120) → 0x178 means the peers' ALPN
 		// identifiers differ — almost always mismatched binary versions
 		// (e.g. one still speaks quic-link/0). Name it distinctly so the
-		// operator rebuilds both binaries instead of chasing certificates.
+		// operator rebuilds both binaries instead of chasing pins. This is a
+		// real, distinct failure — NOT an auth error (INV-5).
 		if transportErr.ErrorCode == 0x178 {
 			return fmt.Errorf(
 				"protocol/version mismatch (TLS alert no_application_protocol"+
 					" 0x178; client and server ALPN differ — rebuild both"+
 					" binaries from the same version): %w", err)
 		}
-		// Other TLS alert errors land in [0x100, 0x1ff] per RFC 9001.
+		// Other TLS alert errors land in [0x100, 0x1ff] per RFC 9001. Under
+		// raw-public-key pinning (02 §2.2) this is the peer rejecting the pin
+		// (e.g. bad_certificate from our VerifyPeerCertificate callback). Wrap
+		// ErrAuthFailed so main() exits 4 and the reconnect loop stops retrying.
 		if transportErr.ErrorCode >= 0x100 && transportErr.ErrorCode <= 0x1ff {
 			return fmt.Errorf(
-				"auth failed (TLS error 0x%x; ensure the client cert is signed"+
-					" by a CA in the server's --client-ca): %w",
-				uint64(transportErr.ErrorCode), err)
+				"%w (TLS error 0x%x; the peer pin was not accepted — verify"+
+					" --pin (client) and --authorized-client (agent) on both"+
+					" ends): %w",
+				ErrAuthFailed, uint64(transportErr.ErrorCode), err)
 		}
 		if transportErr.ErrorCode == quic.ConnectionRefused {
 			return fmt.Errorf(
 				"connection refused (server rejected the connection;"+
-					" verify --client-ca on the server): %w", err)
+					" verify the pins on both ends): %w", err)
 		}
 	}
 	return err

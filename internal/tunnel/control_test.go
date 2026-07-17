@@ -43,10 +43,10 @@ func TestControlPingE2E(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
-	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
 	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
@@ -75,10 +75,10 @@ func TestControlSecondStreamRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
-	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
 	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
@@ -119,10 +119,10 @@ func TestControlBadProto(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
-	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
 	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)

@@ -1,15 +1,18 @@
 // Command quic-link is a minimal QUIC SSH tunnel.
 // Choose a role with a subcommand:
 //
+//	quic-link keygen  -- generate an Ed25519 identity and print its pin
 //	quic-link serve   -- QUIC server; forwards streams to a TCP service
 //	quic-link connect -- QUIC client; exposes the tunnel as a local TCP port
 //	quic-link ping    -- measures handshake time and RTT to a server
+//
+// Authentication is mutual raw-public-key pinning (ADR-0004, 02 §2.2): each end
+// holds an Ed25519 key (quic-link keygen), exchanges pins out of band, and
+// verifies the peer's pin during the TLS handshake. There are no CA files.
 package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,9 +20,12 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/probe"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/router"
@@ -30,25 +36,77 @@ import (
 const usageText = `quic-link: minimal QUIC SSH tunnel
 
 Subcommands:
+  keygen   Generate an Ed25519 identity key and print its pin.
   serve    Run the QUIC server endpoint (binds a UDP port, forwards to a TCP service).
   connect  Run the local client endpoint (listens on a local TCP port, tunnels to server).
   ping     Measure QUIC handshake time and steady-state RTT to a server.
+
+Pairing (one time per host):
+  quic-link keygen                       # each host: prints "pin: <base64>"
+  # exchange the two pins out of band, then pass them to serve/connect below.
 
 Examples:
   # Server (run on the remote machine, port 443 UDP must be reachable)
   quic-link serve \
     --listen :443 --service-addr 127.0.0.1:22 \
-    --cert server.crt --key server.key --client-ca ca.crt
+    --authorized-client <client-pin>
 
   # Client (run locally, then: ssh -p 2222 user@127.0.0.1)
   quic-link connect \
     --server myserver.example.com:443 --local 127.0.0.1:2222 \
-    --cert client.crt --key client.key --server-ca ca.crt
+    --pin <server-pin>
 
   # Ping
-  quic-link ping --server myserver.example.com:443 --count 5 \
-    --cert client.crt --key client.key --server-ca ca.crt
+  quic-link ping --server myserver.example.com:443 --count 5 --pin <server-pin>
 `
+
+// errUsage marks an error as a usage/validation failure so main() exits 2
+// (06 §Global: exit 2 = usage error).
+var errUsage = errors.New("usage error")
+
+func usageErrorf(format string, args ...any) error {
+	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), errUsage)
+}
+
+// defaultKeyPath resolves ~/.config/quic-link/key.pem on EVERY OS. It uses
+// os.UserHomeDir, NOT os.UserConfigDir (which on macOS returns
+// ~/Library/Application Support — 05 §4 mandates the same ~/.config scheme
+// everywhere).
+func defaultKeyPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "key.pem"
+	}
+	return filepath.Join(home, ".config", "quic-link", "key.pem")
+}
+
+// expandTilde expands a leading ~ or ~/ to the user's home directory.
+func expandTilde(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if p == "~" {
+				return home
+			}
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
+// pinList collects repeatable --authorized-client flags. Each value is
+// validated and normalized via identity.ParsePin as it is set.
+type pinList []string
+
+func (p *pinList) String() string { return strings.Join(*p, ",") }
+
+func (p *pinList) Set(v string) error {
+	norm, err := identity.ParsePin(v)
+	if err != nil {
+		return err
+	}
+	*p = append(*p, norm)
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -61,6 +119,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "keygen":
+		err = runKeygen(os.Args[2:])
 	case "serve":
 		err = runServe(ctx, os.Args[2:])
 	case "connect":
@@ -76,8 +136,80 @@ func main() {
 
 	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("fatal error", "err", err)
-		os.Exit(1)
+		os.Exit(exitCodeForError(err))
 	}
+}
+
+// exitCodeForError maps a fatal error to a process exit code per 06 §Global:
+// 2 usage error · 4 authentication/authorization failure · 1 anything else.
+// (Full status-driven exit-code wiring for stdio is 1a.5.)
+func exitCodeForError(err error) int {
+	switch {
+	case errors.Is(err, transport.ErrAuthFailed):
+		return 4
+	case errors.Is(err, errUsage):
+		return 2
+	default:
+		return 1
+	}
+}
+
+// runKeygen implements the keygen subcommand: create an Ed25519 identity if
+// absent (idempotent — an existing key prints its pin and exits 0; --force
+// rotates with a warning) and print the CONTRACT line "pin: <base64>" last
+// (06 §Phase-1a). It also writes the "<key>.meta" creation-time sidecar
+// (ADR-0004 "Key age"). It creates only quic-link's own files (INV-2).
+func runKeygen(args []string) error {
+	fs := flag.NewFlagSet("keygen", flag.ExitOnError)
+	out := fs.String("out", defaultKeyPath(), "path to the Ed25519 identity key (PKCS#8 PEM)")
+	force := fs.Bool("force", false, "rotate: overwrite an existing key (peers must re-pair)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: quic-link keygen [flags]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	keyPath := expandTilde(*out)
+
+	_, statErr := os.Stat(keyPath)
+	exists := statErr == nil
+
+	if exists && !*force {
+		// Idempotent: print the existing pin, rewrite nothing (rotation must be
+		// explicit). A missing .meta is left missing — do not fabricate a time.
+		key, err := identity.LoadKey(keyPath)
+		if err != nil {
+			return fmt.Errorf("load existing key %s: %w", keyPath, err)
+		}
+		pin, err := identity.PinForKey(key)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("pin: %s\n", pin)
+		return nil
+	}
+
+	if exists && *force {
+		fmt.Fprintln(os.Stderr, "warning: rotating identity; peers must re-pair with the new pin")
+	}
+
+	key, err := identity.Generate()
+	if err != nil {
+		return err
+	}
+	if err := identity.WriteKey(keyPath, key); err != nil {
+		return fmt.Errorf("write key %s: %w", keyPath, err)
+	}
+	if err := identity.WriteMeta(keyPath, time.Now().UTC()); err != nil {
+		return fmt.Errorf("write key metadata: %w", err)
+	}
+	pin, err := identity.PinForKey(key)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pin: %s\n", pin)
+	return nil
 }
 
 // runServe implements the serve subcommand.
@@ -86,9 +218,9 @@ func runServe(ctx context.Context, args []string) error {
 	listen := fs.String("listen", ":443", "UDP address to listen on")
 	serviceAddr := fs.String("service-addr", "127.0.0.1:22", "TCP address of the ssh service (host:port)")
 	dockerAddr := fs.String("docker-addr", "unix:///var/run/docker.sock", "docker daemon address (unix:///path or tcp://host:port)")
-	certFile := fs.String("cert", "", "Path to server TLS certificate (PEM)")
-	keyFile := fs.String("key", "", "Path to server TLS private key (PEM)")
-	clientCA := fs.String("client-ca", "", "Path to CA certificate used to verify client certs (PEM)")
+	keyFile := fs.String("key", defaultKeyPath(), "Path to the Ed25519 identity key (PKCS#8 PEM)")
+	var authorized pinList
+	fs.Var(&authorized, "authorized-client", "authorized client pin (repeatable; at least one required)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: quic-link serve [flags]")
 		fs.PrintDefaults()
@@ -96,12 +228,20 @@ func runServe(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *certFile == "" || *keyFile == "" || *clientCA == "" {
+	// INV-3: no unauthenticated listener. An empty authorized set is a usage
+	// error (exit 2).
+	if len(authorized) == 0 {
 		fs.Usage()
-		return fmt.Errorf("--cert, --key, and --client-ca are all required")
+		return usageErrorf("at least one --authorized-client pin is required (INV-3)")
 	}
 
-	tlsConf, err := buildServerTLS(*certFile, *keyFile, *clientCA)
+	// Authentication (the pinning handshake) is enforced here; authorization
+	// (the router policy) stays allow-all per ADR-0008 — two separate gates.
+	key, err := identity.LoadKey(expandTilde(*keyFile))
+	if err != nil {
+		return fmt.Errorf("load identity key: %w", err)
+	}
+	tlsConf, err := identity.ServerTLS(key, authorized)
 	if err != nil {
 		return fmt.Errorf("TLS config: %w", err)
 	}
@@ -136,7 +276,12 @@ func runServe(ctx context.Context, args []string) error {
 	}
 	defer ln.Close()
 
-	slog.Info("quic-link serve ready", "listen", ln.Addr(), "targets", rtr.Targets())
+	// Log only the COUNT of authorized clients, never the pins.
+	slog.Info("quic-link serve ready",
+		"listen", ln.Addr(),
+		"targets", rtr.Targets(),
+		"authorized_clients", len(authorized),
+	)
 	return tunnel.Serve(ctx, ln, rtr)
 }
 
@@ -147,9 +292,8 @@ func runConnect(ctx context.Context, args []string) error {
 	local := fs.String("local", "127.0.0.1:2222", "local TCP address for the ssh target")
 	localDocker := fs.String("local-docker", "127.0.0.1:2375", "local TCP address for the docker target")
 	sshTarget := fs.String("ssh-target", "ssh", "logical target for the --local port (advanced; for manual unknown-target checks)")
-	certFile := fs.String("cert", "", "Path to client TLS certificate (PEM)")
-	keyFile := fs.String("key", "", "Path to client TLS private key (PEM)")
-	serverCA := fs.String("server-ca", "", "Path to CA certificate used to verify the server (PEM)")
+	keyFile := fs.String("key", defaultKeyPath(), "Path to the Ed25519 identity key (PKCS#8 PEM)")
+	pin := fs.String("pin", "", "expected server pin (base64; from `quic-link keygen` on the server)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: quic-link connect [flags]")
 		fs.PrintDefaults()
@@ -157,12 +301,21 @@ func runConnect(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *server == "" || *certFile == "" || *keyFile == "" || *serverCA == "" {
+	if *server == "" {
 		fs.Usage()
-		return fmt.Errorf("--server, --cert, --key, and --server-ca are all required")
+		return usageErrorf("--server is required")
+	}
+	serverPin, err := identity.ParsePin(*pin)
+	if err != nil {
+		fs.Usage()
+		return usageErrorf("--pin is required and must be a valid pin: %v", err)
 	}
 
-	tlsConf, err := buildClientTLS(*certFile, *keyFile, *serverCA, *server)
+	key, err := identity.LoadKey(expandTilde(*keyFile))
+	if err != nil {
+		return fmt.Errorf("load identity key: %w", err)
+	}
+	tlsConf, err := identity.ClientTLS(key, serverPin)
 	if err != nil {
 		return fmt.Errorf("TLS config: %w", err)
 	}
@@ -212,9 +365,8 @@ func runPing(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ping", flag.ExitOnError)
 	server := fs.String("server", "", "host:port of the quic-link server")
 	count := fs.Int("count", 3, "number of probes to send")
-	certFile := fs.String("cert", "", "Path to client TLS certificate (PEM)")
-	keyFile := fs.String("key", "", "Path to client TLS private key (PEM)")
-	serverCA := fs.String("server-ca", "", "Path to CA certificate used to verify the server (PEM)")
+	keyFile := fs.String("key", defaultKeyPath(), "Path to the Ed25519 identity key (PKCS#8 PEM)")
+	pin := fs.String("pin", "", "expected server pin (base64; from `quic-link keygen` on the server)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: quic-link ping [flags]")
 		fs.PrintDefaults()
@@ -222,12 +374,21 @@ func runPing(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *server == "" || *certFile == "" || *keyFile == "" || *serverCA == "" {
+	if *server == "" {
 		fs.Usage()
-		return fmt.Errorf("--server, --cert, --key, and --server-ca are all required")
+		return usageErrorf("--server is required")
+	}
+	serverPin, err := identity.ParsePin(*pin)
+	if err != nil {
+		fs.Usage()
+		return usageErrorf("--pin is required and must be a valid pin: %v", err)
 	}
 
-	tlsConf, err := buildClientTLS(*certFile, *keyFile, *serverCA, *server)
+	key, err := identity.LoadKey(expandTilde(*keyFile))
+	if err != nil {
+		return fmt.Errorf("load identity key: %w", err)
+	}
+	tlsConf, err := identity.ClientTLS(key, serverPin)
 	if err != nil {
 		return fmt.Errorf("TLS config: %w", err)
 	}
@@ -239,6 +400,7 @@ func runPing(ctx context.Context, args []string) error {
 		totalMin       float64
 		successfulRPC  int
 		totalRPC       float64
+		authErr        error // set if any probe failed the pinning handshake
 	)
 
 	for i := 1; i <= *count; i++ {
@@ -260,6 +422,9 @@ func runPing(ctx context.Context, args []string) error {
 		udpConn.Close()
 
 		if err != nil {
+			if errors.Is(err, transport.ErrAuthFailed) {
+				authErr = err
+			}
 			fmt.Fprintf(os.Stderr, "probe %d/%d: %v\n", i, *count, err)
 			continue
 		}
@@ -288,6 +453,11 @@ func runPing(ctx context.Context, args []string) error {
 	}
 
 	if successful == 0 {
+		// If every probe failed the pinning handshake, surface it as an auth
+		// error so main() exits 4 rather than collapsing to a generic exit 1.
+		if authErr != nil {
+			return fmt.Errorf("all %d probes failed: %w", *count, authErr)
+		}
 		return fmt.Errorf("all %d probes failed", *count)
 	}
 	n := float64(successful)
@@ -307,7 +477,7 @@ func runPing(ctx context.Context, args []string) error {
 	return nil
 }
 
-// ---- TLS helpers ---------------------------------------------------------------
+// ---- exit-code mapping ---------------------------------------------------------
 
 // exitCodeForStatus maps an agent response status to a process exit code per
 // the 06 §Global exit-code CONTRACT (INV-9): 0 ok · 4 auth/authz failure · 5
@@ -326,59 +496,4 @@ func exitCodeForStatus(s proto.Status) int {
 	default:
 		return 1
 	}
-}
-
-// buildServerTLS creates a tls.Config for the server side:
-// presents a certificate, requires and verifies the client certificate.
-func buildServerTLS(certFile, keyFile, clientCAFile string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load server cert: %w", err)
-	}
-	caPool, err := loadCertPool(clientCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("load client CA: %w", err)
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert, // mTLS enforced
-		NextProtos:   []string{transport.ALPN},
-	}, nil
-}
-
-// buildClientTLS creates a tls.Config for the client side:
-// presents a certificate, verifies the server certificate against serverCAFile.
-func buildClientTLS(certFile, keyFile, serverCAFile, serverAddr string) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load client cert: %w", err)
-	}
-	caPool, err := loadCertPool(serverCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("load server CA: %w", err)
-	}
-	// Extract the hostname for SNI; fall back to the full addr if parsing fails.
-	host, _, err := net.SplitHostPort(serverAddr)
-	if err != nil {
-		host = serverAddr
-	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caPool,
-		ServerName:   host, // SNI + peer certificate verification
-		NextProtos:   []string{transport.ALPN},
-	}, nil
-}
-
-func loadCertPool(caFile string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, err
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("no valid certificates in %s", caFile)
-	}
-	return pool, nil
 }

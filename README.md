@@ -13,26 +13,23 @@ cd quic-link
 go mod tidy
 ```
 
-**1. Generate a throwaway PKI (one-time)**
+**1. Generate an identity on each host (one-time)**
+
+Authentication is mutual raw-public-key pinning (ADR-0004): each host holds an
+Ed25519 key and the two ends verify each other's *pin* — `base64(SHA-256(public
+key))` — during the QUIC handshake. There are no CA files.
 
 ```bash
-# CA
-openssl genrsa -out ca.key 4096
-openssl req -new -x509 -key ca.key -out ca.crt -days 365 -subj "/CN=quic-link-ca"
-
-# Server cert. Replace 1.2.3.4 / myserver.example.com with your actual values
-openssl genrsa -out server.key 4096
-openssl req -new -key server.key -out server.csr -subj "/CN=myserver.example.com"
-openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -out server.crt -days 365 \
-  -extfile <(printf "subjectAltName=DNS:myserver.example.com,IP:1.2.3.4")
-
-# Client cert
-openssl genrsa -out client.key 4096
-openssl req -new -key client.key -out client.csr -subj "/CN=client"
-openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-  -out client.crt -days 365
+# On BOTH the server and the client host:
+quic-link keygen
+# -> pin: <base64>      (the key is written to ~/.config/quic-link/key.pem)
 ```
+
+Note each host's printed pin (call them `<server-pin>` and `<client-pin>`) and
+**exchange them out of band** (paste them to each other). Re-running `keygen` is
+idempotent — it reprints the existing pin; `keygen --force` rotates the key
+(after which peers must re-pair with the new pin). Pairing-ergonomics upgrades
+that shrink this exchange are future work.
 
 **2. On the server** (port 443 UDP must be open)
 
@@ -40,9 +37,11 @@ openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 quic-link serve \
   --listen :443 \
   --service-addr 127.0.0.1:22 \
-  --cert server.crt --key server.key \
-  --client-ca ca.crt
+  --authorized-client <client-pin>
 ```
+
+`--authorized-client` is repeatable; at least one pin is required (the agent
+refuses to start with an empty set).
 
 **3. On the client**
 
@@ -50,8 +49,7 @@ quic-link serve \
 quic-link connect \
   --server myserver.example.com:443 \
   --local 127.0.0.1:2222 \
-  --cert client.crt --key client.key \
-  --server-ca ca.crt
+  --pin <server-pin>
 
 # In another terminal:
 ssh -p 2222 user@127.0.0.1
@@ -62,8 +60,11 @@ ssh -p 2222 user@127.0.0.1
 ```bash
 quic-link ping \
   --server myserver.example.com:443 --count 5 \
-  --cert client.crt --key client.key --server-ca ca.crt
+  --pin <server-pin>
 ```
+
+A wrong pin on either end fails the handshake and exits with code 4
+(authentication failure); the message names the mismatched pin.
 
 ## Build and test
 
@@ -78,6 +79,7 @@ go test ./...
 ```
 cmd/quic-link/        CLI + subcommand wiring
 internal/transport/   QUIC Transport abstraction + interface (TODO: TCP/wss fallback)
+internal/identity/    Ed25519 keys, pins, and the raw-public-key pinning TLS handshake
 internal/tunnel/      stream↔TCP proxy (serve + connect sides)
 internal/probe/       ping: handshake timing + RTT (RFC 9002 §5)
 ```

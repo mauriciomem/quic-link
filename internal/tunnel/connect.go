@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -299,6 +300,10 @@ func (m *connManager) dialWithBackoff(ctx context.Context) (transport.Conn, erro
 		conn, err := m.t.Dial(ctx, m.serverAddr)
 		if err == nil {
 			return conn, nil
+		}
+		// A pin rejection never self-heals — do not burn retries on it.
+		if errors.Is(err, transport.ErrAuthFailed) {
+			return nil, err
 		}
 		if attempt >= maxRetries {
 			return nil, fmt.Errorf("dial failed after %d attempts: %w", maxRetries+1, err)

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/proto"
 )
 
@@ -134,6 +135,11 @@ func TestIdentityFromCerts(t *testing.T) {
 	id2, _ := IdentityFromCerts([]*x509.Certificate{cert})
 	if id1.Pin == "" || id1.Pin != id2.Pin {
 		t.Fatalf("pin not stable: %q vs %q", id1.Pin, id2.Pin)
+	}
+	// The router pin MUST equal identity.Pin over the same SPKI — one formula
+	// (single source of truth).
+	if want := identity.Pin(cert.RawSubjectPublicKeyInfo); id1.Pin != want {
+		t.Fatalf("router pin %q != identity.Pin %q", id1.Pin, want)
 	}
 	if len(id1.Short()) != 8 {
 		t.Fatalf("Short() = %q, want 8 chars", id1.Short())

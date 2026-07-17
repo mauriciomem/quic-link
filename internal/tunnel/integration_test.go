@@ -2,22 +2,17 @@ package tunnel_test
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
+	"crypto/ed25519"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"io"
-	"math/big"
 	"net"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/probe"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/router"
@@ -33,25 +28,10 @@ func TestTunnelRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-
-	// Server cert has SAN=127.0.0.1 so TLS verification succeeds on loopback.
-	serverTLSCert := mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
-	clientTLSCert := mustGenLeaf(t, caCert, caKey, "client", nil)
-
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{serverTLSCert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{transport.ALPN},
-	}
-	clientTLS := &tls.Config{
-		Certificates: []tls.Certificate{clientTLSCert},
-		RootCAs:      caPool,
-		ServerName:   "127.0.0.1",
-		NextProtos:   []string{transport.ALPN},
-	}
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	// Start a TCP echo server that the serve tunnel will forward streams to.
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -97,23 +77,10 @@ func TestUnknownTarget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLSCert := mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
-	clientTLSCert := mustGenLeaf(t, caCert, caKey, "client", nil)
-
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{serverTLSCert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{transport.ALPN},
-	}
-	clientTLS := &tls.Config{
-		Certificates: []tls.Certificate{clientTLSCert},
-		RootCAs:      caPool,
-		ServerName:   "127.0.0.1",
-		NextProtos:   []string{transport.ALPN},
-	}
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -148,18 +115,10 @@ func TestPingNonZeroRTT(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
 
-	serverTLSCert := mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
-	clientTLSCert := mustGenLeaf(t, caCert, caKey, "client", nil)
-
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{serverTLSCert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{transport.ALPN},
-	}
 	// Need a dummy echo service for the serve tunnel to dial.
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -178,12 +137,7 @@ func TestPingNonZeroRTT(t *testing.T) {
 	}
 	t.Cleanup(func() { udpConn.Close() })
 
-	clientTLS := &tls.Config{
-		Certificates: []tls.Certificate{clientTLSCert},
-		RootCAs:      caPool,
-		ServerName:   "127.0.0.1",
-		NextProtos:   []string{transport.ALPN},
-	}
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 	tr, err := transport.NewQUICTransport(udpConn, clientTLS, nil)
 	if err != nil {
 		t.Fatalf("transport: %v", err)
@@ -203,24 +157,22 @@ func TestPingNonZeroRTT(t *testing.T) {
 		res.HandshakeTime, res.SmoothedRTT, res.MinRTT, res.LatestRTT)
 }
 
-// TestMTLSRejection verifies that a client presenting a certificate signed by
-// an untrusted CA is rejected by the server.
-func TestMTLSRejection(t *testing.T) {
+// TestPinRejection verifies the pinning handshake refuses a peer whose pin is
+// not accepted (02 §2.2, ADR-0004). Two directions:
+//   - the client expects the WRONG server pin → the CLIENT aborts the handshake
+//     and Dial returns transport.ErrAuthFailed (→ exit 4). Reliable at dial.
+//   - the client's pin is NOT in the agent's authorized set → the SERVER aborts.
+//     With QUIC + TLS 1.3 the client may finish its handshake before the
+//     server's rejection propagates, so the failure may surface at dial, stream
+//     open, or first use; whichever, the connection must not be usable.
+func TestPinRejection(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Trusted CA for the server.
-	trustedCA, trustedKey := mustGenCA(t)
-	trustedPool := mustPool(t, trustedCA)
-
-	serverTLSCert := mustGenLeaf(t, trustedCA, trustedKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{serverTLSCert},
-		ClientCAs:    trustedPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{transport.ALPN},
-	}
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	_, otherPin := mustGenIdentity(t) // a pin belonging to neither peer
 
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -229,59 +181,69 @@ func TestMTLSRejection(t *testing.T) {
 	t.Cleanup(func() { echoLn.Close() })
 	go runEchoServer(echoLn)
 
-	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
-	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+	t.Run("wrong server pin (client rejects)", func(t *testing.T) {
+		// Agent authorizes the real client; client expects the WRONG server pin.
+		serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+		rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+		serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 
-	// Client uses a cert from a DIFFERENT, untrusted CA.
-	untrustedCA, untrustedKey := mustGenCA(t)
-	badClientCert := mustGenLeaf(t, untrustedCA, untrustedKey, "evil-client", nil)
-	badClientTLS := &tls.Config{
-		Certificates: []tls.Certificate{badClientCert},
-		// The client trusts the server's CA so the TLS handshake proceeds far
-		// enough for the server to reject the client cert.
-		RootCAs:    trustedPool,
-		ServerName: "127.0.0.1",
-		NextProtos: []string{transport.ALPN},
-	}
+		clientTLS := mustClientTLS(t, clientKey, otherPin)
+		_, err := dialRaw(t, ctx, clientTLS, serverAddr)
+		if !errors.Is(err, transport.ErrAuthFailed) {
+			t.Fatalf("wrong server pin: got %v, want transport.ErrAuthFailed", err)
+		}
+	})
 
+	t.Run("client not authorized (agent rejects)", func(t *testing.T) {
+		// Agent authorizes SOMEONE ELSE; the real client's pin is not accepted.
+		serverTLS := mustServerTLS(t, serverKey, []string{otherPin})
+		rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+		serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+
+		clientTLS := mustClientTLS(t, clientKey, serverPin)
+		conn, err := dialRaw(t, ctx, clientTLS, serverAddr)
+		if err != nil {
+			if !errors.Is(err, transport.ErrAuthFailed) {
+				t.Logf("rejected at dial with a non-auth error: %v", err)
+			}
+			return // rejected at dial — good enough
+		}
+		defer conn.CloseWithError(0, "test done") //nolint:errcheck
+
+		// The client finished its handshake before the server's rejection; the
+		// connection must nonetheless be unusable.
+		stream, err := conn.OpenStream(ctx)
+		if err != nil {
+			return // rejected at stream open — good
+		}
+		defer stream.Close() //nolint:errcheck
+		if err := proto.WriteHeader(stream, proto.Header{Kind: proto.KindTCP, Target: "ssh"}); err != nil {
+			return
+		}
+		buf := make([]byte, 1)
+		if _, err := stream.Read(buf); err != nil {
+			return // rejected on use — good
+		}
+		t.Fatal("expected pin rejection, but the connection was usable")
+	})
+}
+
+// dialRaw dials the agent with tlsConf and returns the connection (or the
+// classified dial error). A fresh UDP socket + transport is created; cleanup is
+// registered with t.
+func dialRaw(t *testing.T, ctx context.Context, tlsConf *tls.Config, serverAddr string) (transport.Conn, error) {
+	t.Helper()
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
 		t.Fatalf("UDP socket: %v", err)
 	}
-	defer udpConn.Close()
-
-	tr, err := transport.NewQUICTransport(udpConn, badClientTLS, nil)
+	t.Cleanup(func() { udpConn.Close() })
+	tr, err := transport.NewQUICTransport(udpConn, tlsConf, nil)
 	if err != nil {
 		t.Fatalf("transport: %v", err)
 	}
-	defer tr.Close()
-
-	// With QUIC + TLS 1.3 mTLS, the client derives 1-RTT keys and Dial may
-	// return before the server's client-cert rejection (CONNECTION_CLOSE)
-	// propagates back. The rejection surfaces either at Dial or on first use.
-	conn, err := tr.Dial(ctx, serverAddr)
-	if err != nil {
-		t.Logf("correctly rejected at dial: %v", err)
-		return
-	}
-	defer conn.CloseWithError(0, "test done") //nolint:errcheck
-
-	// Exercise the connection: opening a stream and reading must fail once the
-	// server tears the connection down for the untrusted client certificate.
-	stream, err := conn.OpenStream(ctx)
-	if err != nil {
-		t.Logf("correctly rejected at stream open: %v", err)
-		return
-	}
-	defer stream.Close() //nolint:errcheck
-
-	stream.Write([]byte("ping")) //nolint:errcheck
-	buf := make([]byte, 1)
-	if _, err := stream.Read(buf); err != nil {
-		t.Logf("correctly rejected on stream use: %v", err)
-		return
-	}
-	t.Fatal("expected mTLS rejection, but the connection was usable")
+	t.Cleanup(func() { tr.Close() })
+	return tr.Dial(ctx, serverAddr)
 }
 
 // ---- test helpers ------------------------------------------------------------
@@ -363,87 +325,21 @@ func runEchoServer(ln net.Listener) {
 	}
 }
 
-// ---- in-memory PKI helpers ---------------------------------------------------
+// ---- pinning identity helpers ------------------------------------------------
 
-func mustGenKey(t *testing.T) *ecdsa.PrivateKey {
+// mustGenIdentity generates a fresh Ed25519 identity and returns the key and its
+// pin (02 §2.2). The whole test suite pairs peers by exchanging these pins.
+func mustGenIdentity(t *testing.T) (ed25519.PrivateKey, string) {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := identity.Generate()
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		t.Fatalf("generate identity: %v", err)
 	}
-	return key
-}
-
-func mustGenCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
-	t.Helper()
-	key := mustGenKey(t)
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "test-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(2 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	pin, err := identity.PinForKey(key)
 	if err != nil {
-		t.Fatalf("create CA cert: %v", err)
+		t.Fatalf("pin: %v", err)
 	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parse CA cert: %v", err)
-	}
-	return cert, key
-}
-
-// mustGenLeaf generates a leaf TLS certificate signed by parent.
-// ips may be nil for client certs (no IP SAN needed).
-func mustGenLeaf(
-	t *testing.T,
-	parent *x509.Certificate,
-	parentKey *ecdsa.PrivateKey,
-	cn string,
-	ips []net.IP,
-) tls.Certificate {
-	t.Helper()
-	key := mustGenKey(t)
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(2),
-		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(2 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-			x509.ExtKeyUsageClientAuth,
-		},
-		IPAddresses: ips,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, parentKey)
-	if err != nil {
-		t.Fatalf("create leaf cert: %v", err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshal key: %v", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		t.Fatalf("X509KeyPair: %v", err)
-	}
-	return tlsCert
-}
-
-func mustPool(t *testing.T, certs ...*x509.Certificate) *x509.CertPool {
-	t.Helper()
-	pool := x509.NewCertPool()
-	for _, c := range certs {
-		pool.AddCert(c)
-	}
-	return pool
+	return key, pin
 }
 
 // TestReconnectSoak verifies that the connManager re-dials after the server
@@ -455,24 +351,10 @@ func TestReconnectSoak(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-
-	serverTLSCert := mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")})
-	clientTLSCert := mustGenLeaf(t, caCert, caKey, "client", nil)
-
-	serverTLS := &tls.Config{
-		Certificates: []tls.Certificate{serverTLSCert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{transport.ALPN},
-	}
-	clientTLS := &tls.Config{
-		Certificates: []tls.Certificate{clientTLSCert},
-		RootCAs:      caPool,
-		ServerName:   "127.0.0.1",
-		NextProtos:   []string{transport.ALPN},
-	}
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	// Echo service the tunnel will proxy to.
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -604,26 +486,26 @@ func (l *trackingListener) Close() error   { return l.inner.Close() }
 
 // ---- wire-level tests --------------------------------------------------------
 
-// mustClientTLS builds a standard loopback client tls.Config from a CA pool and
-// a client leaf certificate.
-func mustClientTLS(caPool *x509.CertPool, clientCert tls.Certificate) *tls.Config {
-	return &tls.Config{
-		Certificates: []tls.Certificate{clientCert},
-		RootCAs:      caPool,
-		ServerName:   "127.0.0.1",
-		NextProtos:   []string{transport.ALPN},
+// mustClientTLS builds a client pinning tls.Config that presents key's carrier
+// cert and expects the given server pin (02 §2.2).
+func mustClientTLS(t *testing.T, key ed25519.PrivateKey, serverPin string) *tls.Config {
+	t.Helper()
+	c, err := identity.ClientTLS(key, serverPin)
+	if err != nil {
+		t.Fatalf("ClientTLS: %v", err)
 	}
+	return c
 }
 
-// mustServerTLS builds a standard loopback server tls.Config that requires and
-// verifies a client certificate.
-func mustServerTLS(caPool *x509.CertPool, serverCert tls.Certificate) *tls.Config {
-	return &tls.Config{
-		Certificates: []tls.Certificate{serverCert},
-		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		NextProtos:   []string{transport.ALPN},
+// mustServerTLS builds an agent pinning tls.Config that presents key's carrier
+// cert and authorizes the given client pins (02 §2.2).
+func mustServerTLS(t *testing.T, key ed25519.PrivateKey, authorized []string) *tls.Config {
+	t.Helper()
+	c, err := identity.ServerTLS(key, authorized)
+	if err != nil {
+		t.Fatalf("ServerTLS: %v", err)
 	}
+	return c
 }
 
 // openClientStream dials the agent directly, opens one stream carrying h, and
@@ -667,10 +549,10 @@ func TestWireUnknownTarget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
-	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
 	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
@@ -688,10 +570,10 @@ func TestWireUnauthorized(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
-	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	deny := router.PolicyFunc(func(router.Identity, proto.Header) error { return errors.New("test deny") })
 	rtr := mustRouter(t, map[string]string{"ssh": "tcp://127.0.0.1:22"}, deny)
@@ -710,10 +592,10 @@ func TestWireDockerUnixRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	caCert, caKey := mustGenCA(t)
-	caPool := mustPool(t, caCert)
-	serverTLS := mustServerTLS(caPool, mustGenLeaf(t, caCert, caKey, "server", []net.IP{net.ParseIP("127.0.0.1")}))
-	clientTLS := mustClientTLS(caPool, mustGenLeaf(t, caCert, caKey, "client", nil))
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
 	sockPath := filepath.Join(t.TempDir(), "d.sock")
 	unixLn, err := net.Listen("unix", sockPath)
