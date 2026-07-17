@@ -75,6 +75,17 @@ func Ping(ctx context.Context, t transport.Transport, serverAddr string) (*Resul
 	// steady-state RPC latency.
 	client, err := control.Open(ctx, conn, "quic-link ping")
 	if err != nil {
+		// A pin rejected by the agent tears the connection down after our own
+		// handshake completes, so it surfaces here rather than at Dial. Report
+		// it as an authentication failure (so ping exits with the auth code)
+		// instead of a reachable-but-broken peer. Check both the immediate
+		// error and the connection's close cause.
+		if authErr := transport.AuthError(err); authErr != nil {
+			return nil, authErr
+		}
+		if authErr := transport.AuthError(context.Cause(conn.Context())); authErr != nil {
+			return nil, authErr
+		}
 		res.RPCErr = err
 		return res, nil
 	}

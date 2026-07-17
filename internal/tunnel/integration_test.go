@@ -246,6 +246,50 @@ func dialRaw(t *testing.T, ctx context.Context, tlsConf *tls.Config, serverAddr 
 	return tr.Dial(ctx, serverAddr)
 }
 
+// TestPingAuthRejected verifies that when the agent does not authorize the
+// client's pin, the client's transport handshake still completes but the
+// control stream is torn down — and probe.Ping reports this as an auth failure
+// (transport.ErrAuthFailed) so ping exits with the auth code, rather than a
+// reachable-but-broken peer.
+func TestPingAuthRejected(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, _ := mustGenIdentity(t)
+	_, otherPin := mustGenIdentity(t) // the only pin the agent authorizes
+
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { echoLn.Close() })
+	go runEchoServer(echoLn)
+
+	// Agent authorizes someone else; the client presents the correct server pin
+	// (so the client accepts the server) but is itself not authorized.
+	serverTLS := mustServerTLS(t, serverKey, []string{otherPin})
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("client UDP: %v", err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
+	tr, err := transport.NewQUICTransport(udpConn, clientTLS, nil)
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	t.Cleanup(func() { tr.Close() })
+
+	if _, err := probe.Ping(ctx, tr, serverAddr); !errors.Is(err, transport.ErrAuthFailed) {
+		t.Fatalf("Ping: got %v, want transport.ErrAuthFailed", err)
+	}
+}
+
 // ---- test helpers ------------------------------------------------------------
 
 // mustStartServe starts a QUIC serve tunnel backed by rtr and returns the

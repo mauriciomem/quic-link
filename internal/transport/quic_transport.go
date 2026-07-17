@@ -141,6 +141,23 @@ func classifyDialError(err error) error {
 	return err
 }
 
+// AuthError reports whether err (typically a connection-close cause or a
+// post-handshake read error) indicates the peer rejected authentication — a
+// TLS-alert-range QUIC transport error other than an ALPN mismatch. It returns
+// the error wrapped in ErrAuthFailed, or nil if err is not an auth rejection.
+// This lets callers detect a pin rejection that arrives AFTER the local
+// handshake completes (the agent-rejects-client direction), where the failure
+// surfaces on the connection rather than at Dial.
+func AuthError(err error) error {
+	var te *quic.TransportError
+	if errors.As(err, &te) &&
+		te.ErrorCode >= tlsAlertBase && te.ErrorCode <= tlsAlertMax &&
+		te.ErrorCode != alertNoAppProtocol {
+		return fmt.Errorf("%w (peer rejected the pin: TLS error 0x%x)", ErrAuthFailed, uint64(te.ErrorCode))
+	}
+	return nil
+}
+
 // ---- quicListener wraps *quic.Listener ----------------------------------------
 
 type quicListener struct {
