@@ -106,8 +106,17 @@ func serveStream(
 		return serveControl(ctx, conn, stream, peer, h, cs, openTimer)
 	}
 
+	// Extract the correlation id stamped by the client. It may be absent for
+	// older or third-party clients; tolerate the empty string silently.
+	reqid := h.Meta["reqid"]
+
 	svc, err := rtr.Dial(ctx, peer, h)
 	if err != nil {
+		slog.Debug("stream dial failed",
+			"kind", h.Kind,
+			"target", h.Target,
+			"reqid", reqid,
+		)
 		return replyDialError(stream, h, err)
 	}
 
@@ -117,14 +126,22 @@ func serveStream(
 		return fmt.Errorf("write ok response: %w", err)
 	}
 
+	slog.Debug("stream header exchange complete",
+		"kind", h.Kind,
+		"target", h.Target,
+		"reqid", reqid,
+		"status", proto.StatusOK.String(),
+	)
+
 	start := time.Now()
-	slog.Info("stream proxying to service", "peer", peer.Short(), "target", h.Target)
+	slog.Info("stream proxying to service", "peer", peer.Short(), "target", h.Target, "reqid", reqid)
 	// pipe closes both stream and svc when done.
 	pipe(stream, svc)
 	slog.Info("stream closed",
 		"peer", peer.Short(),
 		"target", h.Target,
 		"duration", time.Since(start).Round(time.Millisecond),
+		"reqid", reqid,
 	)
 	return nil
 }
@@ -290,11 +307,19 @@ func resetConn(c io.Closer) {
 	}
 }
 
-// pipe bidirectionally copies between a and b. A clean EOF in one direction
+// Pipe bidirectionally copies between a and b. A clean EOF in one direction
 // becomes a write-half-close on the peer so the other direction keeps
 // flowing — this is what lets scp, git, and request/response protocols finish
 // instead of truncating. Both ends are fully released only after both
-// directions complete.
+// directions complete. It is exported so callers outside this package (e.g. a
+// stdio bridge in cmd/) can reuse the same half-close semantics without
+// duplicating the reset/FIN logic.
+func Pipe(a, b io.ReadWriteCloser) {
+	pipe(a, b)
+}
+
+// pipe is the unexported implementation shared by Pipe and the internal callers
+// in this package.
 func pipe(a, b io.ReadWriteCloser) {
 	done := make(chan struct{}, 2)
 	go func() {

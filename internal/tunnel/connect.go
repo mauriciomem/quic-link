@@ -85,25 +85,28 @@ func acceptLoop(ctx context.Context, mgr *connManager, f Forward) error {
 	}
 }
 
-// forwardTCP opens a QUIC stream to the agent, stamps the protocol header,
-// waits for a success response, and then proxies data between tcpConn and the
-// stream. It retries the stream open once if the first attempt fails (handles
-// the race where the QUIC connection dropped between get and use).
+// forwardTCP opens a QUIC stream to the agent, stamps the protocol header
+// (including a per-stream correlation id in Meta["reqid"]), waits for a
+// success response, and then proxies data between tcpConn and the stream.
+// It retries the stream open once if the first attempt fails (handles the race
+// where the QUIC connection dropped between get and use).
 func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn, target string) {
 	defer tcpConn.Close()
 
+	reqid := NewReqID()
 	start := time.Now()
-	slog.Info("session opened", "local", tcpConn.RemoteAddr(), "target", target)
+	slog.Info("session opened", "local", tcpConn.RemoteAddr(), "target", target, "reqid", reqid)
 	defer func() {
 		slog.Info("session closed",
 			"local", tcpConn.RemoteAddr(),
 			"duration", time.Since(start).Round(time.Millisecond),
+			"reqid", reqid,
 		)
 	}()
 
 	conn, err := mgr.get(ctx)
 	if err != nil {
-		slog.Warn("get QUIC conn", "err", err)
+		slog.Warn("get QUIC conn", "err", err, "reqid", reqid)
 		return
 	}
 
@@ -113,19 +116,25 @@ func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn, target 
 		mgr.invalidate(conn)
 		conn, err = mgr.get(ctx)
 		if err != nil {
-			slog.Warn("get QUIC conn (retry)", "err", err)
+			slog.Warn("get QUIC conn (retry)", "err", err, "reqid", reqid)
 			return
 		}
 		stream, err = conn.OpenStream(ctx)
 		if err != nil {
-			slog.Warn("open QUIC stream", "err", err)
+			slog.Warn("open QUIC stream", "err", err, "reqid", reqid)
 			return
 		}
 	}
 
-	// Name a logical target; never an ip:port.
-	if err := proto.WriteHeader(stream, proto.Header{Kind: proto.KindTCP, Target: target}); err != nil {
-		slog.Warn("write header", "err", err, "target", target)
+	// Name a logical target; never an ip:port. Include the reqid so the
+	// agent can log it and both sides can be correlated by a single grep.
+	hdr := proto.Header{
+		Kind:   proto.KindTCP,
+		Target: target,
+		Meta:   map[string]string{"reqid": reqid},
+	}
+	if err := proto.WriteHeader(stream, hdr); err != nil {
+		slog.Warn("write header", "err", err, "target", target, "reqid", reqid)
 		stream.Reset(proto.StreamResetCode)
 		resetConn(tcpConn)
 		return
@@ -134,10 +143,18 @@ func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn, target 
 	// Wait for the response (10s deadline) before sending any payload.
 	resp, err := awaitResponse(ctx, stream, proto.ResponseDeadline)
 	if err != nil {
-		slog.Warn("await response", "err", err, "target", target)
+		slog.Warn("await response", "err", err, "target", target, "reqid", reqid)
 		resetConn(tcpConn) // stream already reset by awaitResponse
 		return
 	}
+
+	slog.Debug("stream header exchange complete",
+		"kind", proto.KindTCP,
+		"target", target,
+		"reqid", reqid,
+		"status", resp.Status.String(),
+	)
+
 	if resp.Status != proto.StatusOK {
 		// Surface the agent's message verbatim.
 		slog.Warn("agent refused stream",
@@ -145,6 +162,7 @@ func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn, target 
 			"status", uint(resp.Status),
 			"status_name", resp.Status.String(),
 			"msg", resp.Msg,
+			"reqid", reqid,
 		)
 		stream.Reset(proto.StreamResetCode)
 		resetConn(tcpConn)
@@ -155,9 +173,16 @@ func forwardTCP(ctx context.Context, mgr *connManager, tcpConn net.Conn, target 
 	pipe(tcpConn, stream)
 }
 
-// awaitResponse reads the agent's response frame, enforcing the response
+// AwaitResponse reads the agent's response frame, enforcing the response
 // deadline. On timeout, context cancellation, or a read error it resets the
 // stream (which also unblocks the read goroutine) and returns an error.
+// It is exported so callers outside this package (e.g. a stdio bridge in cmd/)
+// can reuse the same await behaviour without duplicating the timer/select logic.
+func AwaitResponse(ctx context.Context, stream transport.Stream, d time.Duration) (proto.Response, error) {
+	return awaitResponse(ctx, stream, d)
+}
+
+// awaitResponse is the unexported implementation.
 func awaitResponse(ctx context.Context, stream transport.Stream, d time.Duration) (proto.Response, error) {
 	type result struct {
 		resp proto.Response

@@ -629,6 +629,86 @@ func TestWireUnauthorized(t *testing.T) {
 	}
 }
 
+// TestReqIDPropagation verifies that a reqid stamped by the client in
+// Meta["reqid"] is received by the agent: both a present reqid (the normal
+// client path) and an absent reqid (older/other clients) must yield status 0.
+// A capturing policy records the header fields seen by the agent so the test
+// can inspect them without reading agent logs.
+func TestReqIDPropagation(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	serverKey, serverPin := mustGenIdentity(t)
+	clientKey, clientPin := mustGenIdentity(t)
+	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
+	clientTLS := mustClientTLS(t, clientKey, serverPin)
+
+	// headerCapture records every header the agent sees and always allows.
+	type capturedHeader struct {
+		reqid string
+		ok    bool // whether the reqid key was present (even if empty)
+	}
+	captured := make(chan capturedHeader, 4)
+	capPolicy := router.PolicyFunc(func(_ router.Identity, h proto.Header) error {
+		_, ok := h.Meta["reqid"]
+		captured <- capturedHeader{reqid: h.Meta["reqid"], ok: ok}
+		return nil
+	})
+
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { echoLn.Close() })
+	go runEchoServer(echoLn)
+
+	rtr := mustRouter(t, map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, capPolicy)
+	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
+
+	t.Run("with reqid", func(t *testing.T) {
+		const want = "deadbeefcafe0123"
+		_, resp := openClientStream(t, ctx, clientTLS, serverAddr, proto.Header{
+			Kind:   proto.KindTCP,
+			Target: "ssh",
+			Meta:   map[string]string{"reqid": want},
+		})
+		if resp.Status != proto.StatusOK {
+			t.Fatalf("got status %v, want ok (0)", resp.Status)
+		}
+		select {
+		case h := <-captured:
+			if !h.ok {
+				t.Error("agent did not receive Meta[\"reqid\"] key")
+			}
+			if h.reqid != want {
+				t.Errorf("agent received reqid %q, want %q", h.reqid, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for captured header")
+		}
+	})
+
+	t.Run("absent reqid tolerated", func(t *testing.T) {
+		// A header with no Meta at all must not cause an error on the agent side.
+		_, resp := openClientStream(t, ctx, clientTLS, serverAddr, proto.Header{
+			Kind:   proto.KindTCP,
+			Target: "ssh",
+		})
+		if resp.Status != proto.StatusOK {
+			t.Fatalf("absent reqid: got status %v, want ok (0)", resp.Status)
+		}
+		select {
+		case h := <-captured:
+			if h.reqid != "" {
+				t.Errorf("expected empty reqid for absent key, got %q", h.reqid)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for captured header")
+		}
+	})
+}
+
 // TestWireDockerUnixRoundTrip verifies unix-socket dialing: a "docker" target
 // routed to a unix-socket echo server returns status 0 and round-trips bytes.
 func TestWireDockerUnixRoundTrip(t *testing.T) {
