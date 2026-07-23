@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
@@ -132,6 +133,18 @@ func stdioRun(ctx context.Context, server, target, keyFile, serverPin string) er
 		return fmt.Errorf("dial %s: %w", server, err)
 	}
 	defer conn.CloseWithError(0, "stdio done")
+
+	// The agent requires one control stream per session and closes the session
+	// if none arrives within its open deadline, so open it before the data
+	// stream and hold it for the connection's lifetime. Its closure on return
+	// signals the end of this one-stream session.
+	keyCreated := readKeyCreatedRFC3339(keyFile)
+	cclient, err := control.Open(ctx, conn, "quic-link stdio", control.OpenOpts{KeyCreated: keyCreated})
+	if err != nil {
+		_ = conn.CloseWithError(0x03, "control open failed")
+		return fmt.Errorf("control: %w", err)
+	}
+	defer cclient.Close()
 
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {
