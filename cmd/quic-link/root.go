@@ -6,16 +6,25 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/mauriciomem/quic-link/internal/config"
 )
+
+// app is a shared holder passed to every verb constructor so that
+// PersistentPreRunE can load the config once and all subcommands can read it.
+// Flags are stored here too so their Changed state is readable in
+// PersistentPreRunE before any subcommand RunE runs.
+type app struct {
+	configPath string
+	logLevel   string
+	cfg        *config.Config
+}
 
 // newRootCmd builds and returns the root cobra.Command. All subcommands are
 // registered here. Global persistent flags (--config, --log-level) are defined
 // on the root and inherited by every subcommand.
 func newRootCmd() *cobra.Command {
-	var (
-		configPath string
-		logLevel   string
-	)
+	a := &app{}
 
 	root := &cobra.Command{
 		Use:   "quic-link",
@@ -52,35 +61,62 @@ Examples:
 		SilenceUsage: true,
 
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Set up structured logging at the requested level.
-			level, err := parseLogLevel(logLevel)
+			// Load the config file. An empty configPath means "try the
+			// default location; missing is fine." An explicit path that does
+			// not exist is an error (wrapped ErrInvalid → exit 2).
+			cfg, err := config.Load(a.configPath)
 			if err != nil {
 				return err
 			}
-			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-				Level: level,
-			})))
+			a.cfg = cfg
 
-			// TODO: load --config file here when config-file support lands.
-			// Parsed values should be merged under the flag > env > file >
-			// default precedence order.
-			_ = configPath
+			// Effective log level: --log-level flag wins over the file/env
+			// value, which wins over the built-in default ("info").
+			levelStr := cfg.Log.Level // already has file/env/default applied
+			if cmd.Root().PersistentFlags().Lookup("log-level").Changed {
+				levelStr = a.logLevel
+			}
+			level, err := parseLogLevel(levelStr)
+			if err != nil {
+				return err
+			}
+
+			// Choose the log output format. "json" → structured JSON;
+			// "text" (and the empty default) → human-readable text.
+			// Any other value is a configuration error (exit 2).
+			format := cfg.Log.Format
+			if format == "" {
+				format = "text"
+			}
+			switch format {
+			case "text":
+				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+					Level: level,
+				})))
+			case "json":
+				slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+					Level: level,
+				})))
+			default:
+				return usageErrorf("unknown log.format %q: must be text or json", format)
+			}
 
 			return nil
 		},
 	}
 
 	// Global flags available to every subcommand.
-	root.PersistentFlags().StringVar(&configPath, "config", "", "path to config file (optional)")
-	root.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error")
+	root.PersistentFlags().StringVar(&a.configPath, "config", "", "path to config file (optional)")
+	root.PersistentFlags().StringVar(&a.logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error")
 
-	// Register subcommands.
+	// Register subcommands, passing the shared app so each verb can reach
+	// the loaded config after PersistentPreRunE populates a.cfg.
 	root.AddCommand(
 		newKeygenCmd(),
-		newAgentCmd(),
-		newConnectCmd(),
-		newPingCmd(),
-		newStdioCmd(),
+		newAgentCmd(a),
+		newConnectCmd(a),
+		newPingCmd(a),
+		newStdioCmd(a),
 	)
 
 	return root
@@ -100,7 +136,7 @@ func parseLogLevel(name string) (slog.Level, error) {
 	case "error":
 		return slog.LevelError, nil
 	default:
-		return 0, usageErrorf("unknown --log-level %q: must be debug, info, warn, or error", name)
+		return 0, usageErrorf("unknown log level %q: must be debug, info, warn, or error", name)
 	}
 }
 

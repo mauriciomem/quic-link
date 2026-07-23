@@ -6,11 +6,12 @@ import (
 	"net"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
-	"github.com/spf13/cobra"
 )
 
 // Ensure stdioRW satisfies the interfaces tunnel.Pipe expects at compile time.
@@ -23,11 +24,11 @@ var _ interface {
 	CloseWrite() error
 } = (*stdioRW)(nil)
 
-func newStdioCmd() *cobra.Command {
+func newStdioCmd(a *app) *cobra.Command {
 	var (
-		server  string
-		pin     string
-		keyFile string
+		serverFlag string
+		pin        string
+		keyFile    string
 	)
 
 	cmd := &cobra.Command{
@@ -36,25 +37,65 @@ func newStdioCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// args[0] is the SERVER name (accepted for future config resolution;
-			// currently --server is the actual dial address). args[1] is the
-			// logical TARGET written into the stream header.
+			flags := cmd.Flags()
+
+			// args[0] is the SERVER name for config resolution. args[1] is
+			// the logical TARGET written into the stream header.
+			serverName := args[0]
 			target := args[1]
 
-			if server == "" {
+			// Resolve addr and pin from config, then let --server/--pin
+			// flags override. This makes stdio work both as a standalone
+			// tool (flags only) and as a ProxyCommand helper (config lookup).
+			srv, ok := a.cfg.Servers[serverName]
+			if !ok && !flags.Changed("server") && !flags.Changed("pin") {
+				// No config entry and no flags → unresolvable.
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("--server is required")
+				return usageErrorf("server %q not found in config (and --server/--pin not provided)", serverName)
 			}
-			serverPin, err := identity.ParsePin(pin)
+
+			// Flag overrides always win.
+			if flags.Changed("server") {
+				srv.Addr = serverFlag
+				srv.Listen = ""
+			}
+			if flags.Changed("pin") {
+				srv.Pin = pin
+			}
+
+			// enabled check
+			if ok && srv.Enabled != nil && !*srv.Enabled {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("server %q is disabled", serverName)
+			}
+
+			// reverse-mode guard
+			if srv.Listen != "" && srv.Addr == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("reverse mode (listen) is not yet supported; it runs in a later phase")
+			}
+
+			if srv.Addr == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("--server is required (or add SERVER to the config with an addr)")
+			}
+
+			serverPin, err := identity.ParsePin(srv.Pin)
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("--pin is required and must be a valid pin: %v", err)
+				return usageErrorf("pin is required and must be a valid pin: %v", err)
 			}
-			return stdioRun(cmd.Context(), server, target, keyFile, serverPin)
+
+			effectiveKey := a.cfg.Identity.KeyFile
+			if flags.Changed("key") {
+				effectiveKey = keyFile
+			}
+
+			return stdioRun(cmd.Context(), srv.Addr, target, effectiveKey, serverPin)
 		},
 	}
 
-	cmd.Flags().StringVar(&server, "server", "", "host:port of the quic-link agent (required until config resolves SERVER)")
+	cmd.Flags().StringVar(&serverFlag, "server", "", "host:port of the quic-link agent (overrides config)")
 	cmd.Flags().StringVar(&pin, "pin", "", "expected agent pin (base64; from `quic-link keygen` on the agent)")
 	cmd.Flags().StringVar(&keyFile, "key", defaultKeyPath(), "path to the Ed25519 identity key (PKCS#8 PEM)")
 

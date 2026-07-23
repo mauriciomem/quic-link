@@ -9,24 +9,41 @@ import (
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
+// OpenOpts carries optional parameters for Open. All fields are optional;
+// the zero value is valid and produces the same behaviour as the original
+// two-parameter call.
+type OpenOpts struct {
+	// KeyCreated is an RFC3339 UTC string recording when the client's identity
+	// key was generated. When non-empty it is included in the control-stream
+	// header so the agent can log a rotation reminder for over-age client keys.
+	// The field is self-asserted and advisory only — the agent must never use
+	// it to gate or close a session.
+	KeyCreated string
+}
+
 // Open establishes the session's control stream against an established QUIC
 // connection: it opens a stream, performs the protocol-v1 header/response
 // handshake (kind "control", meta proto:"1"), builds a gRPC Control client over
 // the post-response bytes, and eagerly brings the HTTP/2 connection up with one
 // Ping (so the agent's transport is live and does not sit waiting for a
-// preface). version is advertised in the header meta.
+// preface). version is advertised in the header meta. opts carries optional
+// per-session metadata; pass zero value if not needed.
 //
 // On any failure the stream is reset and a non-nil error is returned; the
 // caller should treat the session as unusable.
-func Open(ctx context.Context, conn transport.Conn, version string) (*Client, error) {
+func Open(ctx context.Context, conn transport.Conn, version string, opts OpenOpts) (*Client, error) {
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("control: open stream: %w", err)
 	}
 
+	meta := map[string]string{"proto": "1", "version": version}
+	if opts.KeyCreated != "" {
+		meta["key_created"] = opts.KeyCreated
+	}
 	h := proto.Header{
 		Kind: proto.KindControl,
-		Meta: map[string]string{"proto": "1", "version": version},
+		Meta: meta,
 	}
 	if err := proto.WriteHeader(stream, h); err != nil {
 		stream.Reset(proto.StreamResetCode)

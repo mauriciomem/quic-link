@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mauriciomem/quic-link/internal/identity"
 )
@@ -78,4 +79,15 @@ func clientTLSFromFlags(keyFile, serverPin string) (*tls.Config, error) {
 		return nil, fmt.Errorf("TLS config: %w", err)
 	}
 	return tlsConf, nil
+}
+
+// readKeyCreatedRFC3339 returns the key's creation time formatted as RFC3339
+// UTC, or an empty string if the .meta sidecar is absent or cannot be read.
+// Errors are silently swallowed — advertising the key age is best-effort only.
+func readKeyCreatedRFC3339(keyFile string) string {
+	created, present, err := identity.ReadMeta(keyFile)
+	if err != nil || !present {
+		return ""
+	}
+	return created.UTC().Format(time.RFC3339)
 }

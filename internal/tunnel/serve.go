@@ -17,6 +17,15 @@ import (
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
+// ServeOpts carries optional parameters for Serve. The zero value is valid
+// and produces the same behaviour as before ServeOpts was introduced.
+type ServeOpts struct {
+	// WarnKeyAgeDays, when > 0, causes the agent to log a rotation advisory
+	// when a connecting client's self-reported key age exceeds the threshold.
+	// The advisory is informational only and never closes or rejects a session.
+	WarnKeyAgeDays int
+}
+
 const (
 	// controlOpenDeadline bounds how long after a session is established the
 	// client may take to open its control stream. Past it, the agent closes
@@ -31,8 +40,13 @@ const (
 // client, reads a protocol-v1 header, resolves and authorizes the named target
 // through rtr, replies with a response frame, and (on success) bidirectionally
 // proxies data to the resolved address. It runs until ctx is cancelled or ln
-// is closed.
-func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router) error {
+// is closed. opts carries optional per-server settings; pass zero value if not
+// needed.
+func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router, opts ...ServeOpts) error {
+	var opt ServeOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	for {
 		conn, err := ln.Accept(ctx)
 		if err != nil {
@@ -43,7 +57,7 @@ func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router) error
 				return fmt.Errorf("accept: %w", err)
 			}
 		}
-		go serveConn(ctx, conn, rtr)
+		go serveConn(ctx, conn, rtr, opt)
 	}
 }
 
@@ -51,7 +65,7 @@ func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router) error
 // single accepted QUIC connection. It also enforces the control-stream open
 // deadline: if the client does not open a control stream within
 // controlOpenDeadline, the session is closed with 0x03.
-func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router) {
+func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt ServeOpts) {
 	peer, err := router.IdentityFromCerts(conn.PeerCertificates())
 	if err != nil {
 		// Should be unreachable: the pinning handshake already requires a client
@@ -77,7 +91,7 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router) {
 			return
 		}
 		go func() {
-			if err := serveStream(ctx, conn, stream, peer, rtr, cs, openTimer); err != nil {
+			if err := serveStream(ctx, conn, stream, peer, rtr, cs, openTimer, opt); err != nil {
 				slog.Warn("stream handler error", "err", err)
 			}
 		}()
@@ -96,6 +110,7 @@ func serveStream(
 	rtr *router.Router,
 	cs *controlState,
 	openTimer *time.Timer,
+	opt ServeOpts,
 ) error {
 	h, err := proto.ReadHeader(stream)
 	if err != nil {
@@ -103,7 +118,7 @@ func serveStream(
 	}
 
 	if h.Kind == proto.KindControl {
-		return serveControl(ctx, conn, stream, peer, h, cs, openTimer)
+		return serveControl(ctx, conn, stream, peer, h, cs, openTimer, opt)
 	}
 
 	// Extract the correlation id stamped by the client. It may be absent for
@@ -148,8 +163,9 @@ func serveStream(
 
 // serveControl handles the single per-session control stream: it
 // validates the control proto version, enforces exactly-one-per-session, replies
-// ok, and then serves gRPC until the stream closes — at which point the whole
-// session is torn down (control-stream closure is session death).
+// ok, logs an advisory when a client reports an over-age key, and then serves
+// gRPC until the stream closes — at which point the whole session is torn down
+// (control-stream closure is session death).
 func serveControl(
 	ctx context.Context,
 	conn transport.Conn,
@@ -158,6 +174,7 @@ func serveControl(
 	h proto.Header,
 	cs *controlState,
 	openTimer *time.Timer,
+	opt ServeOpts,
 ) error {
 	if h.Meta["proto"] != "1" {
 		_ = proto.WriteResponse(stream, proto.Response{
@@ -178,6 +195,26 @@ func serveControl(
 		return nil
 	}
 	openTimer.Stop()
+
+	// Log an advisory when the client reports its key creation time and the
+	// agent has a warn threshold configured. This is self-asserted data from
+	// an already-authenticated peer — it is never used to gate the session.
+	if raw, ok := h.Meta["key_created"]; ok && opt.WarnKeyAgeDays > 0 {
+		if t, err := time.Parse(time.RFC3339, raw); err != nil {
+			slog.Debug("peer key_created field is not valid RFC3339; ignoring",
+				"peer", peer.Short(), "raw", raw,
+			)
+		} else {
+			ageDays := int(time.Since(t).Hours() / 24)
+			if ageDays > opt.WarnKeyAgeDays {
+				slog.Warn("peer key is over the rotation age threshold (advisory only; session continues)",
+					"peer", peer.Short(),
+					"key_age_days", ageDays,
+					"warn_key_age_days", opt.WarnKeyAgeDays,
+				)
+			}
+		}
+	}
 
 	if err := proto.WriteResponse(stream, proto.Response{Status: proto.StatusOK, Msg: agentVersionMsg}); err != nil {
 		stream.Reset(proto.StreamResetCode)

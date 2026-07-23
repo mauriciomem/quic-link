@@ -4,47 +4,135 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"time"
 
+	"github.com/spf13/cobra"
+
+	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/probe"
 	"github.com/mauriciomem/quic-link/internal/transport"
-	"github.com/spf13/cobra"
 )
 
-func newPingCmd() *cobra.Command {
+func newPingCmd(a *app) *cobra.Command {
 	var (
-		server  string
-		count   int
-		keyFile string
-		pin     string
+		serverFlag string
+		count      int
+		keyFile    string
+		pin        string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "ping",
+		Use:   "ping [SERVER]",
 		Short: "Measure QUIC handshake time and RTT to an agent",
 		Long: `Send one or more probe connections to a quic-link agent and report
 transport RTT statistics and control-stream RPC round-trip time.
 
 Each probe opens a fresh QUIC connection so the handshake cost is measured
-independently. Both --server and --pin are required.`,
+independently. SERVER is the name of a server defined in the config file; if
+omitted and exactly one enabled server exists, it is used automatically.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if server == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("--server is required")
+			flags := cmd.Flags()
+
+			// --- resolve the effective server config --------------------
+
+			srv := config.Server{}
+			serverName := ""
+
+			if len(args) == 1 {
+				serverName = args[0]
+				named, ok := a.cfg.Servers[serverName]
+				if !ok {
+					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+					return usageErrorf("server %q not found in config", serverName)
+				}
+				srv = named
+			} else if flags.Changed("server") {
+				serverName = ""
+			} else {
+				enabled := enabledServers(a.cfg.Servers)
+				switch len(enabled) {
+				case 1:
+					for name, s := range enabled {
+						serverName = name
+						srv = s
+					}
+				case 0:
+					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+					return usageErrorf("no SERVER given and no enabled servers in config; use --server or add a [servers.<name>] entry")
+				default:
+					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+					return usageErrorf("no SERVER given and %d enabled servers in config; specify one: %s",
+						len(enabled), serverNameList(enabled))
+				}
 			}
-			serverPin, err := identity.ParsePin(pin)
+
+			// --- overlay Changed flags ----------------------------------
+
+			if flags.Changed("server") {
+				srv.Addr = serverFlag
+				srv.Listen = ""
+			}
+			if flags.Changed("pin") {
+				srv.Pin = pin
+			}
+			if flags.Changed("key") {
+				a.cfg.Identity.KeyFile = keyFile
+			}
+
+			// --- enabled check ------------------------------------------
+
+			if srv.Enabled != nil && !*srv.Enabled {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("server %q is disabled; set enabled = true in the config to use it", serverName)
+			}
+
+			// --- reverse-mode guard ------------------------------------
+
+			if srv.Listen != "" && srv.Addr == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("reverse mode (listen) is not yet supported; it runs in a later phase")
+			}
+
+			if srv.Addr == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("--server is required (or specify a SERVER name with an addr in the config)")
+			}
+
+			// --- pin validation ----------------------------------------
+
+			serverPin, err := identity.ParsePin(srv.Pin)
 			if err != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("--pin is required and must be a valid pin: %v", err)
+				return usageErrorf("pin is required and must be a valid pin: %v", err)
 			}
-			return pingRun(cmd.Context(), server, count, keyFile, serverPin)
+
+			// --- validate the effective config -------------------------
+
+			warnings, err := a.cfg.Validate(config.RoleClient)
+			for _, w := range warnings {
+				slog.Warn(w)
+			}
+			if err != nil {
+				return err
+			}
+
+			// --- run ---------------------------------------------------
+
+			effectiveKey := a.cfg.Identity.KeyFile
+			if flags.Changed("key") {
+				effectiveKey = keyFile
+			}
+
+			return pingRun(cmd.Context(), srv.Addr, count, effectiveKey, serverPin)
 		},
 	}
 
-	cmd.Flags().StringVar(&server, "server", "", "host:port of the quic-link agent")
+	cmd.Flags().StringVar(&serverFlag, "server", "", "host:port of the quic-link agent (overrides config)")
 	cmd.Flags().IntVar(&count, "count", 3, "number of probes to send")
 	cmd.Flags().StringVar(&keyFile, "key", defaultKeyPath(), "path to the Ed25519 identity key (PKCS#8 PEM)")
 	cmd.Flags().StringVar(&pin, "pin", "", "expected agent pin (base64; from `quic-link keygen` on the agent)")

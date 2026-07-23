@@ -73,7 +73,7 @@ func Ping(ctx context.Context, t transport.Transport, serverAddr string) (*Resul
 	// Application round-trip over the control stream. control.Open
 	// already issues one establishing Ping; a second, timed Ping isolates the
 	// steady-state RPC latency.
-	client, err := control.Open(ctx, conn, "quic-link ping")
+	client, err := control.Open(ctx, conn, "quic-link ping", control.OpenOpts{})
 	if err != nil {
 		// A pin rejected by the agent tears the connection down after our own
 		// handshake completes, so it surfaces here rather than at Dial. Report

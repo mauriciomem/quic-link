@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
@@ -22,6 +23,8 @@ func exitCodeForError(err error) int {
 	case errors.Is(err, transport.ErrAuthFailed):
 		return 4
 	case errors.Is(err, errUsage):
+		return 2
+	case errors.Is(err, config.ErrInvalid):
 		return 2
 	default:
 		return 1

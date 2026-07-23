@@ -234,6 +234,47 @@ func TestVerifyPinRejectsEmptyChain(t *testing.T) {
 	}
 }
 
+// TestReadMetaRoundTrip verifies that ReadMeta correctly parses what WriteMeta
+// writes, and returns the same UTC time to second precision.
+func TestReadMetaRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key.pem")
+
+	// WriteMeta truncates to second precision (RFC3339), so we do the same.
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if err := WriteMeta(keyPath, now); err != nil {
+		t.Fatalf("WriteMeta: %v", err)
+	}
+
+	got, present, err := ReadMeta(keyPath)
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if !present {
+		t.Fatal("ReadMeta: present = false, want true")
+	}
+	if !got.Equal(now) {
+		t.Errorf("ReadMeta time = %v, want %v", got, now)
+	}
+}
+
+// TestReadMetaAbsent verifies that ReadMeta returns present=false and nil
+// error when the sidecar file does not exist.
+func TestReadMetaAbsent(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "key.pem")
+	// No WriteMeta call — the .meta file does not exist.
+
+	_, present, err := ReadMeta(keyPath)
+	if err != nil {
+		t.Fatalf("ReadMeta for absent file: %v", err)
+	}
+	if present {
+		t.Fatal("ReadMeta: present = true for absent file, want false")
+	}
+}
+
 func mustKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	k, err := Generate()

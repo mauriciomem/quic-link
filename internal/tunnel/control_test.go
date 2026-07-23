@@ -52,7 +52,7 @@ func TestControlPingE2E(t *testing.T) {
 	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 
 	conn := dialConn(t, ctx, clientTLS, serverAddr)
-	client, err := control.Open(ctx, conn, "test-client")
+	client, err := control.Open(ctx, conn, "test-client", control.OpenOpts{})
 	if err != nil {
 		t.Fatalf("control.Open: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestControlSecondStreamRejected(t *testing.T) {
 	conn := dialConn(t, ctx, clientTLS, serverAddr)
 
 	// First control stream (established, kept open).
-	client, err := control.Open(ctx, conn, "test-client")
+	client, err := control.Open(ctx, conn, "test-client", control.OpenOpts{})
 	if err != nil {
 		t.Fatalf("control.Open: %v", err)
 	}

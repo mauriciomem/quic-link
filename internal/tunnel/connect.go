@@ -25,6 +25,16 @@ type Forward struct {
 	Target   string
 }
 
+// ConnectOpts carries optional parameters for Connect. All fields are optional;
+// the zero value is valid and produces the same behaviour as a bare Connect call.
+type ConnectOpts struct {
+	// KeyCreated is an RFC3339 UTC string recording when the client's identity
+	// key was generated. When non-empty it is forwarded to the control-stream
+	// header so the agent can log a rotation reminder for over-age client keys.
+	// Advisory only — never gates a connection.
+	KeyCreated string
+}
+
 // Connect forwards each TCP connection accepted on every Forward's listener to
 // the QUIC agent at serverAddr via t as a single QUIC stream naming that
 // forward's logical target. All forwards share one persistent QUIC connection,
@@ -37,8 +47,13 @@ func Connect(
 	t transport.Transport,
 	serverAddr string,
 	forwards []Forward,
+	opts ...ConnectOpts,
 ) error {
-	mgr := &connManager{t: t, serverAddr: serverAddr}
+	var opt ConnectOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	mgr := &connManager{t: t, serverAddr: serverAddr, keyCreated: opt.KeyCreated}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -227,6 +242,10 @@ type connManager struct {
 	dialDone      chan struct{}
 	t             transport.Transport
 	serverAddr    string
+	// keyCreated is included in the control-stream header when non-empty so
+	// the agent can log a rotation reminder for over-age client keys.
+	// It is set once at construction and never mutated.
+	keyCreated string
 }
 
 // get returns the current QUIC connection or dials a new one.  If a dial is
@@ -266,7 +285,9 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 	// the agent closes the session if it does not arrive in time.
 	var cclient *control.Client
 	if err == nil {
-		cclient, err = control.Open(ctx, conn, clientVersion)
+		cclient, err = control.Open(ctx, conn, clientVersion, control.OpenOpts{
+			KeyCreated: m.keyCreated,
+		})
 		if err != nil {
 			_ = conn.CloseWithError(0x03, "control open failed")
 			conn = nil

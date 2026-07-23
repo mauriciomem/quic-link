@@ -140,3 +140,65 @@ internet still flows — so `connect`/`ping` to a LAN server time out with
 `serve --service-addr` is the address the server *dials* to reach the upstream
 service (sshd), not a bind address. Use `127.0.0.1:22`, not `0.0.0.0:22`
 (`0.0.0.0` is a listen/wildcard address and is not a valid dial target).
+
+---
+
+## Configuration file
+
+quic-link reads `~/.config/quic-link/config.toml` by default. A different path
+can be specified with the global `--config PATH` flag.
+
+**Precedence** (highest to lowest):
+1. Command-line flags
+2. Environment variables (`QUIC_LINK_*`)
+3. Config file
+4. Built-in defaults
+
+The config file uses TOML format with strict unknown-key rejection — any
+unrecognised key is a startup error. Changes to the file take effect only after
+a restart.
+
+### Client (`connect` / `ping`)
+
+```toml
+schema = 1
+
+[servers.myserver]
+addr = "myserver.example.com:443"    # host:port of the agent
+pin  = "<agent-pin>"                 # from 'quic-link keygen' on the agent
+
+# Optional per-server settings:
+# enabled    = true                  # set to false to skip this server
+# local_ports = { ssh = 2222, docker = 2375 }  # override local port selection
+```
+
+### Agent (`agent` / `serve`)
+
+```toml
+schema = 1
+
+[identity]
+key_file          = "~/.config/quic-link/key.pem"  # default
+warn_key_age_days = 180   # log a rotation reminder after this many days (0 = off)
+refuse_old_key    = false # if true, agent refuses to start with an over-age key
+
+[agent]
+listen             = ":443"
+authorized_clients = ["<client-pin>"]   # repeatable; at least one required
+
+# Optional route overrides:
+# [agent.routes]
+# ssh    = "tcp://127.0.0.1:22"
+# docker = "unix:///var/run/docker.sock"
+```
+
+### Logging
+
+```toml
+[log]
+level  = "info"   # debug | info | warn | error
+format = "text"   # text | json
+```
+
+All log-level and format settings can also be controlled via `QUIC_LINK_LOG_LEVEL`
+and `QUIC_LINK_LOG_FORMAT` environment variables.
