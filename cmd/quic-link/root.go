@@ -64,9 +64,18 @@ Examples:
 			// Load the config file. An empty configPath means "try the
 			// default location; missing is fine." An explicit path that does
 			// not exist is an error (wrapped ErrInvalid → exit 2).
-			cfg, err := config.Load(a.configPath)
-			if err != nil {
-				return err
+			// keygen creates the identity before any config need exist and
+			// reads nothing from config, so a missing or malformed config must
+			// never block key generation. Every other verb loads config here.
+			var cfg *config.Config
+			if cmd.Name() == "keygen" {
+				cfg = config.Defaults()
+			} else {
+				loaded, lerr := config.Load(a.configPath)
+				if lerr != nil {
+					return lerr
+				}
+				cfg = loaded
 			}
 			a.cfg = cfg
 

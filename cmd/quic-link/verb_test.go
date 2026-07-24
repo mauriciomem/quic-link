@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,19 +112,6 @@ enabled = false
 			t.Error("s1 with enabled=false should NOT be in enabled map")
 		}
 	})
-}
-
-// ---- sortStrings ------------------------------------------------------------
-
-func TestSortStrings(t *testing.T) {
-	ss := []string{"banana", "apple", "cherry"}
-	sortStrings(ss)
-	want := []string{"apple", "banana", "cherry"}
-	for i := range want {
-		if ss[i] != want[i] {
-			t.Errorf("sortStrings[%d] = %q, want %q", i, ss[i], want[i])
-		}
-	}
 }
 
 // ---- bindFreePort -----------------------------------------------------------
@@ -469,4 +457,35 @@ func TestBindFreePortStable(t *testing.T) {
 	if port1 != port2 {
 		t.Errorf("bindFreePort returned different ports: %d vs %d", port1, port2)
 	}
+}
+
+// ---- bindFreePortPair -------------------------------------------------------
+
+func TestBindFreePortPair(t *testing.T) {
+	t.Run("both_free_returns_base_pair", func(t *testing.T) {
+		ssh, docker, err := bindFreePortPair("127.0.0.1", 40200, 40201, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ssh != 40200 || docker != 40201 {
+			t.Errorf("got (%d,%d), want (40200,40201)", ssh, docker)
+		}
+	})
+	t.Run("busy_base_skips_to_next_block_keeping_pair", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:40300")
+		if err != nil {
+			t.Skipf("could not occupy base port: %v", err)
+		}
+		defer ln.Close()
+		ssh, docker, err := bindFreePortPair("127.0.0.1", 40300, 40301, 10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ssh == 40300 {
+			t.Errorf("ssh should have skipped the busy base 40300, got %d", ssh)
+		}
+		if docker != ssh+1 {
+			t.Errorf("docker %d should be ssh+1 (%d) — the pair must stay coherent", docker, ssh+1)
+		}
+	})
 }

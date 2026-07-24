@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -12,6 +14,15 @@ import (
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
+)
+
+const (
+	// portProbeBlocks is how many ten-port blocks the auto ssh/docker probe
+	// tries before giving up (base, base+10, base+20, ...).
+	portProbeBlocks = 10
+	// portProbeWindow is how many consecutive ports a single-service probe
+	// tries before giving up.
+	portProbeWindow = 10
 )
 
 func newConnectCmd(a *app) *cobra.Command {
@@ -40,13 +51,10 @@ automatically. Flags override the resolved server's settings.`,
 
 			// --- resolve the effective server config --------------------
 
-			// Start from an empty server; flags alone are sufficient when
-			// no config file is present.
 			srv := config.Server{}
 			serverName := ""
 
 			if len(args) == 1 {
-				// Positional SERVER → look it up in the config.
 				serverName = args[0]
 				named, ok := a.cfg.Servers[serverName]
 				if !ok {
@@ -55,10 +63,8 @@ automatically. Flags override the resolved server's settings.`,
 				}
 				srv = named
 			} else if flags.Changed("server") {
-				// No positional; --server given → synthesise from flags.
 				serverName = "" // flag-only, no config name
 			} else {
-				// Neither positional nor --server: try sole-enabled default.
 				enabled := enabledServers(a.cfg.Servers)
 				switch len(enabled) {
 				case 1:
@@ -80,8 +86,6 @@ automatically. Flags override the resolved server's settings.`,
 
 			if flags.Changed("server") {
 				srv.Addr = serverFlag
-				// A --server flag implies forward mode; clear listen so the
-				// reverse-mode guard below doesn't misfire.
 				srv.Listen = ""
 			}
 			if flags.Changed("pin") {
@@ -99,15 +103,12 @@ automatically. Flags override the resolved server's settings.`,
 			}
 
 			// --- reverse-mode guard ------------------------------------
-			// Reverse mode (the agent dials us) is not yet implemented.
-			// A server entry with listen set instead of addr means the
-			// operator wants reverse mode, which lands in a later release.
+
 			if srv.Listen != "" && srv.Addr == "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
 				return usageErrorf("reverse mode (listen) is not yet supported; it runs in a later phase")
 			}
 
-			// Addr is now required (either from config or --server flag).
 			if srv.Addr == "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
 				return usageErrorf("--server is required (or specify a SERVER name with an addr in the config)")
@@ -122,36 +123,60 @@ automatically. Flags override the resolved server's settings.`,
 			}
 
 			// --- resolve local ports -----------------------------------
+			// Explicit --local / --local-docker flags are used verbatim. Auto
+			// ports derive from the server name; ssh and docker are probed
+			// together as a coherent block (stepping by ten) so they never
+			// resolve to the same port when the base is contended. Probing each
+			// service independently could hand both the same port and collide
+			// at bind time.
+			sshSet := flags.Changed("local")
+			dockerSet := flags.Changed("local-docker")
+			sshPort, dockerPort := config.LocalPorts(serverName, srv.LocalPorts)
 
-			// If the user explicitly set --local or --local-docker, use the
-			// flag value verbatim.  Otherwise, derive deterministic ports from
-			// the server name and probe for a free port within a small window.
 			var localSSH, localDocker2 string
-			if flags.Changed("local") {
+			switch {
+			case sshSet && dockerSet:
 				localSSH = local
-			} else {
-				sshPort, _ := config.LocalPorts(serverName, srv.LocalPorts)
-				port, bindErr := bindFreePort("127.0.0.1", sshPort, 10)
-				if bindErr != nil {
+				localDocker2 = localDocker
+			case !sshSet && !dockerSet:
+				s, d, perr := bindFreePortPair("127.0.0.1", sshPort, dockerPort, portProbeBlocks)
+				if perr != nil {
+					return fmt.Errorf("no free local port block for ssh/docker near %d/%d: %w",
+						sshPort, dockerPort, perr)
+				}
+				localSSH = fmt.Sprintf("127.0.0.1:%d", s)
+				localDocker2 = fmt.Sprintf("127.0.0.1:%d", d)
+			case sshSet:
+				localSSH = local
+				port, perr := bindFreePort("127.0.0.1", dockerPort, portProbeWindow)
+				if perr != nil {
+					return fmt.Errorf("no free local port for docker (tried %d:%d): %w",
+						dockerPort, dockerPort+portProbeWindow-1, perr)
+				}
+				localDocker2 = fmt.Sprintf("127.0.0.1:%d", port)
+			default: // only --local-docker set
+				localDocker2 = localDocker
+				port, perr := bindFreePort("127.0.0.1", sshPort, portProbeWindow)
+				if perr != nil {
 					return fmt.Errorf("no free local port for ssh (tried %d:%d): %w",
-						sshPort, sshPort+9, bindErr)
+						sshPort, sshPort+portProbeWindow-1, perr)
 				}
 				localSSH = fmt.Sprintf("127.0.0.1:%d", port)
 			}
 
-			if flags.Changed("local-docker") {
-				localDocker2 = localDocker
-			} else {
-				_, dockerPort := config.LocalPorts(serverName, srv.LocalPorts)
-				port, bindErr := bindFreePort("127.0.0.1", dockerPort, 10)
-				if bindErr != nil {
-					return fmt.Errorf("no free local port for docker (tried %d:%d): %w",
-						dockerPort, dockerPort+9, bindErr)
-				}
-				localDocker2 = fmt.Sprintf("127.0.0.1:%d", port)
-			}
-
 			// --- validate the effective config -------------------------
+			// Register the resolved server (with flag overrides applied) under
+			// its name — or a synthetic key when it came only from flags — so
+			// Validate checks exactly the server this run will use, taking the
+			// same path config-named servers take.
+			regKey := serverName
+			if regKey == "" {
+				regKey = "(flags)"
+			}
+			if a.cfg.Servers == nil {
+				a.cfg.Servers = map[string]config.Server{}
+			}
+			a.cfg.Servers[regKey] = srv
 
 			warnings, err := a.cfg.Validate(config.RoleClient)
 			for _, w := range warnings {
@@ -193,37 +218,21 @@ func enabledServers(servers map[string]config.Server) map[string]config.Server {
 	return out
 }
 
-// serverNameList returns a comma-separated list of server names for error messages.
+// serverNameList returns a comma-separated, sorted list of server names for
+// error messages.
 func serverNameList(servers map[string]config.Server) string {
 	names := make([]string, 0, len(servers))
 	for name := range servers {
 		names = append(names, name)
 	}
-	// Stable order for deterministic error messages.
-	sortStrings(names)
-	result := ""
-	for i, n := range names {
-		if i > 0 {
-			result += ", "
-		}
-		result += n
-	}
-	return result
-}
-
-// sortStrings sorts a []string in place (avoids importing sort in every caller).
-func sortStrings(ss []string) {
-	for i := 1; i < len(ss); i++ {
-		for j := i; j > 0 && ss[j] < ss[j-1]; j-- {
-			ss[j], ss[j-1] = ss[j-1], ss[j]
-		}
-	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // bindFreePort tries to bind host:base on TCP, incrementing by 1 up to
 // base+window-1. Returns the first port that binds successfully, or an error
 // if all attempts fail. The listener is closed immediately; the port is not
-// reserved (TOCTOU is acceptable for dev-ergonomics use cases).
+// reserved (the probe-to-bind race is accepted for this dev-ergonomics use).
 func bindFreePort(host string, base, window int) (int, error) {
 	for i := range window {
 		port := base + i
@@ -235,6 +244,31 @@ func bindFreePort(host string, base, window int) (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("all ports in [%d, %d) busy", base, base+window)
+}
+
+// bindFreePortPair finds a coherent (ssh, docker) port pair, both free at the
+// same instant, by stepping both bases together in ten-port blocks. Holding
+// both listeners simultaneously during the probe guarantees the two services
+// never receive the same port. The listeners are closed immediately; the ports
+// are not reserved (the probe-to-bind race is accepted for this use).
+func bindFreePortPair(host string, sshBase, dockerBase, blocks int) (ssh, docker int, err error) {
+	for i := range blocks {
+		off := i * 10
+		sp, dp := sshBase+off, dockerBase+off
+		l1, e1 := net.Listen("tcp", fmt.Sprintf("%s:%d", host, sp))
+		if e1 != nil {
+			continue
+		}
+		l2, e2 := net.Listen("tcp", fmt.Sprintf("%s:%d", host, dp))
+		if e2 != nil {
+			_ = l1.Close()
+			continue
+		}
+		_ = l1.Close()
+		_ = l2.Close()
+		return sp, dp, nil
+	}
+	return 0, 0, fmt.Errorf("all %d ssh/docker port blocks near %d/%d busy", blocks, sshBase, dockerBase)
 }
 
 // connectRun is the implementation of the connect verb.

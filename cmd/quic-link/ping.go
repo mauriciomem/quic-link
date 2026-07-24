@@ -112,6 +112,16 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 			}
 
 			// --- validate the effective config -------------------------
+			// Register the resolved server (with flag overrides applied) so
+			// Validate checks the effective server this run will use.
+			regKey := serverName
+			if regKey == "" {
+				regKey = "(flags)"
+			}
+			if a.cfg.Servers == nil {
+				a.cfg.Servers = map[string]config.Server{}
+			}
+			a.cfg.Servers[regKey] = srv
 
 			warnings, err := a.cfg.Validate(config.RoleClient)
 			for _, w := range warnings {
