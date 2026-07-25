@@ -7,6 +7,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/quic-go/quic-go v0.60.0
 	github.com/spf13/cobra v1.10.2
+	go.uber.org/goleak v1.3.0
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 )

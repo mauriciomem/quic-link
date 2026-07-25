@@ -18,6 +18,12 @@ import (
 // non-retriable.
 var ErrAuthFailed = errors.New("transport: peer authentication failed (pin rejected)")
 
+// ErrUnreachable indicates the peer could not be reached — UDP was blocked by
+// a firewall, the server was not listening, or the handshake timed out. main()
+// maps it to the peer-unreachable exit code. Unlike an auth failure the peer
+// may become reachable later, so the reconnect loop may keep retrying.
+var ErrUnreachable = errors.New("transport: peer unreachable")
+
 // TLS alerts map to QUIC transport error codes 0x100 + alert (RFC 9001).
 const (
 	// tlsAlertBase is the offset QUIC adds to a TLS alert number.
@@ -98,16 +104,17 @@ func (t *QUICTransport) Close() error {
 }
 
 // classifyDialError wraps connection-setup errors with actionable messages:
-//   - HandshakeTimeoutError  → UDP likely blocked by firewall
+//   - HandshakeTimeoutError  → UDP likely blocked by firewall (wraps ErrUnreachable)
 //   - TransportError alertNoAppProtocol → ALPN/version mismatch (rebuild both)
 //   - TransportError in the TLS-alert range → pin rejected (wraps ErrAuthFailed)
-//   - ConnectionRefused → server actively refused (may be a pin mismatch)
+//   - ConnectionRefused → server not listening (wraps ErrUnreachable)
 func classifyDialError(err error) error {
 	var handshakeTimeout *quic.HandshakeTimeoutError
 	if errors.As(err, &handshakeTimeout) {
 		return fmt.Errorf(
-			"handshake timeout (UDP blocked or server unreachable; verify the"+
-				" server port is reachable from this host): %w", err)
+			"%w: handshake timeout (UDP blocked or server unreachable; verify"+
+				" the server port is reachable from this host): %w",
+			ErrUnreachable, err)
 	}
 	var transportErr *quic.TransportError
 	if errors.As(err, &transportErr) {
@@ -134,9 +141,25 @@ func classifyDialError(err error) error {
 		}
 		if transportErr.ErrorCode == quic.ConnectionRefused {
 			return fmt.Errorf(
-				"connection refused (server rejected the connection;"+
-					" verify the pins on both ends): %w", err)
+				"%w: connection refused (server is not listening or"+
+					" the address is wrong): %w",
+				ErrUnreachable, err)
 		}
+	}
+	// On some platforms (macOS loopback, UDP to a closed port) the handshake
+	// never gets a ICMP port-unreachable; quic-go instead exhausts the
+	// HandshakeIdleTimeout and returns an *quic.IdleTimeoutError. That error
+	// implements net.Error with Timeout()=true but does not match
+	// *quic.HandshakeTimeoutError above. Treat any remaining timeout as
+	// "peer unreachable" — inside classifyDialError we are always handling a
+	// Dial failure, so a timeout unambiguously means nothing was listening or
+	// UDP was blocked; it never represents a mid-connection idle expiry.
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return fmt.Errorf(
+			"%w: no response from server (UDP blocked or nothing listening"+
+				" at the address): %w",
+			ErrUnreachable, err)
 	}
 	return err
 }

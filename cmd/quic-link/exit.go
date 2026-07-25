@@ -11,6 +11,7 @@ import (
 
 // exitCodeForError maps a fatal error to a process exit code.
 // 2: usage/validation failure (missing required flag, bad value, etc.)
+// 3: peer unreachable (UDP blocked, server not listening, handshake timeout)
 // 4: authentication failure (peer rejected our pin or we rejected theirs)
 // 5: remote refused (unknown target, dial failed, draining) — via statusError
 // 1: anything else (network failure, I/O error, etc.)
@@ -20,6 +21,8 @@ func exitCodeForError(err error) int {
 		return exitCodeForStatus(se.status)
 	}
 	switch {
+	case errors.Is(err, transport.ErrUnreachable):
+		return 3
 	case errors.Is(err, transport.ErrAuthFailed):
 		return 4
 	case errors.Is(err, errUsage):

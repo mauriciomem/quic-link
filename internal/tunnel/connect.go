@@ -42,6 +42,11 @@ type ConnectOpts struct {
 // accept-loop goroutine runs per forward; the first non-ctx accept error
 // cancels the others and is returned. All listeners are closed on ctx.Done.
 // Runs until ctx is cancelled or a listener fails.
+//
+// The QUIC session is established eagerly at startup: if the agent is
+// unreachable or rejects the pin, Connect returns the classified error
+// immediately (before the accept loops start) so the caller can surface the
+// correct exit code without waiting for the first forwarded connection.
 func Connect(
 	ctx context.Context,
 	t transport.Transport,
@@ -57,6 +62,12 @@ func Connect(
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Dial eagerly so an unreachable or mis-pinned agent surfaces at startup
+	// rather than on the first forwarded connection.
+	if _, err := mgr.Establish(ctx); err != nil {
+		return err
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -248,8 +259,29 @@ type connManager struct {
 	keyCreated string
 }
 
-// get returns the current QUIC connection or dials a new one.  If a dial is
-// already in progress, callers block on the shared result.
+// Establish performs the eager initial dial and control-stream open before any
+// traffic flows, so an unreachable or mis-pinned agent is reported at startup
+// rather than on the first forwarded connection. On success the live session is
+// recorded and its drop-monitor started (subsequent drops re-dial lazily on the
+// next request, exactly as before). The returned error is already classified
+// (peer-unreachable or authentication-failure) for exit-code mapping.
+func (m *connManager) Establish(ctx context.Context) (transport.Conn, error) {
+	conn, err := m.t.Dial(ctx, m.serverAddr)
+	if err != nil {
+		return nil, err
+	}
+	cclient, err := openControlAndRecord(ctx, m, conn)
+	if err != nil {
+		return nil, err
+	}
+	startDropMonitor(m, conn, cclient)
+	slog.Info("connected to server", "server", m.serverAddr)
+	return conn, nil
+}
+
+// get returns the current QUIC connection or dials a new one. If a dial is
+// already in progress, callers block on the shared result. Subsequent calls
+// after Establish use this lazy re-dial path on connection drop.
 func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 	m.mu.Lock()
 	if m.current != nil {
@@ -279,37 +311,64 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 	done := m.dialDone
 	m.mu.Unlock()
 
-	conn, err := m.dialWithBackoff(ctx)
-
-	// Open the session's control stream immediately after a successful dial:
-	// the agent closes the session if it does not arrive in time.
+	conn, dialErr := m.dialWithBackoff(ctx)
 	var cclient *control.Client
-	if err == nil {
-		cclient, err = control.Open(ctx, conn, clientVersion, control.OpenOpts{
-			KeyCreated: m.keyCreated,
-		})
-		if err != nil {
-			_ = conn.CloseWithError(0x03, "control open failed")
+	if dialErr == nil {
+		cclient, dialErr = openControlAndRecord(ctx, m, conn)
+		if dialErr != nil {
 			conn = nil
 		}
 	}
 
 	m.mu.Lock()
-	m.current = conn
-	m.controlClient = cclient
-	m.dialErr = err
+	m.dialErr = dialErr
+	if dialErr != nil {
+		m.current = nil
+	}
 	m.dialing = false
 	m.mu.Unlock()
 	close(done)
 
+	if dialErr != nil {
+		return nil, dialErr
+	}
+	startDropMonitor(m, conn, cclient)
+	slog.Info("QUIC connection established", "server", m.serverAddr)
+	return conn, nil
+}
+
+// openControlAndRecord opens the control stream immediately after a successful
+// dial, records the live conn and control client under the manager mutex, and
+// returns the client. On control-open failure the conn is closed (with 0x03)
+// and the mutex fields are left nil. This is the shared post-dial tail called
+// by both Establish and get so the control-open logic and mutex bookkeeping are
+// never duplicated.
+func openControlAndRecord(ctx context.Context, m *connManager, conn transport.Conn) (*control.Client, error) {
+	cclient, err := control.Open(ctx, conn, clientVersion, control.OpenOpts{
+		KeyCreated: m.keyCreated,
+	})
 	if err != nil {
+		_ = conn.CloseWithError(0x03, "control open failed")
+		m.mu.Lock()
+		m.current = nil
+		m.controlClient = nil
+		m.mu.Unlock()
 		return nil, err
 	}
-	slog.Info("QUIC connection established", "server", m.serverAddr)
+	m.mu.Lock()
+	m.current = conn
+	m.controlClient = cclient
+	m.mu.Unlock()
+	return cclient, nil
+}
 
-	// Monitor for connection drop and nil out m.current so the next caller
-	// triggers a fresh dial; close the control client bound to this conn.
-	go func(cc *control.Client) {
+// startDropMonitor launches the goroutine that watches for a connection drop
+// and nils out m.current so the next get() triggers a fresh dial. It also
+// closes the control client when the connection dies. Exactly one monitor is
+// started per successful dial (from Establish or get), so the drop-monitor
+// code is never duplicated.
+func startDropMonitor(m *connManager, conn transport.Conn, cc *control.Client) {
+	go func() {
 		<-conn.Context().Done()
 		m.mu.Lock()
 		if m.current == conn {
@@ -321,9 +380,7 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 			_ = cc.Close()
 		}
 		slog.Info("QUIC connection dropped; will re-dial on next request")
-	}(cclient)
-
-	return conn, nil
+	}()
 }
 
 // invalidate marks conn as dead so the next get() will re-dial.
