@@ -1,10 +1,8 @@
 # quic-link
 
 quic-link is a single Go binary — a local client and a server-side **agent** —
-that multiplexes named services (today **SSH** and **Docker**; HTTP and job-control
-planned) over one mutually-authenticated QUIC session. Each end holds an Ed25519
-key and pins the other's public key during the handshake — no CA files. The wire
-protocol is framed and versioned (ALPN `quic-link/1`).
+that multiplexes named services over one mutually-authenticated QUIC session. 
+Each end holds a key and pins the other's public key during the handshake. 
 
 **Status:** core tunnel is complete (framed protocol, SSH + Docker routes, pinned
 identity, TOML config). A background daemon (with a status command), a loopback
@@ -30,7 +28,7 @@ quic-link keygen
 # -> pin: <base64>      (key written to ~/.config/quic-link/key.pem)
 ```
 
-Note each host's pin and **exchange them out of band**. `keygen` is idempotent —
+Note each host's pin and **exchange them out of band**. `keygen` is idempotent,
 reprints the existing pin. `keygen --force` rotates the key (peers must re-pair
 with the new pin).
 
@@ -57,7 +55,7 @@ quic-link connect \
   --pin <agent-pin>
 ```
 
-`connect` dials eagerly — it prints `connected to server` once the session is up.
+`connect` dials eagerly, it prints `connected to server` once the session is up.
 It opens two local ports: one for SSH and one for Docker. Use them in another terminal:
 
 ```bash
@@ -98,13 +96,6 @@ internal/probe/       ping: handshake timing + RTT (RFC 9002)
 ---
 
 ## Cross-platform notes (Linux & macOS)
-
-No cgo, no platform-specific syscalls beyond `SIGTERM`. quic-go handles per-OS
-UDP differences (ECN, GSO, DPLPMTUD) internally. The client always binds `udp4`
-— on macOS a dual-stack `[::]` socket silently fails to reach on-link IPv4 peers.
-
-Integration tests bind `127.0.0.1:0` and run without elevated privileges on both
-OSes.
 
 ### Binding UDP port 443
 
