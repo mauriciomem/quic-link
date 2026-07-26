@@ -348,6 +348,16 @@ func openControlAndRecord(ctx context.Context, m *connManager, conn transport.Co
 		KeyCreated: m.keyCreated,
 	})
 	if err != nil {
+		// The agent can reject our pin after our own handshake completes.
+		// When that happens, the rejection surfaces on the control-open error
+		// or the connection's close cause rather than at Dial. Check both
+		// before closing the conn so we don't overwrite the remote cause with
+		// our own CloseWithError call, then classify and propagate accordingly.
+		if authErr := transport.AuthError(err); authErr != nil {
+			err = authErr
+		} else if authErr := transport.AuthError(context.Cause(conn.Context())); authErr != nil {
+			err = authErr
+		}
 		_ = conn.CloseWithError(0x03, "control open failed")
 		m.mu.Lock()
 		m.current = nil

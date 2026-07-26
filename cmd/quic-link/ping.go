@@ -150,6 +150,22 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 	return cmd
 }
 
+// aggregateProbeError returns the error to report when every probe failed.
+// Auth failures take precedence over unreachability (auth is the more specific
+// and actionable diagnosis), which takes precedence over a generic failure.
+// When no probe failed for either classified reason the returned error wraps
+// neither sentinel.
+func aggregateProbeError(count int, authErr, unreachErr error) error {
+	switch {
+	case authErr != nil:
+		return fmt.Errorf("all %d probes failed: %w", count, authErr)
+	case unreachErr != nil:
+		return fmt.Errorf("all %d probes failed: %w", count, unreachErr)
+	default:
+		return fmt.Errorf("all %d probes failed", count)
+	}
+}
+
 // pingRun is the implementation of the ping verb.
 func pingRun(ctx context.Context, server string, count int, keyFile, serverPin string) error {
 	tlsConf, err := clientTLSFromFlags(keyFile, serverPin)
@@ -165,6 +181,7 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 		successfulRPC  int
 		totalRPC       float64
 		authErr        error // set if any probe failed the pin handshake
+		unreachErr     error // set if any probe could not reach the agent
 	)
 
 	for i := 1; i <= count; i++ {
@@ -188,6 +205,8 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 		if err != nil {
 			if errors.Is(err, transport.ErrAuthFailed) {
 				authErr = err
+			} else if errors.Is(err, transport.ErrUnreachable) {
+				unreachErr = err
 			}
 			fmt.Fprintf(os.Stderr, "probe %d/%d: %v\n", i, count, err)
 			continue
@@ -217,12 +236,7 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 	}
 
 	if successful == 0 {
-		// If every probe failed the pin handshake, surface it as an auth error
-		// so main() exits 4 rather than collapsing to the generic exit 1.
-		if authErr != nil {
-			return fmt.Errorf("all %d probes failed: %w", count, authErr)
-		}
-		return fmt.Errorf("all %d probes failed", count)
+		return aggregateProbeError(count, authErr, unreachErr)
 	}
 	n := float64(successful)
 	fmt.Printf("--- %s ping statistics ---\n", server)
