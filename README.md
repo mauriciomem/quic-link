@@ -1,47 +1,51 @@
-# quic-link — QUIC SSH tunnel (MVP)
+# quic-link
 
-`quic-link` is a minimal QUIC tunnel that forwards SSH connections.  
-One symmetric binary, two roles (`serve` / `connect`), and a `ping` subcommand.
+quic-link is a single Go binary — a local client and a server-side **agent** —
+that multiplexes named services (today **SSH** and **Docker**; HTTP and job-control
+planned) over one mutually-authenticated QUIC session. Each end holds an Ed25519
+key and pins the other's public key during the handshake — no CA files. The wire
+protocol is framed and versioned (ALPN `quic-link/1`).
+
+**Status:** core tunnel is complete (framed protocol, SSH + Docker routes, pinned
+identity, TOML config). A background daemon (with a status command), a loopback
+naming layer, and job runners are in progress.
 
 ## Quickstart
 
 **Prerequisites**
 
 ```bash
-# Fetch dependencies (one-time, from inside the module directory)
-cd quic-link
-go mod tidy
+go mod tidy   # one-time, from inside the module directory
 ```
 
 **1. Generate an identity on each host (one-time)**
 
-Authentication is mutual raw-public-key pinning (ADR-0004): each host holds an
-Ed25519 key and the two ends verify each other's *pin* — `base64(SHA-256(public
-key))` — during the QUIC handshake. There are no CA files.
+Authentication is mutual raw-public-key pinning: each host holds an Ed25519 key
+and the two ends verify each other's *pin* — `base64(SHA-256(public key))` —
+during the QUIC handshake. There are no CA files.
 
 ```bash
-# On BOTH the server and the client host:
+# On BOTH the agent host and the client host:
 quic-link keygen
-# -> pin: <base64>      (the key is written to ~/.config/quic-link/key.pem)
+# -> pin: <base64>      (key written to ~/.config/quic-link/key.pem)
 ```
 
-Note each host's printed pin (call them `<server-pin>` and `<client-pin>`) and
-**exchange them out of band** (paste them to each other). Re-running `keygen` is
-idempotent — it reprints the existing pin; `keygen --force` rotates the key
-(after which peers must re-pair with the new pin). Pairing-ergonomics upgrades
-that shrink this exchange are future work.
+Note each host's pin and **exchange them out of band**. `keygen` is idempotent —
+reprints the existing pin. `keygen --force` rotates the key (peers must re-pair
+with the new pin).
 
-**2. On the server** (port 443 UDP must be open)
+**2. On the agent host** (UDP port 443 must be open)
 
 ```bash
-quic-link serve \
+quic-link agent \
   --listen :443 \
   --service-addr 127.0.0.1:22 \
   --authorized-client <client-pin>
 ```
 
 `--authorized-client` is repeatable; at least one pin is required (the agent
-refuses to start with an empty set).
+refuses to start with an empty set). `--docker-addr` overrides the Docker socket
+(default `unix:///var/run/docker.sock`).
 
 **3. On the client**
 
@@ -49,27 +53,30 @@ refuses to start with an empty set).
 quic-link connect \
   --server myserver.example.com:443 \
   --local 127.0.0.1:2222 \
-  --pin <server-pin>
+  --local-docker 127.0.0.1:2375 \
+  --pin <agent-pin>
+```
 
-# In another terminal:
+`connect` dials eagerly — it prints `connected to server` once the session is up.
+It opens two local ports: one for SSH and one for Docker. Use them in another terminal:
+
+```bash
 ssh -p 2222 user@127.0.0.1
+docker -H tcp://127.0.0.1:2375 ps
 ```
 
 **4. Ping**
 
 ```bash
-quic-link ping \
-  --server myserver.example.com:443 --count 5 \
-  --pin <server-pin>
+quic-link ping --server myserver.example.com:443 --count 5 --pin <agent-pin>
 ```
 
-A wrong pin on either end fails the handshake and exits with code 4
-(authentication failure); the message names the mismatched pin.
+A wrong pin on either end fails the handshake and exits with code 4 (auth
+failure); the message names the mismatched pin.
 
 ## Build and test
 
 ```bash
-cd quic-link
 go build ./...
 go test ./...
 ```
@@ -77,86 +84,61 @@ go test ./...
 ## Architecture
 
 ```
-cmd/quic-link/        CLI + subcommand wiring
-internal/transport/   QUIC Transport abstraction + interface (TODO: TCP/wss fallback)
-internal/identity/    Ed25519 keys, pins, and the raw-public-key pinning TLS handshake
-internal/tunnel/      stream↔TCP proxy (serve + connect sides)
-internal/probe/       ping: handshake timing + RTT (RFC 9002 §5)
+cmd/quic-link/        CLI + subcommands (keygen, agent, connect, ping)
+internal/proto/       framed protocol (CBOR types, status codes, test vectors)
+internal/transport/   QUIC transport abstraction (+ in-memory impl for tests)
+internal/identity/    Ed25519 keys, pins, raw-public-key pinning TLS
+internal/router/      agent route table (named targets → tcp/unix) + authorization
+internal/tunnel/      stream ↔ TCP/unix splice (agent + connect sides)
+internal/control/     gRPC control stream over QUIC (ping RPC)
+internal/config/      TOML config loader (flags > env > file > defaults)
+internal/probe/       ping: handshake timing + RTT (RFC 9002)
 ```
 
 ---
 
 ## Cross-platform notes (Linux & macOS)
 
-The binary runs on both Linux and macOS. There is no platform-specific Go code, no cgo dependency, and no OS-specific syscalls beyond `syscall.SIGTERM`, which is available on both platforms. quic-go v0.60.0 handles all per-OS UDP differences (DPLPMTUD Don't-Fragment bit, ECN, and GSO on Linux) internally. The client binds an IPv4 (`udp4`) socket so on-link LAN peers are reachable on macOS (see the Local Network permission note below).
+No cgo, no platform-specific syscalls beyond `SIGTERM`. quic-go handles per-OS
+UDP differences (ECN, GSO, DPLPMTUD) internally. The client always binds `udp4`
+— on macOS a dual-stack `[::]` socket silently fails to reach on-link IPv4 peers.
 
-The integration tests bind loopback (`127.0.0.1`) on ephemeral ports (`:0`), so they run without elevated privileges on both OSes.
+Integration tests bind `127.0.0.1:0` and run without elevated privileges on both
+OSes.
 
 ### Binding UDP port 443
 
-Binding any port below 1024 requires elevated privileges on both Linux and macOS.
+Ports below 1024 require elevated privileges on Linux and macOS.
 
-- **Non-root testing**: use a high port instead, e.g. `--listen :4443`.
-- **Linux production alternative** (avoids running as root):
-  ```bash
-  sudo setcap 'cap_net_bind_service=+ep' ./quic-link
-  ```
-  This grants only the capability to bind low-numbered ports, with no other root privileges. There is no equivalent on macOS; use a high port or `sudo` there.
+- **High-port workaround:** `--listen :4443` (no privilege needed).
+- **Linux** (preferred over root): `sudo setcap 'cap_net_bind_service=+ep' ./quic-link` — no macOS equivalent; use a high port or `sudo`.
 
-### UDP receive-buffer warning
+### UDP receive buffer
 
-quic-go may log a warning if it cannot raise the UDP receive buffer to ~7 MB. This is a performance advisory (the tunnel still functions) but raising the limit silences it and maximises throughput under load.
-
-- **Linux**:
-  ```bash
-  sudo sysctl -w net.core.rmem_max=7340032
-  sudo sysctl -w net.core.rmem_default=7340032
-  ```
-  To persist across reboots, add both lines to `/etc/sysctl.conf`.
-
-- **macOS**:
-  ```bash
-  sudo sysctl -w kern.ipc.maxsockbuf=7340032
-  ```
+quic-go warns if it can't raise the UDP receive buffer to ~7 MB (perf advisory — tunnel still works). Raise it: **Linux** `sudo sysctl -w net.core.rmem_max=7340032 net.core.rmem_default=7340032` (add to `/etc/sysctl.conf` to persist); **macOS** `sudo sysctl -w kern.ipc.maxsockbuf=7340032`.
 
 ### macOS Local Network permission (macOS 15 Sequoia and later)
 
-On macOS 15+, an app must be granted **Local Network** access before the OS will
-deliver its unicast traffic to LAN addresses (`192.168.x`, `10.x`). Until granted,
-packets to the local subnet are **silently dropped** while traffic to the public
-internet still flows — so `connect`/`ping` to a LAN server time out with
-`timeout: no recent network activity` even though the network is fine.
+macOS 15+ silently drops unicast traffic to LAN addresses (`192.168.x`, `10.x`)
+until the responsible app is granted **Local Network** access. Symptom:
+`connect`/`ping` to a LAN agent times out with `timeout: no recent network
+activity` even though the network is fine.
 
-- Grant your terminal app (Terminal, iTerm, or VS Code) Local Network access under
-  **System Settings → Privacy & Security → Local Network**, then re-run. If a
-  permission prompt appears on first run, click **Allow**.
-- Running the client under `sudo` bypasses the check (root changes the responsible
-  process), which is a quick way to confirm this is the cause.
-- The client binds an IPv4 socket (`udp4`) rather than a dual-stack `[::]` socket:
-  on macOS a dual-stack socket fails to transmit to an on-link IPv4 neighbour.
+- Grant your terminal (Terminal, iTerm, VS Code) under **System Settings →
+  Privacy & Security → Local Network**, then re-run.
+- Running under `sudo` bypasses the check — useful to confirm this is the cause.
 
-### `--service-addr` must be a dial target
+### `--service-addr` is a dial target, not a bind address
 
-`serve --service-addr` is the address the server *dials* to reach the upstream
-service (sshd), not a bind address. Use `127.0.0.1:22`, not `0.0.0.0:22`
-(`0.0.0.0` is a listen/wildcard address and is not a valid dial target).
+`agent --service-addr` is the address the agent *dials* to reach sshd. Use
+`127.0.0.1:22`, not `0.0.0.0:22` (`0.0.0.0` is a wildcard listen address and is
+not a valid dial target).
 
 ---
 
 ## Configuration file
 
-quic-link reads `~/.config/quic-link/config.toml` by default. A different path
-can be specified with the global `--config PATH` flag.
-
-**Precedence** (highest to lowest):
-1. Command-line flags
-2. Environment variables (`QUIC_LINK_*`)
-3. Config file
-4. Built-in defaults
-
-The config file uses TOML format with strict unknown-key rejection — any
-unrecognised key is a startup error. Changes to the file take effect only after
-a restart.
+Reads `~/.config/quic-link/config.toml` by default (`--config PATH` to override). Precedence: CLI flags → `QUIC_LINK_*` env vars → file → built-in defaults. Unknown keys are a startup error; changes take effect after a restart.
 
 ### Client (`connect` / `ping`)
 
@@ -164,27 +146,27 @@ a restart.
 schema = 1
 
 [servers.myserver]
-addr = "myserver.example.com:443"    # host:port of the agent
+addr = "myserver.example.com:443"    # agent host:port
 pin  = "<agent-pin>"                 # from 'quic-link keygen' on the agent
 
-# Optional per-server settings:
-# enabled    = true                  # set to false to skip this server
-# local_ports = { ssh = 2222, docker = 2375 }  # override local port selection
+# Optional:
+# enabled     = true
+# local_ports = { ssh = 2222, docker = 2375 }
 ```
 
-### Agent (`agent` / `serve`)
+### Agent
 
 ```toml
 schema = 1
 
 [identity]
-key_file          = "~/.config/quic-link/key.pem"  # default
-warn_key_age_days = 180   # log a rotation reminder after this many days (0 = off)
-refuse_old_key    = false # if true, agent refuses to start with an over-age key
+key_file          = "~/.config/quic-link/key.pem"
+warn_key_age_days = 180   # rotation reminder after N days (0 = off)
+refuse_old_key    = false # refuse to start with an over-age key
 
 [agent]
 listen             = ":443"
-authorized_clients = ["<client-pin>"]   # repeatable; at least one required
+authorized_clients = ["<client-pin>"]
 
 # Optional route overrides:
 # [agent.routes]
@@ -196,9 +178,6 @@ authorized_clients = ["<client-pin>"]   # repeatable; at least one required
 
 ```toml
 [log]
-level  = "info"   # debug | info | warn | error
-format = "text"   # text | json
+level  = "info"   # debug | info | warn | error  (env: QUIC_LINK_LOG_LEVEL)
+format = "text"   # text | json                  (env: QUIC_LINK_LOG_FORMAT)
 ```
-
-All log-level and format settings can also be controlled via `QUIC_LINK_LOG_LEVEL`
-and `QUIC_LINK_LOG_FORMAT` environment variables.
