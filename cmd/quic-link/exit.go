@@ -5,13 +5,17 @@ import (
 	"fmt"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
 // exitCodeForError maps a fatal error to a process exit code.
 // 2: usage/validation failure (missing required flag, bad value, etc.)
-// 3: peer unreachable (UDP blocked, server not listening, handshake timeout)
+// 3: peer unreachable (UDP blocked, server not listening, handshake timeout);
+//
+//	also daemon-interaction failures (absent, stale schema, owner already running)
+//
 // 4: authentication failure (peer rejected our pin or we rejected theirs)
 // 5: remote refused (unknown target, dial failed, draining) — via statusError
 // 1: anything else (network failure, I/O error, etc.)
@@ -20,6 +24,8 @@ func exitCodeForError(err error) int {
 	if errors.As(err, &se) {
 		return exitCodeForStatus(se.status)
 	}
+	var ownerRunning *errOwnerRunningType
+	var squatter *errSquatterType
 	switch {
 	case errors.Is(err, transport.ErrUnreachable):
 		return 3
@@ -28,6 +34,21 @@ func exitCodeForError(err error) int {
 	case errors.Is(err, errUsage):
 		return 2
 	case errors.Is(err, config.ErrInvalid):
+		return 2
+	case errors.Is(err, ipc.ErrDaemonAbsent):
+		// Daemon not running; the verb already printed the remedy.
+		return 3
+	case errors.Is(err, ipc.ErrSchemaMismatch):
+		// Daemon is stale; the verb already printed the restart instruction.
+		return 3
+	case errors.As(err, &ownerRunning):
+		// A live owner is already running; exit 3 so the operator knows to use
+		// "quic-link status" instead of starting a second owner.
+		return 3
+	case errors.As(err, &squatter):
+		// The socket is occupied by an unrecognized process. This is an
+		// environment/usage problem (investigate the socket path), not a
+		// transient daemon-absent condition.
 		return 2
 	default:
 		return 1

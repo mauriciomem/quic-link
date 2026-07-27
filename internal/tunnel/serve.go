@@ -88,6 +88,13 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			// Connection closed or ctx cancelled; stop accepting streams.
+			// When the context is cancelled (agent shutting down), send a
+			// CONNECTION_CLOSE to the peer instead of waiting for the 60s
+			// idle timeout. Without this, the peer would wait the full
+			// MaxIdleTimeout before detecting the drop.
+			if ctx.Err() != nil {
+				_ = conn.CloseWithError(0, "agent shutting down")
+			}
 			return
 		}
 		go func() {

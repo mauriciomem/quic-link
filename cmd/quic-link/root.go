@@ -126,6 +126,8 @@ Examples:
 		newConnectCmd(a),
 		newPingCmd(a),
 		newStdioCmd(a),
+		newDaemonCmd(a),
+		newStatusCmd(a),
 	)
 
 	return root

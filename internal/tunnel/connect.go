@@ -90,6 +90,10 @@ func Connect(
 	err := <-errCh
 	cancel()
 	wg.Wait()
+	// Send a CONNECTION_CLOSE to the peer instead of waiting for the idle
+	// timeout. Without this the agent would wait up to 60s before detecting
+	// that the client is gone.
+	mgr.Close()
 	return err
 }
 
@@ -391,6 +395,25 @@ func startDropMonitor(m *connManager, conn transport.Conn, cc *control.Client) {
 		}
 		slog.Info("QUIC connection dropped; will re-dial on next request")
 	}()
+}
+
+// Close closes the current QUIC connection gracefully so the peer receives a
+// CONNECTION_CLOSE frame immediately rather than waiting for the idle timeout.
+// It is called after the accept loops stop (ctx cancelled, wg done) so no new
+// streams can be opened on the connection being closed.
+func (m *connManager) Close() {
+	m.mu.Lock()
+	conn := m.current
+	cc := m.controlClient
+	m.current = nil
+	m.controlClient = nil
+	m.mu.Unlock()
+	if conn != nil {
+		_ = conn.CloseWithError(0, "client shutting down")
+	}
+	if cc != nil {
+		_ = cc.Close()
+	}
 }
 
 // invalidate marks conn as dead so the next get() will re-dial.
