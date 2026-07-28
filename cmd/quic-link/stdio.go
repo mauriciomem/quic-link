@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/identity"
+	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
@@ -90,6 +92,40 @@ func newStdioCmd(a *app) *cobra.Command {
 			effectiveKey := a.cfg.Identity.KeyFile
 			if flags.Changed("key") {
 				effectiveKey = keyFile
+			}
+
+			// Try the daemon socket first. If the daemon is absent, fall through to
+			// the direct-QUIC path so stdio works without a running daemon.
+			if sock, sockErr := daemonSocketPath(a.cfg); sockErr == nil {
+				reqid := tunnel.NewReqID()
+				conn, aerr := ipc.NewClient(sock).Attach(serverName, target, map[string]string{"reqid": reqid})
+				switch {
+				case aerr == nil:
+					// Daemon attach succeeded. Splice stdin/stdout through the unix conn.
+					// The conn from Attach is a *net.UnixConn which implements CloseWrite.
+					tunnel.Pipe(&stdioRW{}, conn)
+					return nil
+				case errors.Is(aerr, ipc.ErrDaemonAbsent):
+					// Daemon not running — fall through to the direct-QUIC path.
+					// This fallback is a fully-authenticated fresh session: it
+					// dials the agent directly using the configured server pin
+					// and performs mutual Ed25519 verification itself. It is not
+					// a bypass of authentication; it is the same pinning path
+					// that the non-daemon connect verb uses.
+				case errors.Is(aerr, ipc.ErrSchemaMismatch):
+					fmt.Fprintf(os.Stderr, "quic-link: daemon socket schema mismatch; restart the daemon\n")
+					return aerr
+				default:
+					var ae *ipc.AttachStatusError
+					if errors.As(aerr, &ae) {
+						// The agent refused the target. Print the message to stderr
+						// (stdout carries only tunnelled bytes) and return a statusError
+						// so main() exits with the right code without double-logging.
+						fmt.Fprintf(os.Stderr, "agent refused: %s\n", ae.Msg)
+						return &statusError{status: proto.Status(ae.Status), msg: ae.Msg}
+					}
+					// Any other daemon error: fall through to direct dial.
+				}
 			}
 
 			return stdioRun(cmd.Context(), srv.Addr, target, effectiveKey, serverPin)

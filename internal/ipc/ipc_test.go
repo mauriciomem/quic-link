@@ -9,10 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/ipc"
+	"github.com/mauriciomem/quic-link/internal/router"
+	"github.com/mauriciomem/quic-link/internal/transport"
+	"github.com/mauriciomem/quic-link/internal/transport/mem"
+	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
 func TestMain(m *testing.M) {
@@ -35,8 +41,14 @@ func (s *stubStatus) StatusJSON() ([]byte, error) {
 }
 
 // stubPool is an AttachPool returning a configured state or error.
+// OpenConn returns errNotReady for servers not in the "connected" state,
+// and errNoConn for unknown servers. Tests that need a live splice use
+// the realAttachPool helper instead.
 type stubPool struct {
 	states map[string]string
+	// conn is returned by OpenConn when the server state is "connected".
+	// Nil means OpenConn returns an error (for not-ready / unknown-server tests).
+	conn tunnel.StreamConn
 }
 
 func (p *stubPool) EntryState(server string) (string, error) {
@@ -46,12 +58,142 @@ func (p *stubPool) EntryState(server string) (string, error) {
 	return "", fmt.Errorf("server %q not found", server)
 }
 
-// startTestServer starts a Server in a temp dir and returns the socket path.
+func (p *stubPool) OpenConn(_ context.Context, server string) (tunnel.StreamConn, string, error) {
+	st, ok := p.states[server]
+	if !ok {
+		return nil, "", fmt.Errorf("server %q not found", server)
+	}
+	if st != "connected" {
+		return nil, "", fmt.Errorf("server %q is %s; not ready", server, st)
+	}
+	if p.conn == nil {
+		return nil, "", fmt.Errorf("server %q: no conn configured in stub", server)
+	}
+	return p.conn, "stub1234", nil
+}
+
+// errNotReadyStreamConn is a StreamConn that always fails OpenStream.
+type errNotReadyStreamConn struct{}
+
+func (e *errNotReadyStreamConn) OpenStream(_ context.Context) (transport.Stream, error) {
+	return nil, fmt.Errorf("stub: stream open failed")
+}
+
+// newMemSetupForIPC creates an in-memory agent (tunnel.Serve with echo target)
+// and returns the client-side conn (as tunnel.StreamConn) for use as the
+// stubPool connection. It also opens the control stream so the agent's open
+// deadline does not fire during the test.
+func newMemSetupForIPC(t *testing.T) tunnel.StreamConn {
+	t.Helper()
+
+	clientLeaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (client): %v", err)
+	}
+	serverLeaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (server): %v", err)
+	}
+
+	hub := mem.NewHub()
+	srvAddr := "ipc-test-agent:1"
+	srvT := hub.Transport(srvAddr, mem.WithCert(serverLeaf))
+	cliT := hub.Transport("ipc-test-client:1", mem.WithCert(clientLeaf))
+
+	ln, err := srvT.Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { echoLn.Close() })
+	go runTestEchoSrv(echoLn)
+
+	rtr, err := router.New(map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		ln.Close()
+	})
+	go tunnel.Serve(ctx, ln, rtr) //nolint:errcheck
+
+	conn, err := cliT.Dial(ctx, srvAddr)
+	if err != nil {
+		t.Fatalf("dial agent: %v", err)
+	}
+	t.Cleanup(func() { conn.CloseWithError(0, "test done") }) //nolint:errcheck
+
+	// Open the control stream so the agent's 5s deadline does not close the session.
+	cclient, err := tunnel.OpenControl(ctx, conn, "ipc-test", control.OpenOpts{})
+	if err != nil {
+		t.Logf("OpenControl: %v (agent may accept for short test)", err)
+	} else if cclient != nil {
+		t.Cleanup(func() { cclient.Close() }) //nolint:errcheck
+	}
+
+	return conn
+}
+
+func runTestEchoSrv(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			buf := make([]byte, 4096)
+			for {
+				n, err := c.Read(buf)
+				if n > 0 {
+					c.Write(buf[:n]) //nolint:errcheck
+				}
+				if err != nil {
+					return
+				}
+			}
+		}(c)
+	}
+}
+
+// startServerWithOpts starts a Server with custom options and returns the socket path.
+// Uses shortSocketPath to stay within the 104-byte sun_path limit on macOS.
+func startServerWithOpts(t *testing.T, status ipc.StatusProvider, pool ipc.AttachPool, opts ipc.ServerOpts) string {
+	t.Helper()
+	// Use a unique short path based on pid+test name hash to avoid collisions.
+	sock := fmt.Sprintf("/tmp/ql-ipc-opts-%d-%d.sock", os.Getpid(), time.Now().UnixNano()%100000)
+	t.Cleanup(func() { os.Remove(sock) })
+	srv := ipc.NewServerWithOpts(sock, status, pool, opts)
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv.Serve(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return sock
+}
+
+// startTestServer starts a Server on a short socket path and returns the path.
 // The server is shut down and the socket removed on test cleanup.
+// Uses a short /tmp path to stay within macOS's 104-byte sun_path limit.
 func startTestServer(t *testing.T, status ipc.StatusProvider, pool ipc.AttachPool) string {
 	t.Helper()
-	dir := t.TempDir()
-	sock := filepath.Join(dir, "daemon.sock")
+	sock := fmt.Sprintf("/tmp/ql-ipc-test-%d-%d.sock", os.Getpid(), time.Now().UnixNano()%1000000)
+	t.Cleanup(func() { os.Remove(sock) })
 	srv := ipc.NewServer(sock, status, pool)
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("listen: %v", err)
@@ -186,12 +328,16 @@ func TestClientErrDaemonAbsent(t *testing.T) {
 }
 
 // TestAttachConnected verifies that an attach for a server in "connected" state
-// returns status 0 (the ack stub).
+// returns status 0 (the ack). Uses an in-memory agent so the splice path is
+// exercised end-to-end.
 func TestAttachConnected(t *testing.T) {
-	sock := startTestServer(t,
-		&stubStatus{data: []byte(`{}`)},
-		&stubPool{states: map[string]string{"server1": "connected"}},
-	)
+	agentConn := newMemSetupForIPC(t)
+	pool := &stubPool{
+		states: map[string]string{"server1": "connected"},
+		conn:   agentConn,
+	}
+	sock := startTestServer(t, &stubStatus{data: []byte(`{}`)}, pool)
+
 	resp := dialAndRaw(t, sock, ipc.Request{
 		SocketSchema: ipc.SocketSchema,
 		Kind:         "attach",

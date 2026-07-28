@@ -10,6 +10,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mauriciomem/quic-link/internal/proto"
+	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
 // defaultConnCap is the maximum number of concurrent socket connections the
@@ -36,15 +39,28 @@ type StatusProvider interface {
 	StatusJSON() ([]byte, error)
 }
 
-// AttachPool looks up a pool entry for a named server so the attach handler
-// can validate that the server exists and report its current state. The full
-// splice (socket conn → QUIC stream) is wired in a later slice; currently the
-// pool is consulted only to produce a meaningful ack status.
+// AttachPool looks up a pool entry for a named server and provides a live
+// connection for the attach splice. The server implementation (in
+// internal/daemon) satisfies both methods via its poolAttachAdapter.
 type AttachPool interface {
 	// EntryState returns the connection-state string for server, or an error
-	// if the server is unknown or disabled.
+	// if the server is unknown or disabled. Used for fast-fail diagnostics
+	// before calling OpenConn.
 	EntryState(server string) (state string, err error)
+
+	// OpenConn returns a live pooled connection for server, bounded-waiting
+	// on an in-flight reconnect up to the pool's internal readiness deadline
+	// (coalescing — never dialing a new connection). Returns the peer
+	// pin-prefix (8 chars) for the audit line and an error when the session
+	// is not ready. This is the readiness source of truth: a not-ready
+	// session fails here rather than at EntryState so transient reconnects
+	// are naturally absorbed.
+	OpenConn(ctx context.Context, server string) (conn tunnel.StreamConn, pinPrefix string, err error)
 }
+
+// attachReadyTimeout is the maximum time handleAttach waits for the pool to
+// provide a live connection when a reconnect is in progress.
+const attachReadyTimeout = 5 * time.Second
 
 // ServerOpts carries optional tuning for the Server. Zero value uses the
 // package-level defaults. These are policy settings, not contractual values.
@@ -181,11 +197,15 @@ func (s *Server) Serve(ctx context.Context) error {
 		s.wg.Add(1)
 		go func(c net.Conn) {
 			defer s.wg.Done()
-			defer func() {
-				// Release the semaphore slot when the handler finishes.
-				<-s.connSem
-			}()
-			s.handleConn(c)
+			// connSem slot: released early (via releaseConn) on the OK attach path
+			// so a long-lived splice does not hold the slot for hours. The Once
+			// guarantees exactly-once release on all paths.
+			var releaseOnce sync.Once
+			releaseConn := func() {
+				releaseOnce.Do(func() { <-s.connSem })
+			}
+			defer releaseConn() // fallback: releases on RPC/error paths
+			s.handleConn(ctx, c, releaseConn)
 		}(conn)
 	}
 
@@ -211,8 +231,10 @@ func (s *Server) Close() error {
 }
 
 // handleConn performs the peer-cred check, reads one Request, and dispatches.
-// The conn is always closed when the handler returns.
-func (s *Server) handleConn(conn net.Conn) {
+// The conn is always closed when the handler returns. releaseConn releases the
+// connSem slot; it is a sync.Once so callers may invoke it early (before a
+// long splice) without worrying about double-release.
+func (s *Server) handleConn(ctx context.Context, conn net.Conn, releaseConn func()) {
 	defer conn.Close()
 
 	// Peer-cred same-uid check at accept time. This is defense-in-depth on
@@ -274,7 +296,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	case "rpc":
 		s.handleRPC(conn, req)
 	case "attach":
-		s.handleAttach(conn, req)
+		s.handleAttach(ctx, conn, req, releaseConn)
 	default:
 		slog.Debug("ipc: unknown kind", "role", "daemon", "kind", req.Kind)
 		_ = writeResponse(conn, errorResponse(1, fmt.Sprintf("unknown kind %q", req.Kind)))
@@ -298,19 +320,13 @@ func (s *Server) handleRPC(conn net.Conn, req Request) {
 	}
 }
 
-// handleAttach validates the attach request and returns an ack. The global
-// in-flight attach cap is checked first; if it is exceeded the connection
-// receives a clean "too many open tunnels" error without opening a QUIC stream.
-//
-// The full socket→QUIC splice is wired in a later slice; this stub responds
-// immediately so the CLI can distinguish "server found and connected" from
-// "server unknown/not ready" via the Response.Status field.
-//
-// Splice wiring point: when the splice is implemented, it will be called here
-// after a status-0 Response has been written, handing conn and the opened QUIC
-// stream to tunnel.Pipe. The in-flight counter must remain incremented for the
-// duration of the splice.
-func (s *Server) handleAttach(conn net.Conn, req Request) {
+// handleAttach validates the attach request, acquires a live pooled connection,
+// sends an ack to the caller, and then bidirectionally splices the socket
+// connection to a QUIC stream for the named target. The in-flight-attach counter
+// is held for the full duration of the splice so the cap accurately reflects
+// active tunnels. The connSem slot is released early (via releaseConn) after the
+// ack so a long-lived splice does not starve concurrent status RPCs.
+func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, releaseConn func()) {
 	if req.Server == "" {
 		_ = writeResponse(conn, errorResponse(1, "attach: server name is required"))
 		return
@@ -322,7 +338,7 @@ func (s *Server) handleAttach(conn net.Conn, req Request) {
 
 	// Enforce the global in-flight-attach cap before opening a QUIC stream.
 	// This prevents a flood of socket connections from exhausting QUIC streams
-	// across the fleet. The cap is non-contractual and tunable.
+	// across the fleet. The cap is non-contractual and tunable via NewServerWithOpts.
 	current := s.inFlightAttaches.Add(1)
 	if current > s.attachCap {
 		s.inFlightAttaches.Add(-1)
@@ -336,21 +352,64 @@ func (s *Server) handleAttach(conn net.Conn, req Request) {
 	}
 	defer s.inFlightAttaches.Add(-1)
 
-	state, err := s.pool.EntryState(req.Server)
-	if err != nil {
-		slog.Debug("ipc: attach lookup", "role", "daemon", "server", req.Server, "err", err)
+	// Fast-fail path: check EntryState first so unknown/disabled servers get a
+	// crisp message rather than waiting the full readiness timeout. OpenConn is
+	// still the readiness source of truth for the connecting state.
+	if _, err := s.pool.EntryState(req.Server); err != nil {
+		slog.Debug("ipc: attach: unknown/disabled server", "role", "daemon", "server", req.Server, "err", err)
 		_ = writeResponse(conn, errorResponse(3, fmt.Sprintf("server %q: %v", req.Server, err)))
 		return
 	}
 
-	if state != "connected" {
-		_ = writeResponse(conn, errorResponse(3, fmt.Sprintf("server %q is %s; not ready", req.Server, state)))
+	// Wait up to attachReadyTimeout for a live pooled connection. A session
+	// that is reconnecting is absorbed here rather than failing immediately,
+	// as long as it completes within the deadline.
+	octx, cancel := context.WithTimeout(ctx, attachReadyTimeout)
+	poolConn, pinPrefix, err := s.pool.OpenConn(octx, req.Server)
+	cancel()
+	if err != nil {
+		slog.Debug("ipc: attach: pool not ready", "role", "daemon", "server", req.Server, "err", err)
+		_ = writeResponse(conn, errorResponse(3, fmt.Sprintf("server %q: not ready: %v", req.Server, err)))
 		return
 	}
 
-	// Send the attach-ack. The splice will be wired here in the next slice
-	// (1b.1c): after this Response the conn becomes the local leg of a
-	// tunnel.Pipe call connecting it to an opened QUIC stream.
-	_ = writeResponse(conn, okResponse(nil))
-	// splice seam: tunnel.Pipe(conn, quicStream) goes here.
+	// Derive the reqid for cross-host log correlation.
+	reqid := req.Meta["reqid"]
+	if reqid == "" {
+		reqid = tunnel.NewReqID()
+	}
+
+	start := time.Now()
+	tunnel.LogAttach(req.Server, req.Target, reqid, pinPrefix, start, false)
+	defer tunnel.LogAttach(req.Server, req.Target, reqid, pinPrefix, start, true)
+
+	// relayAck writes the ack to the socket caller and, on success, releases
+	// the connSem slot early so a long splice does not starve concurrent RPCs.
+	// The Once in releaseConn guarantees the slot is released exactly once
+	// even if this closure is called and then the defer in the accept goroutine
+	// fires again later.
+	relayAck := func(resp proto.Response) error {
+		var writeErr error
+		if resp.Status == proto.StatusOK {
+			writeErr = writeResponse(conn, okResponse(nil))
+		} else {
+			writeErr = writeResponse(conn, errorResponse(uint(proto.ExitCodeForStatus(resp.Status)), resp.Msg))
+		}
+		if writeErr != nil {
+			return writeErr
+		}
+		if resp.Status == proto.StatusOK {
+			// Release the connSem slot before entering the long splice so
+			// status RPCs are not starved by tunnel-idle time.
+			releaseConn()
+		}
+		return nil
+	}
+
+	// DoAttach opens one stream, writes the header, waits for the response,
+	// calls relayAck, and on success runs the bidirectional splice. It never
+	// dials. conn (the unix socket) is the local leg; poolConn is the QUIC leg.
+	if err := tunnel.DoAttach(ctx, poolConn, conn, req.Target, reqid, relayAck); err != nil {
+		slog.Debug("ipc: attach splice ended", "role", "daemon", "server", req.Server, "target", req.Target, "err", err)
+	}
 }

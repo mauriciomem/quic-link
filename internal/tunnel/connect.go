@@ -347,21 +347,18 @@ func (m *connManager) get(ctx context.Context) (transport.Conn, error) {
 // and the mutex fields are left nil. This is the shared post-dial tail called
 // by both Establish and get so the control-open logic and mutex bookkeeping are
 // never duplicated.
+//
+// The auth-rejection classification (checking both the control-open error and
+// the connection's close cause) lives in OpenControl; this wrapper adds only
+// the mutex bookkeeping and the conn.CloseWithError on failure. The two
+// dial-and-backoff loops (connManager.dialWithBackoff here vs.
+// dialEntry.runLoop in the daemon pool) converge into a shared shape when the
+// reverse-mode seam defines the common interface — that is deferred.
 func openControlAndRecord(ctx context.Context, m *connManager, conn transport.Conn) (*control.Client, error) {
-	cclient, err := control.Open(ctx, conn, clientVersion, control.OpenOpts{
+	cclient, err := OpenControl(ctx, conn, clientVersion, control.OpenOpts{
 		KeyCreated: m.keyCreated,
 	})
 	if err != nil {
-		// The agent can reject our pin after our own handshake completes.
-		// When that happens, the rejection surfaces on the control-open error
-		// or the connection's close cause rather than at Dial. Check both
-		// before closing the conn so we don't overwrite the remote cause with
-		// our own CloseWithError call, then classify and propagate accordingly.
-		if authErr := transport.AuthError(err); authErr != nil {
-			err = authErr
-		} else if authErr := transport.AuthError(context.Cause(conn.Context())); authErr != nil {
-			err = authErr
-		}
 		_ = conn.CloseWithError(0x03, "control open failed")
 		m.mu.Lock()
 		m.current = nil

@@ -11,6 +11,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/transport"
+	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
 // ExponentialReconnectPolicy is the production reconnect policy: exponential
@@ -488,18 +489,11 @@ func (e *dialEntry) Close(err error) {
 
 // openControlStream opens the control gRPC stream on conn, classifying auth
 // failures so the run-loop can stop retrying on a permanent rejection.
+// The auth-rejection classification (checking both the control-open error and
+// the connection close cause) is shared with the foreground connect path via
+// tunnel.OpenControl so the logic lives in exactly one place.
 func openControlStream(ctx context.Context, conn transport.Conn) (*control.Client, error) {
-	cclient, err := control.Open(ctx, conn, "quic-link daemon", control.OpenOpts{})
-	if err != nil {
-		if authErr := transport.AuthError(err); authErr != nil {
-			return nil, authErr
-		}
-		if authErr := transport.AuthError(context.Cause(conn.Context())); authErr != nil {
-			return nil, authErr
-		}
-		return nil, err
-	}
-	return cclient, nil
+	return tunnel.OpenControl(ctx, conn, "quic-link daemon", control.OpenOpts{})
 }
 
 // isAuthFailed reports whether err is a transport authentication failure that

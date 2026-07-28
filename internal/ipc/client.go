@@ -128,3 +128,74 @@ func (c *Client) Probe(timeout time.Duration) error {
 func isNoSuchFile(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, fs.ErrNotExist)
 }
+
+// AttachStatusError is returned by Client.Attach when the daemon's ack carries
+// a non-zero status. Status is already the final process exit code (the daemon
+// computed it from the agent's response). The CLI passes Status directly to
+// os.Exit; Msg is the agent's verbatim refusal message for stderr.
+type AttachStatusError struct {
+	Status int
+	Msg    string
+}
+
+// Error implements the error interface.
+func (e *AttachStatusError) Error() string {
+	return fmt.Sprintf("attach refused (status %d): %s", e.Status, e.Msg)
+}
+
+// Attach opens an attach connection to the daemon for server/target, sends the
+// attach request with the provided meta (e.g. reqid), and reads the ack
+// response. On a zero-status ack it returns the live socket conn for the caller
+// to splice — the conn is NOT closed (the caller owns it and must close it when
+// the splice is done). On a non-zero ack it closes the conn and returns an
+// *AttachStatusError. A daemon-absent condition returns ErrDaemonAbsent so the
+// caller can fall back to a direct dial.
+func (c *Client) Attach(server, target string, meta map[string]string) (net.Conn, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+
+	req := Request{
+		SocketSchema: SocketSchema,
+		Kind:         "attach",
+		Server:       server,
+		Target:       target,
+		Meta:         meta,
+	}
+	if err := writeRequest(conn, req); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ipc: write attach request: %w", err)
+	}
+
+	// Bound the ack read with a short deadline so a hung daemon does not
+	// block the caller forever. The ack is just one CBOR frame; 10s is ample.
+	// No deadline is set after the ack: the returned conn is a live splice
+	// that may legitimately idle for hours.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ipc: set ack deadline: %w", err)
+	}
+	resp, err := readResponse(conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ipc: read attach ack: %w", err)
+	}
+	// Clear the deadline so the returned conn is unrestricted for the splice.
+	_ = conn.SetReadDeadline(time.Time{})
+
+	if resp.SocketSchema != SocketSchema {
+		conn.Close()
+		return nil, fmt.Errorf("%w: daemon speaks schema %d, client expects %d",
+			ErrSchemaMismatch, resp.SocketSchema, SocketSchema)
+	}
+	if resp.Status != 0 {
+		conn.Close()
+		return nil, &AttachStatusError{Status: int(resp.Status), Msg: resp.Msg}
+	}
+
+	// Return the raw conn so the caller can call conn.(*net.UnixConn) if it
+	// needs CloseWrite for half-close semantics. The concrete type from
+	// net.Dial("unix", ...) is *net.UnixConn, which implements CloseWrite.
+	return conn, nil
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/ipc"
+	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
 // shortSocketPath returns a unix socket path short enough to fit within the
@@ -302,7 +303,8 @@ func (b *blockingStatusProvider) StatusJSON() ([]byte, error) {
 }
 
 // blockingAttachPool blocks in EntryState until release is closed, simulating
-// a slow attach operation that holds the in-flight counter up.
+// a slow attach operation that holds the in-flight counter up. OpenConn also
+// blocks so the in-flight attach counter remains held during the test window.
 type blockingAttachPool struct {
 	release chan struct{}
 }
@@ -310,4 +312,13 @@ type blockingAttachPool struct {
 func (p *blockingAttachPool) EntryState(_ string) (string, error) {
 	<-p.release
 	return "connected", nil
+}
+
+func (p *blockingAttachPool) OpenConn(ctx context.Context, _ string) (tunnel.StreamConn, string, error) {
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, "", ctx.Err()
+	}
+	return nil, "", fmt.Errorf("blocked pool: no conn")
 }

@@ -14,8 +14,18 @@
 //
 //   - ipc.Server accept loop: exits when Server.Close is called.
 //
-//   - per-conn IPC handler: exits after the request/response pair (or at
-//     the end of the attach splice in a later slice).
+//   - per-conn IPC handler: exits after the request/response pair (RPC)
+//     or when the splice ends (attach). The splice goroutine is owned by
+//     tunnel.Pipe and exits when both io.Copy directions complete.
+//
+//   - edge accept loops (two per enabled server: ssh and docker): exit when
+//     their listener is closed (by Close() or the ctx-cancel goroutine in
+//     the edge).
+//
+//   - per-accept-edge splice goroutines: spawned by the edge accept loop;
+//     each runs tunnel.DoAttach in its own goroutine and exits when the
+//     splice completes. Tracked by the edge's WaitGroup so edge.Close joins
+//     them all.
 //
 //   - root ctx cancel goroutine: cancels the root context on the first
 //     received signal; exits immediately.
@@ -35,7 +45,11 @@ import (
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/edge"
 	"github.com/mauriciomem/quic-link/internal/ipc"
+	"github.com/mauriciomem/quic-link/internal/router"
+	"github.com/mauriciomem/quic-link/internal/transport"
+	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
 // shutdownDeadline is the maximum time Run waits for the IPC server to finish
@@ -98,6 +112,33 @@ func Run(
 
 	slog.Info("daemon started", "role", "daemon", "socket", socketPath)
 
+	// Build one localPortEdge per enabled server. If a port pair cannot be
+	// acquired for a server, log loudly and continue — one bad port must not
+	// stop the entire fleet. The edge adapter satisfies both ipc.AttachPool and
+	// edge.ConnSource via the same poolAttachAdapter struct.
+	alloc := edge.PortAllocator{}
+	var edges []*edge.LocalPortEdge
+	for _, name := range sortedConfigServerNames(cfg.Servers) {
+		srv := cfg.Servers[name]
+		if srv.Enabled != nil && !*srv.Enabled {
+			continue
+		}
+		sshLn, dkrLn, err := alloc.AcquirePair(name, srv.LocalPorts)
+		if err != nil {
+			slog.Error("daemon: cannot acquire port pair for server; skipping edge",
+				"role", "daemon", "server", name, "err", err)
+			continue
+		}
+		e := edge.NewLocalPortEdge(ctx, name, sshLn, dkrLn, attachPool)
+		edges = append(edges, e)
+		slog.Info("daemon: edge listening",
+			"role", "daemon",
+			"server", name,
+			"ssh_port", sshLn.Addr(),
+			"docker_port", dkrLn.Addr(),
+		)
+	}
+
 	ipcDone := make(chan struct{})
 	go func() {
 		defer close(ipcDone)
@@ -118,12 +159,26 @@ func Run(
 		slog.Info("daemon exit", "role", "daemon")
 	}()
 
-	// Stop accepting new connections. Existing in-flight handlers continue
-	// until they finish or the drain deadline fires.
+	// Shutdown order matters: stop accepting new connections first, then reset
+	// QUIC sessions (unblocking in-flight splices), then close the edges, then
+	// wait for the IPC drain. Closing the pool before the IPC drain means every
+	// in-flight splice's io.Copy will unblock quickly rather than waiting for
+	// the idle timeout. Previously the pool was closed last, which caused every
+	// SIGTERM to hang until the drain deadline fired.
 	srv.Close()
 
-	// Wait for the IPC server drain with a bounded deadline. If the deadline
-	// fires before all handlers finish, log a warning and proceed — never hang.
+	// Reset all pooled QUIC connections. This sends CONNECTION_CLOSE to the
+	// agent and unblocks every active splice's io.Copy, allowing in-flight
+	// IPC handlers to exit promptly.
+	pool.Close()
+
+	// Close all edge listeners (unblocks Accept) and join edge splice goroutines.
+	for _, e := range edges {
+		e.Close()
+	}
+
+	// Wait for the IPC server drain with a bounded deadline. The drain should
+	// complete quickly now that the pool has been closed.
 	drainTimer := time.NewTimer(shutdownDeadline)
 	defer drainTimer.Stop()
 	select {
@@ -133,11 +188,6 @@ func Run(
 		slog.Warn("daemon: shutdown deadline exceeded; some handlers may still be running",
 			"role", "daemon", "deadline", shutdownDeadline)
 	}
-
-	// Close all sessions after the IPC server has stopped so no new attaches
-	// can race the pool teardown. CloseWithError propagates resets to any
-	// active QUIC streams, which in turn unblock the (future) splice goroutines.
-	pool.Close()
 
 	return ctx.Err()
 }
@@ -168,14 +218,21 @@ type SessionPool interface {
 }
 
 // Conn is the minimal surface of a transport connection needed by the pool
-// and the daemon orchestrator. It mirrors transport.Conn but is defined here
-// so internal/daemon does not import internal/transport directly.
+// and the daemon orchestrator. It mirrors the subset of transport.Conn that
+// the IPC attach path and the pool lifecycle need. internal/daemon does import
+// internal/transport (for the stream type in OpenStream and the type assertion
+// in poolAttachAdapter.OpenConn); this interface keeps the DI surface narrow so
+// test fakes only need to implement three methods.
 type Conn interface {
 	// Context returns the connection's lifecycle context; cancelled when
 	// the connection closes.
 	Context() context.Context
 	// CloseWithError closes the connection with an application-level error.
 	CloseWithError(code uint64, msg string) error
+	// OpenStream opens a new outbound bidirectional stream to the peer.
+	// This satisfies the tunnel.StreamConn interface so the attach splice path
+	// can call DoAttach on a pooled Conn without importing internal/transport.
+	OpenStream(ctx context.Context) (transport.Stream, error)
 }
 
 // SessionEntry is the per-server handle. A SessionPool holds one per enabled
@@ -394,13 +451,72 @@ func defaultReadMeta(keyPath string) (time.Time, bool, error) {
 	return readIdentityMeta(keyPath)
 }
 
-// poolAttachAdapter bridges SessionPool to ipc.AttachPool without importing
-// internal/ipc from internal/daemon (the dependency points inward: daemon
-// injects into ipc, not the other way around).
+// poolAttachAdapter bridges SessionPool to both ipc.AttachPool and
+// edge.ConnSource without importing either package from internal/daemon (the
+// dependency points inward). One struct, both interfaces.
 type poolAttachAdapter struct {
 	pool SessionPool
 }
 
+// EntryState satisfies the ipc.AttachPool interface.
 func (a *poolAttachAdapter) EntryState(server string) (string, error) {
 	return a.pool.EntryState(server)
+}
+
+// OpenConn satisfies both ipc.AttachPool and edge.ConnSource. It returns a live
+// pooled connection for server, blocking for an in-flight reconnect up to the
+// context deadline. The pool's Get is the readiness source of truth; the caller
+// (both the IPC server and the edge accept loops) applies its own context
+// deadline before calling this.
+//
+// The returned conn is a daemon.Conn which satisfies tunnel.StreamConn. The
+// type assertion to transport.Conn is safe: the pool only ever stores real
+// transport.Conn values (from QUIC) or mem.memConn values (from tests), both
+// of which implement transport.Conn. If the assertion fails the peer certificates
+// are unavailable and we return an empty pin prefix rather than failing.
+func (a *poolAttachAdapter) OpenConn(ctx context.Context, server string) (tunnel.StreamConn, string, error) {
+	c, err := a.pool.Get(ctx, server)
+	if err != nil {
+		return nil, "", fmt.Errorf("pool get %q: %w", server, err)
+	}
+	if c == nil {
+		// A nil conn with no error means the pool has no connection for this
+		// server yet (e.g. still connecting). Surface it as a not-ready error.
+		return nil, "", fmt.Errorf("pool get %q: no connection available", server)
+	}
+
+	// Derive the peer pin prefix for the audit log. The pool stores transport.Conn
+	// values; assert here — the single, documented, intentional type assertion in
+	// the attach path.
+	pinPrefix := ""
+	if tc, ok := c.(transport.Conn); ok {
+		if id, idErr := router.IdentityFromCerts(tc.PeerCertificates()); idErr == nil {
+			pinPrefix = id.Short()
+		}
+	}
+	if pinPrefix == "" {
+		// The peer pin prefix is unavailable (e.g. certificates not yet
+		// present on a freshly-dialed conn, or the type assertion failed for
+		// a test fake). The attach proceeds anyway — the session is already
+		// mutually authenticated; the prefix is for the audit log only.
+		slog.Debug("attach: peer pin prefix unavailable for audit",
+			"role", "daemon", "server", server)
+	}
+
+	return c, pinPrefix, nil
+}
+
+// sortedConfigServerNames returns config server names in ascending order.
+// A thin wrapper over the config map so Run can iterate servers deterministically.
+func sortedConfigServerNames(servers map[string]config.Server) []string {
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	return names
 }

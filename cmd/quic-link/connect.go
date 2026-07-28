@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -184,6 +185,39 @@ automatically. Flags override the resolved server's settings.`,
 			}
 			if err != nil {
 				return err
+			}
+
+			// --- daemon-awareness probe ---------------------------------
+			// Check whether a conforming owner (daemon or another connect) is
+			// already holding the socket, before binding any local ports. If an
+			// owner is running we refuse with a redirect rather than starting a
+			// second foreground tunnel. If the socket is absent or stale (the
+			// common case: no daemon running), fall through and proceed.
+			//
+			// A socket-path resolution error is treated as "no socket" — connect
+			// is not blocked by a misconfigured environment that would prevent
+			// the socket from existing; the connect verb functions without any
+			// daemon present.
+			if sock, sockErr := daemonSocketPath(a.cfg); sockErr == nil {
+				canReclaim, probeErr := probeSocket(sock)
+				switch {
+				case probeErr != nil && !canReclaim:
+					// A live owner is running (exit 3) or a squatter occupies
+					// the socket (exit 2). For the live-owner case, print a
+					// helpful redirect to stderr so the operator knows what to
+					// do; for squatters the error message itself is sufficient.
+					var ownerErr *errOwnerRunningType
+					if errors.As(probeErr, &ownerErr) {
+						fmt.Fprintln(cmd.ErrOrStderr(),
+							"a daemon owns sessions; use 'quic-link status' or 'quic-link ssh <server>'")
+					}
+					return probeErr
+				case canReclaim:
+					// Stale or absent socket — proceed as the foreground owner.
+				}
+				// probeErr == nil, canReclaim == false: this branch cannot
+				// happen (probeSocket always returns canReclaim=true or an
+				// error), so no case needed.
 			}
 
 			// --- run ---------------------------------------------------

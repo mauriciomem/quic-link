@@ -56,23 +56,16 @@ func exitCodeForError(err error) int {
 }
 
 // exitCodeForStatus maps an agent response status to a process exit code.
+// This mapping is a locked output contract (callers must not remap these):
 // 0: ok
 // 4: unauthorized (authz denied)
 // 5: remote refused (unknown target, dial failed, or agent draining)
 // 1: unexpected/unrecognised status
 //
-// This mapping is a locked output contract: callers must not remap these.
+// The implementation delegates to proto.ExitCodeForStatus so the mapping lives
+// in exactly one place and is shared with the daemon's attach relay.
 func exitCodeForStatus(s proto.Status) int {
-	switch s {
-	case proto.StatusOK:
-		return 0
-	case proto.StatusUnauthorized:
-		return 4
-	case proto.StatusUnknownTarget, proto.StatusDialFailed, proto.StatusDraining:
-		return 5
-	default:
-		return 1
-	}
+	return proto.ExitCodeForStatus(s)
 }
 
 // statusError wraps an agent response status and the verbatim message from the
