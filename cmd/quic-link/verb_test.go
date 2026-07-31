@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,27 +109,6 @@ enabled = false
 		got := enabledServers(cfg.Servers)
 		if _, ok := got["s1"]; ok {
 			t.Error("s1 with enabled=false should NOT be in enabled map")
-		}
-	})
-}
-
-// ---- bindFreePort -----------------------------------------------------------
-
-func TestBindFreePort(t *testing.T) {
-	t.Run("finds_a_port", func(t *testing.T) {
-		port, err := bindFreePort("127.0.0.1", 40100, 10)
-		if err != nil {
-			t.Fatalf("bindFreePort: %v", err)
-		}
-		if port < 40100 || port >= 40110 {
-			t.Errorf("port %d out of expected range [40100, 40110)", port)
-		}
-	})
-
-	t.Run("zero_window_returns_error", func(t *testing.T) {
-		_, err := bindFreePort("127.0.0.1", 40200, 0)
-		if err == nil {
-			t.Fatal("expected error for zero window, got nil")
 		}
 	})
 }
@@ -245,7 +223,7 @@ enabled = false
 }
 
 // TestConnectReverseServer verifies that a server with listen= (reverse mode)
-// yields the "not yet supported; later phase" message and exit 2.
+// yields a "not yet supported" message and exit 2.
 func TestConnectReverseServer(t *testing.T) {
 	unsetQLEnvForTest(t)
 	pin := mustTestPin(t)
@@ -259,30 +237,8 @@ pin    = "`+pin+`"
 	if exitCode(err) != 2 {
 		t.Errorf("expected exit 2 for reverse-mode server, got %d: %v", exitCode(err), err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "later phase") {
-		t.Errorf("error should mention 'later phase', got: %v", err)
-	}
-}
-
-// TestConnectFlagOnlyNoConfig verifies that --server + --pin flags work with
-// no config file, failing at the transport layer (exit 1) not at resolution
-// (exit 2).
-func TestConnectFlagOnlyNoConfig(t *testing.T) {
-	unsetQLEnvForTest(t)
-	pin := mustTestPin(t)
-	// Point HOME at a temp dir so the default config path has no file.
-	t.Setenv("HOME", t.TempDir())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := runVerbCtx(ctx, []string{
-		"connect",
-		"--server", "127.0.0.1:19997",
-		"--pin", pin,
-	})
-	code := exitCode(err)
-	if code == 2 {
-		t.Errorf("flag-only connect should not fail at resolution (exit 2): %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
+		t.Errorf("error should mention 'not yet supported', got: %v", err)
 	}
 }
 
@@ -439,53 +395,4 @@ authorized_clients = ["`+pin+`"]
 	if err == nil || !strings.Contains(err.Error(), "later phase") {
 		t.Errorf("error should mention 'later phase', got: %v", err)
 	}
-}
-
-// ---- bindFreePort stability -------------------------------------------------
-
-// TestBindFreePortStable verifies that bindFreePort returns the same port when
-// called twice on the same base (nothing is holding it between calls).
-func TestBindFreePortStable(t *testing.T) {
-	port1, err := bindFreePort("127.0.0.1", 41000, 10)
-	if err != nil {
-		t.Fatalf("bindFreePort call 1: %v", err)
-	}
-	port2, err := bindFreePort("127.0.0.1", 41000, 10)
-	if err != nil {
-		t.Fatalf("bindFreePort call 2: %v", err)
-	}
-	if port1 != port2 {
-		t.Errorf("bindFreePort returned different ports: %d vs %d", port1, port2)
-	}
-}
-
-// ---- bindFreePortPair -------------------------------------------------------
-
-func TestBindFreePortPair(t *testing.T) {
-	t.Run("both_free_returns_base_pair", func(t *testing.T) {
-		ssh, docker, err := bindFreePortPair("127.0.0.1", 40200, 40201, 10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if ssh != 40200 || docker != 40201 {
-			t.Errorf("got (%d,%d), want (40200,40201)", ssh, docker)
-		}
-	})
-	t.Run("busy_base_skips_to_next_block_keeping_pair", func(t *testing.T) {
-		ln, err := net.Listen("tcp", "127.0.0.1:40300")
-		if err != nil {
-			t.Skipf("could not occupy base port: %v", err)
-		}
-		defer ln.Close()
-		ssh, docker, err := bindFreePortPair("127.0.0.1", 40300, 40301, 10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if ssh == 40300 {
-			t.Errorf("ssh should have skipped the busy base 40300, got %d", ssh)
-		}
-		if docker != ssh+1 {
-			t.Errorf("docker %d should be ssh+1 (%d) — the pair must stay coherent", docker, ssh+1)
-		}
-	})
 }

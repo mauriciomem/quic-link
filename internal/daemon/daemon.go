@@ -237,17 +237,25 @@ type Conn interface {
 }
 
 // SessionEntry is the per-server handle. A SessionPool holds one per enabled
-// server. Both production constructions (dial-out and listen-for-agent) satisfy
-// this interface, so the pool and the attach path are direction-blind.
-// The listen-for-agent construction (reverse mode) is not yet implemented;
-// this interface is designed so it will slot in without pool or status changes.
+// server.
+//
+// The interface is intentionally direction-agnostic. Today only dialEntry is
+// wired (the daemon dials the agent). A future listenEntry — where the agent
+// dials the daemon and the daemon accepts — will satisfy this interface with
+// zero changes to SessionPool, the attach path, or the status snapshot. The
+// distinction between the two directions is carried by SessionState.Transport,
+// which dialEntry reports as "dial" and a future listenEntry would report as
+// "listen". No method here leaks a dial-only assumption: Get blocks for any
+// in-flight negotiation regardless of direction, State snapshots the current
+// state, and Close tears down whatever mechanism the entry uses.
 type SessionEntry interface {
 	// Get returns the live transport connection, blocking for an in-flight
-	// reconnect. The context bounds the wait.
+	// reconnect (or, for a listenEntry, for the incoming agent connection).
+	// The context bounds the wait.
 	Get(ctx context.Context) (Conn, error)
 	// State returns the current connection state for this entry.
 	State() SessionState
-	// Close tears down this entry: cancels the dial loop, closes the live
+	// Close tears down this entry: cancels the run loop, closes the live
 	// connection with CloseWithError, and unblocks any pending Get callers.
 	Close(err error)
 }
@@ -279,18 +287,20 @@ type Clock interface {
 type SessionState struct {
 	// Name is the server name from the config (e.g. "server1").
 	Name string
-	// State is the projected enum value for status --json. Exactly four values
-	// are emitted in this release: "connected", "connecting", "listening",
-	// "disabled". The enum is open: consumers must tolerate unrecognized values
-	// by treating them as "not healthy / see logs".
+	// State is the projected enum value for status --json. Five values are
+	// emitted: "connected", "connecting", "listening", "disabled",
+	// "auth_failed". The enum is open: consumers must tolerate unrecognized
+	// values by treating them as "not healthy / see logs".
 	State string
 	// Transport is "dial" for a dialEntry (the daemon dials the agent). It will
 	// be "listen" for a reverse-mode listenEntry (not yet implemented).
 	Transport string
 	// Since is the time the entry entered its current state.
 	Since time.Time
-	// SSHPort and DockerPort are the computed local ports (from config.LocalPorts).
-	// The daemon does not bind these ports in this slice; they are reported only.
+	// SSHPort and DockerPort are the local TCP ports actually bound by the
+	// daemon for this server (ssh and docker targets respectively). A disabled
+	// server or a server whose port acquisition failed at startup reports 0
+	// for both fields — zero means nothing is listening on that port.
 	SSHPort    int
 	DockerPort int
 }
@@ -305,8 +315,8 @@ type SessionState struct {
 // deliberate review.
 //
 // The session enum is declared open: consumers must degrade on any unrecognized
-// session string ("not healthy / see logs"). The four values emitted today
-// are: "connected", "connecting", "listening", "disabled".
+// session string ("not healthy / see logs"). Five values are emitted:
+// "connected", "connecting", "listening", "disabled", "auth_failed".
 type StatusSnapshot struct {
 	Schema   int              `json:"schema"`
 	Identity *IdentityInfo    `json:"identity,omitempty"`

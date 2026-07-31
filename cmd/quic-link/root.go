@@ -36,19 +36,18 @@ TLS handshake. There are no CA files.
 
 Pairing (one time per host):
   quic-link keygen                          # prints "pin: <base64>"
-  # exchange the two pins out of band, then use them with agent/connect below.
+  # exchange the two pins out of band, add them to the config, then use daemon.
 
 Examples:
-  # Agent (remote, UDP port 443 must be reachable)
-  quic-link agent --listen :443 --service-addr 127.0.0.1:22 \
-      --authorized-client <client-pin>
+  # Agent (remote, UDP port 7443 must be reachable)
+  quic-link agent --listen :7443 --authorized-client <client-pin>
 
-  # Client (local — then: ssh -p 2222 user@127.0.0.1)
-  quic-link connect --server myserver.example.com:443 --local 127.0.0.1:2222 \
-      --pin <agent-pin>
+  # Client daemon (local — manages sessions, then: quic-link ssh myserver)
+  quic-link daemon                          # all servers in config
+  quic-link daemon --server myserver        # single server
 
   # Ping
-  quic-link ping --server myserver.example.com:443 --pin <agent-pin>`,
+  quic-link ping myserver`,
 
 		// SilenceErrors prevents cobra from printing the error itself;
 		// main() logs it with slog and maps it to the correct exit code.

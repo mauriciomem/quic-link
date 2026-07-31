@@ -224,8 +224,8 @@ func minimalCfgWithKey(keyFile string, warnKeyAgeDays int) *config.Config {
 	return cfg
 }
 
-// TestBuildSnapshot_ConnectedAndDisabled verifies the four enum values are
-// produced correctly from the fake pool state.
+// TestBuildSnapshot_ConnectedAndDisabled verifies three of the five enum values
+// are produced correctly from the fake pool state.
 func TestBuildSnapshot_ConnectedAndDisabled(t *testing.T) {
 	clock := newFixedClock()
 	states := []daemon.SessionState{

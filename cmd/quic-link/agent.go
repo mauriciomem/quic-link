@@ -167,6 +167,23 @@ func agentRun(ctx context.Context, listen string, routes map[string]string, keyF
 		return fmt.Errorf("router: %w", err)
 	}
 
+	// The agent binds a dual-stack ("udp") socket rather than an IPv4-only
+	// ("udp4") socket. This is deliberate and correct for a passive listener:
+	//
+	// All client paths in this binary (connect/daemon/ping/stdio) bind "udp4"
+	// because macOS dual-stack UDP sockets silently fail to *transmit* to
+	// on-link IPv4 LAN peers — a hard-won lesson from early testing. That
+	// rule applies to the initiating side, where the OS must route a fresh
+	// outbound datagram with no prior context.
+	//
+	// The agent is the receiving side. It accepts whatever arrives on its
+	// socket and responds *within the same socket context* — the remote
+	// address comes from the arriving packet, so the OS has the routing
+	// information it needs. The macOS restriction does not apply to this
+	// response path. Binding "udp4" would break IPv6-only deployments and
+	// prevent IPv6 clients from ever connecting.
+	//
+	// Do not change this to "udp4" without understanding the asymmetry above.
 	udpAddr, err := net.ResolveUDPAddr("udp", listen)
 	if err != nil {
 		return fmt.Errorf("invalid listen address: %w", err)

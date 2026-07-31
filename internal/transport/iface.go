@@ -99,3 +99,14 @@ type Transport interface {
 	// Close shuts down the transport, aborting pending operations.
 	Close() error
 }
+
+// LocalAddrProvider is an optional interface implemented by transports that can
+// report the local network address of their underlying socket. The dial loop
+// uses it to log the UDP source 4-tuple on each attempt, which is essential for
+// diagnosing NAT/CGNAT poisoning of a specific source port. Transports that do
+// not implement this interface (e.g. the in-memory test transport) simply omit
+// the local-address field from the log.
+type LocalAddrProvider interface {
+	// LocalAddr returns the local network address of the underlying socket.
+	LocalAddr() net.Addr
+}

@@ -74,7 +74,8 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 		_ = conn.CloseWithError(0x02, "no peer identity")
 		return
 	}
-	slog.Info("session established", "peer", peer.Short())
+	sessionStart := time.Now()
+	slog.Info("session established", "role", "agent", "peer", peer.Short())
 
 	cs := &controlState{}
 	openTimer := time.AfterFunc(controlOpenDeadline, func() {
@@ -98,7 +99,7 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 			return
 		}
 		go func() {
-			if err := serveStream(ctx, conn, stream, peer, rtr, cs, openTimer, opt); err != nil {
+			if err := serveStream(ctx, conn, stream, peer, rtr, cs, openTimer, sessionStart, opt); err != nil {
 				slog.Warn("stream handler error", "err", err)
 			}
 		}()
@@ -117,6 +118,7 @@ func serveStream(
 	rtr *router.Router,
 	cs *controlState,
 	openTimer *time.Timer,
+	sessionStart time.Time,
 	opt ServeOpts,
 ) error {
 	h, err := proto.ReadHeader(stream)
@@ -125,7 +127,7 @@ func serveStream(
 	}
 
 	if h.Kind == proto.KindControl {
-		return serveControl(ctx, conn, stream, peer, h, cs, openTimer, opt)
+		return serveControl(ctx, conn, stream, peer, h, cs, openTimer, sessionStart, opt)
 	}
 
 	// Extract the correlation id stamped by the client. It may be absent for
@@ -172,7 +174,8 @@ func serveStream(
 // validates the control proto version, enforces exactly-one-per-session, replies
 // ok, logs an advisory when a client reports an over-age key, and then serves
 // gRPC until the stream closes — at which point the whole session is torn down
-// (control-stream closure is session death).
+// (control-stream closure is session death). sessionStart is the time the
+// outer session was accepted, used to compute session duration on disconnect.
 func serveControl(
 	ctx context.Context,
 	conn transport.Conn,
@@ -181,6 +184,7 @@ func serveControl(
 	h proto.Header,
 	cs *controlState,
 	openTimer *time.Timer,
+	sessionStart time.Time,
 	opt ServeOpts,
 ) error {
 	if h.Meta["proto"] != "1" {
@@ -229,10 +233,14 @@ func serveControl(
 		return fmt.Errorf("control: write ok: %w", err)
 	}
 
-	slog.Info("control stream opened", "peer", peer.Short())
+	slog.Info("control stream opened", "role", "agent", "peer", peer.Short())
 	// Serve gRPC until the control stream dies; then the session is dead.
 	_ = control.Serve(ctx, stream)
-	slog.Info("control stream closed; tearing down session", "peer", peer.Short())
+	slog.Info("client disconnected",
+		"role", "agent",
+		"peer", peer.Short(),
+		"session_duration", time.Since(sessionStart).Round(time.Millisecond),
+	)
 	_ = conn.CloseWithError(0x00, "control stream closed")
 	return nil
 }

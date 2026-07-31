@@ -67,14 +67,26 @@ func newStdioCmd(a *app) *cobra.Command {
 			}
 
 			// enabled check
+			// A disabled server is not a usage error (the server name was valid);
+			// it is a semantic config state meaning "this session is not available".
+			// The contract is: session not available → exit 3 with a remedy message,
+			// no cobra usage screen. The usage screen is reserved for flag-parse
+			// errors and missing required arguments.
 			if ok && srv.Enabled != nil && !*srv.Enabled {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("server %q is disabled", serverName)
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"server %q is disabled; set enabled = true in the config to use it\n",
+					serverName)
+				return &errFinalExitCode{
+					code: 3,
+					msg:  fmt.Sprintf("server %q is disabled", serverName),
+				}
 			}
 
-			// reverse-mode guard
+			// reverse-mode guard: "listen" without "addr" is not-yet-implemented
+			// reverse mode. This IS a usage/config error — the operator wrote a
+			// config that requests a mode that does not exist yet — so exit 2 is
+			// appropriate. No usage screen: the config is the source of truth here.
 			if srv.Listen != "" && srv.Addr == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
 				return usageErrorf("reverse mode (listen) is not yet supported; it runs in a later phase")
 			}
 

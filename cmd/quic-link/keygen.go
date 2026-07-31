@@ -78,11 +78,18 @@ func keygenRun(out string, force bool) error {
 		if err != nil {
 			return err
 		}
+		// Tell the operator they are reusing an existing key, not creating a
+		// new one. Goes to stderr so it does not pollute the stdout CONTRACT
+		// "pin: <base64>" line that scripts parse.
+		fmt.Fprintf(os.Stderr, "reused existing identity at %s\n", keyPath)
 		fmt.Printf("pin: %s\n", pin)
 		return nil
 	}
 
 	if exists && force {
+		// The rotation warning already tells the operator that peers must
+		// re-pair; no additional "created" message is needed for this path —
+		// the warning covers it.
 		fmt.Fprintln(os.Stderr, "warning: rotating identity; peers must re-pair with the new pin")
 	}
 
@@ -99,6 +106,11 @@ func keygenRun(out string, force bool) error {
 	pin, err := identity.PinForKey(key)
 	if err != nil {
 		return err
+	}
+	if !exists {
+		// Fresh creation (not a rotation): tell the operator where the key
+		// landed so they know which file to back up or distribute.
+		fmt.Fprintf(os.Stderr, "created new identity at %s\n", keyPath)
 	}
 	fmt.Printf("pin: %s\n", pin)
 	return nil

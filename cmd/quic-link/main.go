@@ -3,11 +3,12 @@
 //
 //	quic-link keygen   -- generate an Ed25519 identity and print its pin
 //	quic-link agent    -- QUIC agent; forwards streams to local services
-//	quic-link connect  -- QUIC client; exposes the tunnel as local TCP ports
+//	quic-link daemon   -- session owner; manages QUIC sessions and the local socket
 //	quic-link ping     -- measures handshake time and RTT to an agent
 //	quic-link stdio    -- (hidden) single-stream stdio bridge
 //
 // "serve" is accepted as a deprecated alias for "agent".
+// "connect" is accepted as a deprecated alias for "daemon --server NAME".
 //
 // Authentication is mutual raw-public-key pinning: each end holds an Ed25519
 // key (quic-link keygen), exchanges pins out of band, and verifies the peer's

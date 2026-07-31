@@ -103,11 +103,22 @@ func (t *QUICTransport) Close() error {
 	return t.inner.Close()
 }
 
+// LocalAddr returns the local UDP address of the underlying socket. It
+// implements the optional LocalAddrProvider interface so the dial loop can
+// log the source 4-tuple on each attempt without requiring LocalAddr to be
+// part of the Transport interface (which memTransport does not implement).
+func (t *QUICTransport) LocalAddr() net.Addr {
+	return t.inner.Conn.LocalAddr()
+}
+
 // classifyDialError wraps connection-setup errors with actionable messages:
 //   - HandshakeTimeoutError  → UDP likely blocked by firewall (wraps ErrUnreachable)
 //   - TransportError alertNoAppProtocol → ALPN/version mismatch (rebuild both)
 //   - TransportError in the TLS-alert range → pin rejected (wraps ErrAuthFailed)
 //   - ConnectionRefused → server not listening (wraps ErrUnreachable)
+//
+// The TLS-alert range check delegates to isTLSAuthAlert so the classification
+// rule is encoded in exactly one place and cannot drift.
 func classifyDialError(err error) error {
 	var handshakeTimeout *quic.HandshakeTimeoutError
 	if errors.As(err, &handshakeTimeout) {
@@ -122,6 +133,8 @@ func classifyDialError(err error) error {
 		// no_application_protocol — almost always mismatched binary versions.
 		// Name it distinctly so the operator rebuilds both binaries instead of
 		// chasing pins. This is a real, distinct failure — not an auth error.
+		// isTLSAuthAlert excludes this code so we check it first to give a
+		// better message before falling through to the auth-alert branch.
 		if transportErr.ErrorCode == alertNoAppProtocol {
 			return fmt.Errorf(
 				"protocol/version mismatch (TLS alert no_application_protocol"+
@@ -130,14 +143,15 @@ func classifyDialError(err error) error {
 		}
 		// Any other TLS alert (RFC 9001) under raw-public-key pinning is the
 		// peer rejecting the pin (e.g. bad_certificate from our
-		// VerifyPeerCertificate callback). Wrap ErrAuthFailed so main() exits
-		// with the auth-failure code and the reconnect loop stops retrying.
-		if transportErr.ErrorCode >= tlsAlertBase && transportErr.ErrorCode <= tlsAlertMax {
+		// VerifyPeerCertificate callback). Use isTLSAuthAlert — the single
+		// encoding of the alert-range rule — so this classification cannot
+		// drift from IsAuthFailed and AuthError.
+		if te, ok := isTLSAuthAlert(err); ok {
 			return fmt.Errorf(
 				"%w (TLS error 0x%x; the peer pin was not accepted — verify"+
 					" --pin (client) and --authorized-client (agent) on both"+
 					" ends): %w",
-				ErrAuthFailed, uint64(transportErr.ErrorCode), err)
+				ErrAuthFailed, uint64(te.ErrorCode), err)
 		}
 		if transportErr.ErrorCode == quic.ConnectionRefused {
 			return fmt.Errorf(
