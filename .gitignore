@@ -25,3 +25,15 @@ certs/
 
 # Key metadata sidecars
 *.pem.meta
+
+# Local rig credentials — NEVER commit (contains plaintext SSH password)
+remote-ubuntu.md
+
+# Local rig configuration (machine-specific, not for version control)
+agent-config.toml
+
+# Local identity pin (contains a real key pin for this rig)
+macos-pin
+
+# Dead Phase-0 CA artifact (openssl helper, superseded by pinning in 1a.4)
+openssl-setup.sh
