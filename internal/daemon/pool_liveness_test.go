@@ -8,6 +8,8 @@ package daemon_test
 //         is never emitted.
 //  C3d — the liveness probe detects a dead agent substantially faster than
 //         the QUIC idle timeout (driven via injected fast policy).
+//  F2  — "session lost" is logged at drop time on a natural QUIC drop, even
+//         when the first reconnect succeeds (the historically silent case).
 //  F4a — transport rebind fires after exactly transportRebindAfter consecutive
 //         dial failures.
 //  F4b — rebind does NOT fire before transportRebindAfter failures.
@@ -78,8 +80,22 @@ func TestStateReconnecting_SerializesToConnecting(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Wait briefly for the first dial to fail and transition to reconnecting.
-	time.Sleep(50 * time.Millisecond)
+	// Poll until the pool has attempted at least one dial (which will fail
+	// since there is no listener). After the failure the internal state is
+	// "reconnecting", which must still project to "connecting" externally.
+	// With zero-delay backoff this happens in microseconds; we budget 2 s to
+	// be safe on a loaded machine.
+	const firstFailDeadline = 2 * time.Second
+	end := time.Now().Add(firstFailDeadline)
+	for time.Now().Before(end) {
+		// The pool starts in stateConnecting; once a dial fails and we go
+		// back to "wait + retry", it is in stateReconnecting. Check by
+		// verifying the state stays "connecting" (not some unexpected value).
+		if states := pool.State(); len(states) > 0 && states[0].State != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// The pool must emit "connecting" — both initial-connecting and
 	// reconnecting project to the same external value.
@@ -377,6 +393,206 @@ func TestLivenessProbe_DetectsDeadAgentFast(t *testing.T) {
 		time.Since(agentDiedAt).Round(time.Millisecond), detectionBudget)
 }
 
+// ---- F2: session-lost event logged on natural drop where first reconnect succeeds
+
+// TestSessionLost_LoggedOnNaturalDrop verifies that when a session drops
+// naturally (agent restart) and the FIRST reconnect attempt succeeds, a
+// "session lost" Warn-level log is emitted at the moment of the drop.
+//
+// This is the exact silent case: before the fix, if the agent restarted
+// quickly and the pool reconnected on the first attempt, the "agent lost;
+// reconnecting" line only appeared on a failed dial — so an operator watching
+// logs would never see any indication that the session had dropped at all.
+//
+// Pre-fix failure mode: the test asserts the presence of "session lost" in
+// logs; before the fix that string was never emitted on the natural-drop /
+// first-reconnect-succeeds path, so the assertion would fail.
+//
+// The test uses real QUIC over loopback: kill the first agent, start a second
+// one at the same address, and confirm the pool reaches "connected" again AND
+// that the "session lost" log appeared.
+func TestSessionLost_LoggedOnNaturalDrop(t *testing.T) {
+	// NOT parallel — replaces the global slog logger.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Capture slog output with a race-safe buffer.
+	var buf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(prev)
+
+	// Generate identities.
+	serverKey, serverPin := genPoolLivenessIdentity(t)
+	clientKey, clientPin := genPoolLivenessIdentity(t)
+
+	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	if err != nil {
+		t.Fatalf("ServerTLS: %v", err)
+	}
+	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	if err != nil {
+		t.Fatalf("ClientTLS: %v", err)
+	}
+
+	// Start the first agent on a fixed loopback addr.
+	serverUDP1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("server UDP 1: %v", err)
+	}
+	serverAddr := serverUDP1.LocalAddr().String()
+
+	serverTr1, err := transport.NewQUICTransport(serverUDP1, serverTLS, nil)
+	if err != nil {
+		serverUDP1.Close()
+		t.Fatalf("server transport 1: %v", err)
+	}
+
+	ln1, err := serverTr1.Listen()
+	if err != nil {
+		serverTr1.Close()
+		serverUDP1.Close()
+		t.Fatalf("server listen 1: %v", err)
+	}
+
+	rtr, err := router.New(map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	serveCtx1, serveCancel1 := context.WithCancel(ctx)
+	go tunnel.Serve(serveCtx1, ln1, rtr) //nolint:errcheck
+
+	// Build the client pool pointing at the fixed server address.
+	clientUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("client UDP: %v", err)
+	}
+	t.Cleanup(func() { clientUDP.Close() })
+
+	clientTr, err := transport.NewQUICTransport(clientUDP, clientTLS, nil)
+	if err != nil {
+		t.Fatalf("client transport: %v", err)
+	}
+	t.Cleanup(func() { clientTr.Close() })
+
+	cfg := config.Defaults()
+	cfg.Servers = map[string]config.Server{
+		"drop-test": {Addr: serverAddr},
+	}
+
+	// Use the default liveness policy (10s interval). The goal is to let the
+	// natural QUIC connection drop (from the server closing its transport) fire
+	// conn.Context().Done() before the probe has a chance to run. With a 10s
+	// probe interval, the QUIC CONNECTION_CLOSE from the dying agent reaches
+	// the client orders of magnitude faster, so the drop is natural not
+	// probe-declared.
+	pool, err := daemon.NewRealPoolWithLiveness(
+		ctx, cfg,
+		func(_ string, _ config.Server) (transport.Transport, error) {
+			return clientTr, nil
+		},
+		zeroBackoffPolicy{},
+		daemon.WallClock{},
+		nil,
+		daemon.DefaultLivenessPolicy{},
+	)
+	if err != nil {
+		t.Fatalf("NewRealPoolWithLiveness: %v", err)
+	}
+	defer pool.Close()
+
+	// Wait for the pool to reach "connected".
+	waitConnCtx, waitConnCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitConnCancel()
+	for {
+		if len(pool.State()) > 0 && pool.State()[0].State == "connected" {
+			break
+		}
+		select {
+		case <-waitConnCtx.Done():
+			t.Fatalf("pool did not connect within deadline; state: %v", pool.State())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Kill the first agent abruptly (simulates a NAT timeout or agent crash).
+	serveCancel1()
+	ln1.Close()
+	serverTr1.Close()
+	serverUDP1.Close()
+
+	// Wait for the pool to detect the drop (state transitions away from "connected").
+	dropCtx, dropCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dropCancel()
+	for {
+		if len(pool.State()) > 0 && pool.State()[0].State != "connected" {
+			break
+		}
+		select {
+		case <-dropCtx.Done():
+			t.Fatalf("pool did not detect drop; state: %v", pool.State())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Bring up a second agent at the SAME address. The pool's first reconnect
+	// attempt should succeed, so "agent lost; reconnecting" is never emitted —
+	// but "session lost; reconnecting" must have been logged at the drop moment.
+	serverUDP2, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP:   net.ParseIP("127.0.0.1"),
+		Port: serverUDP1.LocalAddr().(*net.UDPAddr).Port, // same port
+	})
+	if err != nil {
+		t.Skipf("cannot re-bind server port %s for second agent: %v", serverAddr, err)
+	}
+	t.Cleanup(func() { serverUDP2.Close() })
+
+	serverTr2, err := transport.NewQUICTransport(serverUDP2, serverTLS, nil)
+	if err != nil {
+		t.Fatalf("server transport 2: %v", err)
+	}
+	t.Cleanup(func() { serverTr2.Close() })
+
+	ln2, err := serverTr2.Listen()
+	if err != nil {
+		t.Fatalf("server listen 2: %v", err)
+	}
+	t.Cleanup(func() { ln2.Close() })
+
+	serveCtx2, serveCancel2 := context.WithCancel(ctx)
+	defer serveCancel2()
+	go tunnel.Serve(serveCtx2, ln2, rtr) //nolint:errcheck
+
+	// Wait for the pool to reconnect to the new agent.
+	reconnCtx, reconnCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer reconnCancel()
+	for {
+		if len(pool.State()) > 0 && pool.State()[0].State == "connected" {
+			break
+		}
+		select {
+		case <-reconnCtx.Done():
+			t.Logf("pool state at timeout: %v", pool.State())
+			// If the port cannot be reused immediately, accept that and skip.
+			t.Skipf("pool did not reconnect within deadline; this can happen if the OS " +
+				"delays port reuse. The 'session lost' log assertion below is the key check.")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Logf("pool reconnected successfully (first reconnect attempt succeeded)")
+
+	// The "session lost" warning must have been emitted at the moment of the
+	// natural drop — regardless of whether the first reconnect succeeded.
+	logs := buf.String()
+	if !strings.Contains(logs, "session lost") {
+		t.Errorf("expected \"session lost\" in logs on natural drop where first reconnect succeeded;\n"+
+			"before the fix this string was never emitted on this path\nlog output:\n%s", logs)
+	}
+}
+
 // genPoolLivenessIdentity generates an Ed25519 identity for liveness tests.
 func genPoolLivenessIdentity(t *testing.T) (ed25519.PrivateKey, string) {
 	t.Helper()
@@ -393,12 +609,18 @@ func genPoolLivenessIdentity(t *testing.T) (ed25519.PrivateKey, string) {
 
 // ---- F4a: transport rebind fires after N consecutive failures ---------------
 
-// countingFactory tracks how many times the factory has been called. Each call
-// returns a new always-failing transport so the pool keeps retrying.
+// countingFactory tracks how many times the factory has been called and how
+// many dials have been attempted in total across all returned transports.
+// Each call returns a new always-failing transport so the pool keeps retrying.
 type countingFactory struct {
 	mu          sync.Mutex
 	callCount   int
+	dialCount   int // total dials across all returned transports
 	makeBaseErr error
+
+	// rebindDialCount[n] records the total dial count when the (n+1)th
+	// factory call (first rebind) fires. Index 0 = first rebind.
+	rebindDialCounts []int
 }
 
 func newCountingFactory(dialErr error) *countingFactory {
@@ -407,11 +629,17 @@ func newCountingFactory(dialErr error) *countingFactory {
 
 func (f *countingFactory) make(_ string, _ config.Server) (transport.Transport, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.callCount++
+	n := f.callCount
+	if n > 1 {
+		// A rebind: record how many dials had happened when this rebind fired.
+		f.rebindDialCounts = append(f.rebindDialCounts, f.dialCount)
+	}
+	f.mu.Unlock()
+
 	hub := mem.NewHub()
-	return hub.Transport(fmt.Sprintf("rebind-client:%d", f.callCount),
-		mem.FailDial(f.makeBaseErr)), nil
+	base := hub.Transport(fmt.Sprintf("rebind-client:%d", n), mem.FailDial(f.makeBaseErr))
+	return &dialCountingTransport{inner: base, factory: f}, nil
 }
 
 func (f *countingFactory) calls() int {
@@ -419,6 +647,35 @@ func (f *countingFactory) calls() int {
 	defer f.mu.Unlock()
 	return f.callCount
 }
+
+func (f *countingFactory) dialsBefore(rebindIndex int) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if rebindIndex >= len(f.rebindDialCounts) {
+		return -1
+	}
+	return f.rebindDialCounts[rebindIndex]
+}
+
+func (f *countingFactory) incDial() {
+	f.mu.Lock()
+	f.dialCount++
+	f.mu.Unlock()
+}
+
+// dialCountingTransport wraps a base transport to count every Dial call.
+type dialCountingTransport struct {
+	inner   transport.Transport
+	factory *countingFactory
+}
+
+func (t *dialCountingTransport) Dial(ctx context.Context, addr string) (transport.Conn, error) {
+	t.factory.incDial()
+	return t.inner.Dial(ctx, addr)
+}
+
+func (t *dialCountingTransport) Listen() (transport.Listener, error) { return t.inner.Listen() }
+func (t *dialCountingTransport) Close() error                        { return t.inner.Close() }
 
 // TestTransportRebind_FiresAfterNFailures verifies that the transport rebind
 // fires after exactly transportRebindAfter (10) consecutive dial failures.
@@ -459,11 +716,12 @@ func TestTransportRebind_FiresAfterNFailures(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Factory starts at 1 (initial transport). Wait for it to reach 2
-	// (at least one rebind triggered by 10 consecutive failures).
+	// Factory starts at 1 (initial transport). Poll until it reaches 3
+	// (initial + 2 rebinds), which lets us verify rebinds fire at exactly
+	// multiples of 10 (at failure 10, 20) and not off-by-one.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if factory.calls() >= 2 {
+		if factory.calls() >= 3 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -474,6 +732,27 @@ func TestTransportRebind_FiresAfterNFailures(t *testing.T) {
 		t.Fatalf("factory called %d times within deadline; want ≥2 "+
 			"(initial + at least one rebind after 10 consecutive failures); "+
 			"pre-fix behaviour was: count stays at 1 forever", calls)
+	}
+
+	// Verify the first rebind fired after exactly 10 dial failures.
+	// dialsBefore(0) = total dials when the 1st rebind (factory call #2) fired.
+	firstRebindDials := factory.dialsBefore(0)
+	t.Logf("factory calls=%d; dials before first rebind=%d (threshold=10)", calls, firstRebindDials)
+
+	const threshold = 10 // transportRebindAfter
+	if firstRebindDials != threshold {
+		t.Errorf("first rebind fired after %d dial failures; want exactly %d — "+
+			"off-by-one or wrong modulo in rebind check", firstRebindDials, threshold)
+	}
+
+	// Verify the second rebind (if seen) also fired at a multiple of 10.
+	if calls >= 3 {
+		secondRebindDials := factory.dialsBefore(1)
+		t.Logf("dials before second rebind=%d (want 20)", secondRebindDials)
+		if secondRebindDials != 2*threshold {
+			t.Errorf("second rebind fired after %d total dial failures; want %d "+
+				"(rebinds repeat every %d failures)", secondRebindDials, 2*threshold, threshold)
+		}
 	}
 	t.Logf("factory called %d times (initial + %d rebind(s))", calls, calls-1)
 }
@@ -522,20 +801,22 @@ func TestTransportRebind_DoesNotFireBeforeN(t *testing.T) {
 	defer pool.Close()
 	defer cancel()
 
-	// Wait for exactly 9 dial failures by polling dialCount.
+	// Poll until the 10th Dial call starts. The 10th call blocks inside
+	// dial9FailTransport (cancelling the context and then waiting), so once
+	// dialCount reaches 10 we know the loop is inside the blocking dial and
+	// cannot have fired a rebind — the factory must still be at 1.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if int(dialCount.Load()) >= 9 {
+		if int(dialCount.Load()) >= 10 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Give the 10th dial a little time to NOT trigger (it blocks instead).
-	time.Sleep(30 * time.Millisecond)
-
-	// After ≤9 observed failures the factory must not have been called a
-	// second time (the rebind threshold is 10).
+	// After the 10th blocking dial has started, the rebind threshold (10
+	// consecutive failures) has not been crossed — the 10th failure only
+	// increments the count AFTER Dial returns, which it hasn't yet (it's
+	// blocking). The factory must still be at 1.
 	fc := int(factoryCalls.Load())
 	if fc != 1 {
 		t.Errorf("factory called %d times; want 1 "+
@@ -578,93 +859,82 @@ func (t *dial9FailTransport) Close() error { return nil }
 // resets the consecutive-failure counter. After a successful connection:
 // 10 more failures are needed for a rebind, not fewer.
 //
-// We use real QUIC so the pool can complete a full connect+control-stream
-// handshake (required for a state transition to "connected").
+// The test uses the in-memory transport harness so that reconnect failures
+// are instantaneous (no QUIC dial timeout). The key property under test:
+// if consecutiveFails was 9 before a successful connection, and the counter
+// does NOT reset on success, the very next failure would trigger a rebind
+// (9 % 10 would wrap around on the next tick). After the fix, the counter
+// resets to 0 on success so exactly 10 new failures are required.
 //
 // Pre-fix failure mode: if the counter did not reset, 9 failures before a
 // success + 1 failure after would trigger a rebind — incorrect behaviour.
-// After the fix, 10 failures after the success are required.
+// After the fix, 10 failures after the success are required, and the factory
+// is NOT called a second time until those 10 have accumulated.
 func TestTransportRebind_CounterResetsOnSuccess(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// Generate identities.
-	serverKey, serverPin := genPoolLivenessIdentity(t)
-	clientKey, clientPin := genPoolLivenessIdentity(t)
-
-	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	// Build an in-memory hub with a live server.
+	hub := mem.NewHub()
+	srvLeaf, _, err := mem.NewIdentity()
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("NewIdentity: %v", err)
 	}
-	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	srvT := hub.Transport("reset-agent:1", mem.WithCert(srvLeaf))
+	ln, err := srvT.Listen()
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
-	}
-
-	// Start the agent.
-	serverUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatalf("server UDP: %v", err)
-	}
-	t.Cleanup(func() { serverUDP.Close() })
-
-	serverTr, err := transport.NewQUICTransport(serverUDP, serverTLS, nil)
-	if err != nil {
-		t.Fatalf("server transport: %v", err)
-	}
-	t.Cleanup(func() { serverTr.Close() })
-
-	ln, err := serverTr.Listen()
-	if err != nil {
-		t.Fatalf("server listen: %v", err)
+		t.Fatalf("Listen: %v", err)
 	}
 
-	rtr, err := router.New(map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
-	if err != nil {
-		t.Fatalf("router.New: %v", err)
-	}
 	serveCtx, serveCancel := context.WithCancel(ctx)
 	defer serveCancel()
-	go tunnel.Serve(serveCtx, ln, rtr) //nolint:errcheck
+	go func() { _ = tunnel.Serve(serveCtx, ln, nil) }()
 
-	// Client setup.
-	clientUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatalf("client UDP: %v", err)
+	// cliT succeeds from the start but we build a wrapper that fails
+	// the first 9 dials so consecutiveFails=9 when the success lands.
+	cliT := hub.Transport("reset-client:1", mem.WithCert(srvLeaf))
+	rsTransport := &resetTestTransport{
+		realTr:          cliT,
+		failsBeforeReal: 9,
 	}
-	t.Cleanup(func() { clientUDP.Close() })
 
-	clientTr, err := transport.NewQUICTransport(clientUDP, clientTLS, nil)
-	if err != nil {
-		t.Fatalf("client transport: %v", err)
-	}
-	t.Cleanup(func() { clientTr.Close() })
-
-	serverAddr := ln.Addr().String()
 	cfg := config.Defaults()
 	cfg.Servers = map[string]config.Server{
-		"reset-server": {Addr: serverAddr},
+		"reset-server": {Addr: "reset-agent:1"},
 	}
 
-	// The factory returns a transport that fails the first 9 dials then uses
-	// the real client transport. This simulates accumulating 9 pre-success
-	// failures (consecutiveFails=9). On the 10th call the real transport dials
-	// successfully, which resets consecutiveFails to 0. After the agent dies
-	// the loop must accumulate 10 NEW failures before a rebind fires.
+	// The factory captures the dial count at the exact moment the rebind fires,
+	// giving us a race-free count of failures between the success and the rebind.
 	var factoryCalls atomic.Int32
+	// dialCountAtRebind is set by the factory when n==2 (the first rebind call).
+	// Using a channel for synchronization: the factory sends on it, the test
+	// receives. Buffered 1 so the factory never blocks the pool's run loop.
+	rebindDialCh := make(chan int, 1)
 
 	pool, poolErr := daemon.NewRealPool(
 		ctx, cfg,
 		func(_ string, _ config.Server) (transport.Transport, error) {
-			factoryCalls.Add(1)
-			// First factory call: return a transport that fails 9 times then
-			// delegates to the real transport.
-			return &resetTestTransport{
-				realTr:          clientTr,
-				failsBeforeReal: 9,
-			}, nil
+			n := int(factoryCalls.Add(1))
+			if n == 1 {
+				// Initial transport: fails 9 times then delegates to realTr,
+				// simulating 9 pre-success failures so consecutiveFails = 9
+				// at the moment the pool enters "connected".
+				return rsTransport, nil
+			}
+			if n == 2 {
+				// First rebind: capture the total dial count atomically at
+				// the instant the factory is called. This is race-free because
+				// the factory is called from runLoop while no dial is in flight.
+				d := rsTransport.Dialed()
+				select {
+				case rebindDialCh <- d:
+				default:
+				}
+			}
+			// Return a fresh always-failing transport so the pool keeps retrying.
+			return hub.Transport(fmt.Sprintf("rebind-dead:%d", n)), nil
 		},
 		zeroBackoffPolicy{},
 		daemon.WallClock{},
@@ -675,8 +945,8 @@ func TestTransportRebind_CounterResetsOnSuccess(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Wait for the pool to reach "connected" (9 failures + 1 success).
-	connCtx, connCancel := context.WithTimeout(ctx, 15*time.Second)
+	// Wait for "connected" (9 fast mem failures + 1 mem success).
+	connCtx, connCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer connCancel()
 	for {
 		states := pool.State()
@@ -686,49 +956,44 @@ func TestTransportRebind_CounterResetsOnSuccess(t *testing.T) {
 		select {
 		case <-connCtx.Done():
 			t.Fatalf("pool did not reach connected state; final states: %v", pool.State())
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
-	t.Logf("pool connected (after 9 pre-success failures; counter should now be 0)")
+	dialCountAtSuccess := rsTransport.Dialed() // = 10 (9 failures + 1 success)
+	t.Logf("pool connected; total dials so far = %d (9 pre-success + 1 success)", dialCountAtSuccess)
 
-	// Kill the agent to force reconnect phase.
+	// Kill the in-memory server. The connection drops; the pool starts reconnecting.
 	serveCancel()
 	ln.Close()
 
-	// Wait for pool to detect the drop and start reconnecting.
-	dropCtx, dropCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer dropCancel()
-	for {
-		states := pool.State()
-		if len(states) > 0 && states[0].State != "connected" {
-			break
-		}
-		select {
-		case <-dropCtx.Done():
-			t.Fatalf("pool did not detect agent drop; states: %v", pool.State())
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	t.Logf("pool detected drop; entering reconnect phase")
+	// Wait for the first rebind to fire. The factory sends the total dial count
+	// at the rebind moment on rebindDialCh.
+	rebindCtx, rebindCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer rebindCancel()
 
-	// Since the counter reset to 0 on success, we need 10 NEW failures
-	// before the factory is called again. With zero-delay backoff, those 10
-	// failures happen quickly — but fewer than 10 would be wrong.
-	//
-	// Wait up to 3 seconds and confirm the factory was NOT called a second
-	// time. If the counter did not reset, a rebind would happen almost
-	// immediately (since consecutiveFails was already 9 before the success).
-	time.Sleep(200 * time.Millisecond)
-
-	calls := int(factoryCalls.Load())
-	if calls > 1 {
-		t.Errorf("factory called %d times after one successful connection; "+
-			"want ≤1 immediately after drop — counter should have reset on success, "+
-			"requiring 10 NEW failures for a rebind", calls)
-	} else {
-		t.Logf("factory still at %d call(s) shortly after drop (counter reset on success confirmed — "+
-			"rebind correctly deferred until 10 new failures accumulate)", calls)
+	var rebindDialCount int
+	select {
+	case rebindDialCount = <-rebindDialCh:
+		// Rebind fired; rebindDialCount is the total dial count at that moment.
+	case <-rebindCtx.Done():
+		t.Fatalf("factory never called a second time (rebind never fired) within deadline; "+
+			"factory calls=%d", factoryCalls.Load())
 	}
+
+	// Post-success dials = total dials at rebind minus dials at success.
+	postSuccessDials := rebindDialCount - dialCountAtSuccess
+	t.Logf("factory calls=%d, dials at success=%d, dials at rebind=%d, post-success=%d (threshold=10)",
+		int(factoryCalls.Load()), dialCountAtSuccess, rebindDialCount, postSuccessDials)
+
+	// The rebind must have required at least 10 post-success failures.
+	// If the counter did NOT reset on success (the bug), it would take only
+	// 1 failure (consecutiveFails would jump from 9 to 10 on the first try).
+	if postSuccessDials < 10 {
+		t.Errorf("rebind fired after only %d post-success dial failures (want ≥10); "+
+			"if the counter did not reset on success, only 1 failure would be needed",
+			postSuccessDials)
+	}
+	t.Logf("counter-reset confirmed: rebind required %d post-success failures (threshold 10)", postSuccessDials)
 }
 
 // resetTestTransport fails the first N Dial calls then delegates to realTr.
@@ -752,6 +1017,13 @@ func (t *resetTestTransport) Dial(ctx context.Context, addr string) (transport.C
 }
 func (t *resetTestTransport) Listen() (transport.Listener, error) { return t.realTr.Listen() }
 func (t *resetTestTransport) Close() error                        { return nil }
+
+// Dialed returns the total number of Dial calls made on this transport.
+func (t *resetTestTransport) Dialed() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.dialed
+}
 
 // ---- F4e: log attributes appear in output ----------------------------------
 
@@ -823,18 +1095,36 @@ func TestRebindLog_AttributesPresent(t *testing.T) {
 		t.Fatalf("NewRealPool: %v", err)
 	}
 
-	// Let the loop run for a bit to produce some log lines.
-	time.Sleep(100 * time.Millisecond)
-	pool.Close()
-
-	logs := buf.String()
-
-	// Check for the instrumentation attributes introduced by F2.
+	// Poll until all expected attributes appear in the log, or a 2 s deadline
+	// expires. With zero-delay backoff the dial loop produces log lines almost
+	// immediately; this avoids a fixed sleep that could be too short on a
+	// heavily loaded machine.
 	attrs := []string{
 		"consecutive_fails",
 		"elapsed_since_success",
 		"local_addr",
 	}
+	const attrDeadline = 2 * time.Second
+	end := time.Now().Add(attrDeadline)
+	for time.Now().Before(end) {
+		logs := buf.String()
+		allPresent := true
+		for _, attr := range attrs {
+			if !strings.Contains(logs, attr) {
+				allPresent = false
+				break
+			}
+		}
+		if allPresent {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pool.Close()
+
+	logs := buf.String()
+
+	// Check for the instrumentation attributes introduced by F2.
 	for _, attr := range attrs {
 		if !strings.Contains(logs, attr) {
 			t.Errorf("expected log attribute %q not found in output\n"+

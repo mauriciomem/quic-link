@@ -21,8 +21,9 @@ import (
 // mlock (preventing key pages from being swapped) is deliberately NOT
 // implemented here. mlock is fiddlier (locked-memory limits, Go GC may copy
 // pages), adds complexity, and still does not protect against a same-uid
-// debugger. It is documented as a possible future fast-follow if swap-file
-// persistence becomes a concern, not a 1b.1 requirement.
+// debugger. It is documented as a possible future addition if swap-file
+// persistence becomes a concern; the additional complexity is not justified
+// by the marginal security gain in the current single-operator trust model.
 func disableCoreDump() error {
 	if err := unix.Setrlimit(unix.RLIMIT_CORE, &unix.Rlimit{Cur: 0, Max: 0}); err != nil {
 		return fmt.Errorf("daemon: disable core dumps: %w", err)

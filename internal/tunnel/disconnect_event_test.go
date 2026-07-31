@@ -70,16 +70,16 @@ func TestClientDisconnectEvent(t *testing.T) {
 	client.Close()
 	conn.CloseWithError(0, "test done") //nolint:errcheck
 
-	// Give the agent goroutine time to write the disconnect event before
-	// inspecting the buffer.
-	time.Sleep(300 * time.Millisecond)
+	// Poll until the agent goroutine has written the disconnect event (or the
+	// 2 s deadline expires). This is faster than a fixed sleep on healthy
+	// hardware and only waits the full budget when something is broken.
+	if !waitForLog(sb, "client disconnected") {
+		t.Errorf("expected \"client disconnected\" in agent log within deadline; got:\n%s", sb.String())
+	}
 
 	logOutput := sb.String()
 
-	// --- assertion 1: the named disconnect event exists ----------------------
-	if !strings.Contains(logOutput, "client disconnected") {
-		t.Errorf("expected \"client disconnected\" in agent log; got:\n%s", logOutput)
-	}
+	// --- assertion 1: the named disconnect event exists (already checked above)
 
 	// --- assertion 2: session_duration field is present ----------------------
 	if !strings.Contains(logOutput, "session_duration") {
@@ -137,8 +137,11 @@ func TestClientDisconnectEvent_UncleanDeparture(t *testing.T) {
 	// The agent's control.Serve call will return when its stream is torn down.
 	conn.CloseWithError(0, "abrupt disconnect") //nolint:errcheck
 
-	// Allow the agent to process the teardown.
-	time.Sleep(300 * time.Millisecond)
+	// Poll until the agent goroutine has written the disconnect event, rather
+	// than sleeping for a fixed interval that can be too short on a loaded CI.
+	if !waitForLog(sb, "client disconnected") {
+		t.Errorf("expected \"client disconnected\" in agent log after unclean departure within deadline; got:\n%s", sb.String())
+	}
 
 	logOutput := sb.String()
 
@@ -179,8 +182,11 @@ func TestClientDisconnectEvent_FullPinNotInLog(t *testing.T) {
 
 	serverAddr := mustStartServe(t, ctx, serverTLS, rtr)
 
-	// Connect, ping, disconnect twice to accumulate log lines.
-	for range 2 {
+	// Connect, ping, disconnect twice to accumulate log lines. After each
+	// disconnect, poll until the "client disconnected" event appears in the log
+	// before starting the next connection — this avoids a fixed sleep and
+	// ensures we count exactly one event per iteration.
+	for i := range 2 {
 		conn := dialConn(t, ctx, clientTLS, serverAddr)
 		cl, err := control.Open(ctx, conn, "pin-leak-test", control.OpenOpts{})
 		if err != nil {
@@ -191,7 +197,21 @@ func TestClientDisconnectEvent_FullPinNotInLog(t *testing.T) {
 		}
 		cl.Close()
 		conn.CloseWithError(0, "done") //nolint:errcheck
-		time.Sleep(150 * time.Millisecond)
+
+		// Wait for the agent to log the disconnect event for this iteration.
+		// We poll for (i+1) occurrences so each pass waits for exactly one
+		// new event rather than re-triggering on a previous one.
+		target := strings.Repeat("client disconnected", 1) // used in count check below
+		_ = target
+		wantCount := i + 1
+		const deadline = 2 * time.Second
+		end := time.Now().Add(deadline)
+		for time.Now().Before(end) {
+			if strings.Count(sb.String(), "client disconnected") >= wantCount {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 
 	logOutput := sb.String()

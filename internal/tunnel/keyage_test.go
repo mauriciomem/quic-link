@@ -71,6 +71,25 @@ func warnLines(sb *syncBuffer) []string {
 	return out
 }
 
+// waitForLog polls sb every 10 ms until it contains substr or the deadline
+// (2 s) is reached. It returns true if substr was found within the deadline.
+// Use this instead of a fixed sleep: the test is fast when the agent goroutine
+// is quick, and only waits the full budget when something is genuinely broken.
+func waitForLog(sb *syncBuffer, substr string) bool {
+	const (
+		pollInterval = 10 * time.Millisecond
+		deadline     = 2 * time.Second
+	)
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if strings.Contains(sb.String(), substr) {
+			return true
+		}
+		time.Sleep(pollInterval)
+	}
+	return strings.Contains(sb.String(), substr)
+}
+
 // ---- wire-level unit test: proto.Header carries key_created iff non-empty ---
 
 // TestControlHeaderKeyCreatedField verifies the presence/absence of

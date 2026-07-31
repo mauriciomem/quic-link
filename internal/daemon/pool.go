@@ -84,9 +84,14 @@ const (
 
 	// transportRebindAfter is the number of consecutive dial failures after
 	// which the entry closes its current UDP transport and builds a new one.
-	// At the capped 15s backoff this corresponds to roughly 2.5 minutes of
-	// continuous failure — far below an 84-minute NAT-poisoning outage,
-	// far above a routine agent restart.
+	// A rebind fires at every multiple of this value (10, 20, 30, …); the
+	// counter only resets when a dial succeeds, so rebinds repeat until
+	// recovery. The wall-clock spacing between rebinds depends on the
+	// reconnect backoff policy: at the production cap (15 s per attempt) a
+	// single rebind cycle spans roughly 2.5 minutes, which is far below an
+	// 84-minute NAT-poisoning outage and far above a routine agent restart.
+	// In tests with zero-delay backoff the same N failures happen in
+	// microseconds.
 	transportRebindAfter = 10
 )
 
@@ -516,27 +521,43 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 			continue
 		}
 
+		// Whether this is the first connection ever or a reconnect after a
+		// drop, track it so we can log "reconnected" on recovery.
+		wasConnectedBefore := !lastSuccessAt.IsZero()
+
 		// Successful dial — reset counters.
 		consecutiveFails = 0
 		lastSuccessAt = e.clock.Now()
 		attempt = 0
-		slog.Info("connected to server", "role", "daemon", "session", e.name)
+
+		if wasConnectedBefore {
+			slog.Info("reconnected to server", "role", "daemon", "session", e.name)
+		} else {
+			slog.Info("connected to server", "role", "daemon", "session", e.name)
+		}
+
+		// probeKilled is closed by the liveness probe immediately before it
+		// calls conn.CloseWithError. This lets the runLoop distinguish a
+		// probe-declared death (already logged by the probe) from a natural
+		// QUIC drop (needs a "session lost" log here).
+		probeKilled := make(chan struct{})
 
 		// Launch the liveness probe goroutine under this entry's context.
 		// It runs concurrently with the <-conn.Context().Done() wait below.
-		// When the probe detects consecutive failures it closes the connection
-		// via CloseWithError, which cancels conn.Context() and causes the
-		// <-conn.Context().Done() below to fire — the same path as a natural
-		// drop. This avoids double-triggering: whichever fires first (probe or
-		// natural drop) cancels conn.Context(), and the other either observes
-		// a closed conn context (and stops) or observes a connection that is
-		// already being torn down. The probe goroutine is joined via the
-		// probeDone channel before proceeding to the next loop iteration.
+		// When the probe detects consecutive failures it closes probeKilled,
+		// then closes the connection via CloseWithError, which cancels
+		// conn.Context() and causes the <-conn.Context().Done() below to fire
+		// — the same path as a natural drop. This avoids double-triggering:
+		// whichever fires first (probe or natural drop) cancels conn.Context(),
+		// and the other either observes a closed conn context (and stops) or
+		// observes a connection that is already being torn down. The probe
+		// goroutine is joined via the probeDone channel before proceeding to
+		// the next loop iteration.
 		probeDone := make(chan struct{})
 		probeCtx, probeCancel := context.WithCancel(ctx)
 		go func() {
 			defer close(probeDone)
-			e.runLivenessProbe(probeCtx, conn, cclient)
+			e.runLivenessProbe(probeCtx, conn, cclient, probeKilled)
 		}()
 
 		// Wait for the connection to drop (either a natural QUIC drop or the
@@ -550,7 +571,23 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 		<-probeDone
 
 		if ctx.Err() != nil {
+			// Graceful shutdown — do not log a spurious "session lost".
 			return
+		}
+
+		// Log the drop. If the probe killed the connection it already logged
+		// the "declaring session dead" event; only log here on a natural drop
+		// (NAT timeout, network change, agent restart, QUIC idle timeout) so
+		// that operators can see the event even when the first reconnect
+		// succeeds and no retry warning is ever emitted.
+		select {
+		case <-probeKilled:
+			// Probe-declared death — already logged by the probe; no duplicate.
+		default:
+			slog.Warn("session lost; reconnecting",
+				"role", "daemon",
+				"session", e.name,
+			)
 		}
 
 		// Reset attempt counter if we were stable long enough.
@@ -576,13 +613,14 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 
 // runLivenessProbe sends periodic Ping RPCs over cclient while probeCtx is
 // not cancelled. If FailThreshold consecutive probes time out or fail, it
-// calls conn.CloseWithError to declare the session dead so the main runLoop
-// can re-dial. Probe failures caused by context cancellation (daemon shutting
-// down) are not counted and do not trigger a reconnect.
+// closes probeKilled (signalling the runLoop that this is a probe-declared
+// death, not a natural drop) and then calls conn.CloseWithError so the main
+// runLoop can re-dial. Probe failures caused by context cancellation (daemon
+// shutting down) are not counted and do not trigger a reconnect.
 //
 // The probe goroutine is the sole caller of cclient.PingRTT inside a
 // connected session — the control client is not used anywhere else concurrently.
-func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Conn, cclient *control.Client) {
+func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Conn, cclient *control.Client, probeKilled chan<- struct{}) {
 	consecutiveFailures := 0
 	interval := e.liveness.Interval()
 	timeout := e.liveness.Timeout()
@@ -630,6 +668,10 @@ func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Co
 				"session", e.name,
 				"consecutive_probe_failures", consecutiveFailures,
 			)
+			// Signal the runLoop that this drop was probe-declared (not a
+			// natural QUIC drop), so it does not emit a redundant "session
+			// lost" warning that would confuse operators looking at the log.
+			close(probeKilled)
 			// Close the connection so conn.Context() is cancelled, waking the
 			// main runLoop's <-conn.Context().Done(). The error code 0 is an
 			// application-level graceful close; the agent will see a

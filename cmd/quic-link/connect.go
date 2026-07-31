@@ -64,14 +64,16 @@ func resolveConnectScope(cfg *config.Config, args []string) (string, error) {
 	// No argument: auto-select from enabled servers.
 	enabled := enabledServers(cfg.Servers)
 	switch len(enabled) {
-	case 1:
-		for name := range enabled {
-			return name, nil
-		}
 	case 0:
 		return "", usageErrorf(
 			"no SERVER given and no enabled servers in config; " +
 				"add a [servers.<name>] entry or use 'daemon'")
+	case 1:
+		// Exactly one server: return it. The loop runs exactly once;
+		// the return inside the loop is always reached.
+		for name := range enabled {
+			return name, nil
+		}
 	default:
 		return "", usageErrorf(
 			"no SERVER given and %d enabled servers in config; "+
@@ -79,8 +81,12 @@ func resolveConnectScope(cfg *config.Config, args []string) (string, error) {
 				"  available: %s",
 			len(enabled), serverNameList(enabled))
 	}
-	// unreachable
-	return "", nil
+	// This line is unreachable: the switch above covers all possible values
+	// of len(enabled) (0, 1, and >1 via default), and every branch either
+	// returns directly or falls through to here only from case 1 — but case 1
+	// always returns inside the for loop. The compiler requires a return
+	// statement here because it cannot prove the for loop body executes.
+	panic("unreachable: enabled map with len=1 had no entries")
 }
 
 // enabledServers returns the subset of servers for which enabled is nil or true.
