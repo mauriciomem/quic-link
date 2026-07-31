@@ -66,7 +66,7 @@ func TestDaemon_ShutdownOrder_PoolBeforeDrain(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- daemon.Run(ctx, cfg, sock, pool, newFixedClock())
+		runDone <- daemon.Run(ctx, cfg, sock, pool, newFixedClock(), nil)
 	}()
 
 	if err := waitForSocket(sock, 2*time.Second); err != nil {
@@ -192,7 +192,7 @@ func TestDaemon_ShutdownMidAttach(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- daemon.Run(ctx, cfg, sock, pool, newFixedClock())
+		runDone <- daemon.Run(ctx, cfg, sock, pool, newFixedClock(), nil)
 	}()
 
 	if err := waitForSocket(sock, 2*time.Second); err != nil {

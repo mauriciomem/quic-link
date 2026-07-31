@@ -118,11 +118,14 @@ func newStdioCmd(a *app) *cobra.Command {
 				default:
 					var ae *ipc.AttachStatusError
 					if errors.As(aerr, &ae) {
-						// The agent refused the target. Print the message to stderr
-						// (stdout carries only tunnelled bytes) and return a statusError
-						// so main() exits with the right code without double-logging.
+						// The agent refused the target. The daemon already translated
+						// the agent's protocol status into a final process exit code
+						// (stored in ae.Status); casting it back to a proto.Status
+						// here would re-map it through the wrong table and produce
+						// the wrong exit code. Use errFinalExitCode to carry the
+						// code through exitCodeForError unchanged.
 						fmt.Fprintf(os.Stderr, "agent refused: %s\n", ae.Msg)
-						return &statusError{status: proto.Status(ae.Status), msg: ae.Msg}
+						return &errFinalExitCode{code: ae.Status, msg: ae.Msg}
 					}
 					// Any other daemon error: fall through to direct dial.
 				}

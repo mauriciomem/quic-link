@@ -20,6 +20,13 @@ import (
 // 5: remote refused (unknown target, dial failed, draining) — via statusError
 // 1: anything else (network failure, I/O error, etc.)
 func exitCodeForError(err error) int {
+	// errFinalExitCode carries a code that was already computed by the daemon
+	// and must not be remapped. Check it first so it is never overridden by
+	// a less-specific match below.
+	var fe *errFinalExitCode
+	if errors.As(err, &fe) {
+		return fe.code
+	}
 	var se *statusError
 	if errors.As(err, &se) {
 		return exitCodeForStatus(se.status)
@@ -86,3 +93,25 @@ func (e *statusError) Error() string {
 // (the agent's refusal message was written to stderr verbatim). main() must
 // NOT emit an additional slog.Error line for these errors.
 func (e *statusError) alreadyReported() bool { return true }
+
+// errFinalExitCode carries a process exit code that was already computed
+// upstream (e.g. by the daemon's attach relay, which converts the agent's
+// protocol status into a final code before sending the IPC ack). exitCodeForError
+// passes this code through unchanged — it must never be remapped, because the
+// original protocol status is no longer available at this point.
+//
+// This type also satisfies alreadyReportedErr so that main() does not emit a
+// redundant slog.Error line when the agent's message was already written to
+// stderr by the caller.
+type errFinalExitCode struct {
+	code int
+	msg  string
+}
+
+func (e *errFinalExitCode) Error() string {
+	return fmt.Sprintf("attach refused (exit %d): %s", e.code, e.msg)
+}
+
+// alreadyReported signals that the agent's message was already written to
+// stderr so main() must not emit an additional slog.Error line.
+func (e *errFinalExitCode) alreadyReported() bool { return true }

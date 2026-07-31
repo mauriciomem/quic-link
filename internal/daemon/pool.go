@@ -76,12 +76,20 @@ type realPool struct {
 //
 // makeTransport is a factory called once per enabled server. It receives the
 // server name and config and returns the transport to use for dialing.
+//
+// boundPorts carries the actual local TCP ports that have been successfully
+// bound for each server (ssh and docker). For an enabled server present in
+// boundPorts the pool reports those ports in status; for a server absent from
+// the map (acquisition failed) or for disabled servers the pool reports 0/0.
+// This makes the reported addresses reflect what is actually bound, not the
+// configured ideal.
 func NewRealPool(
 	ctx context.Context,
 	cfg *config.Config,
 	makeTransport func(serverName string, srv config.Server) (transport.Transport, error),
 	policy ReconnectPolicy,
 	clock Clock,
+	boundPorts map[string][2]int,
 ) (*realPool, error) {
 	p := &realPool{
 		entries: make(map[string]SessionEntry),
@@ -90,17 +98,23 @@ func NewRealPool(
 	names := sortedServerNames(cfg.Servers)
 	for _, name := range names {
 		srv := cfg.Servers[name]
-		sshPort, dockerPort := config.LocalPorts(name, srv.LocalPorts)
 
 		if srv.Enabled != nil && !*srv.Enabled {
+			// Disabled servers: report 0/0 — nothing is listening.
 			p.entries[name] = &disabledEntry{
-				name:       name,
-				sshPort:    sshPort,
-				dockerPort: dockerPort,
-				since:      clock.Now(),
+				name:  name,
+				since: clock.Now(),
 			}
 			p.order = append(p.order, name)
 			continue
+		}
+
+		// Use the actually-bound ports when available. If port acquisition
+		// failed for this server (absent from boundPorts), report 0/0 so
+		// status never names a port that has no listener.
+		sshPort, dockerPort := 0, 0
+		if ports, ok := boundPorts[name]; ok {
+			sshPort, dockerPort = ports[0], ports[1]
 		}
 
 		t, err := makeTransport(name, srv)
@@ -167,10 +181,8 @@ func sortedServerNames(servers map[string]config.Server) []string {
 // ---- disabledEntry ----------------------------------------------------------
 
 type disabledEntry struct {
-	name       string
-	sshPort    int
-	dockerPort int
-	since      time.Time
+	name  string
+	since time.Time
 }
 
 func (e *disabledEntry) Get(_ context.Context) (Conn, error) {
@@ -179,12 +191,13 @@ func (e *disabledEntry) Get(_ context.Context) (Conn, error) {
 
 func (e *disabledEntry) State() SessionState {
 	return SessionState{
-		Name:       e.name,
-		State:      "disabled",
-		Transport:  "dial",
-		Since:      e.since,
-		SSHPort:    e.sshPort,
-		DockerPort: e.dockerPort,
+		Name:      e.name,
+		State:     "disabled",
+		Transport: "dial",
+		Since:     e.since,
+		// SSHPort and DockerPort are 0: no listener is bound for a disabled
+		// server. A status field that reports phantom ports is worse than
+		// one that is absent.
 	}
 }
 
@@ -192,15 +205,22 @@ func (e *disabledEntry) Close(_ error) {}
 
 // ---- dialEntry --------------------------------------------------------------
 
-// internalConnState tracks the richer internal lifecycle. reconnecting and lost
-// both project to "connecting" in the external enum (status --json). The
-// distinction is log-text-only, not surfaced in the JSON.
+// internalConnState tracks the richer internal lifecycle.
+//
+//   - stateConnecting: initial dial underway.
+//   - stateConnected: a live connection is held.
+//   - stateReconnecting: connection dropped; re-dialing.
+//   - stateAuthFailed: permanent authentication rejection; the loop has exited
+//     and will never retry. This projects to "auth_failed" in the external enum
+//     so consumers can distinguish a permanent identity mismatch from a transient
+//     "connecting" condition.
 type internalConnState int
 
 const (
 	stateConnecting internalConnState = iota
 	stateConnected
 	stateReconnecting
+	stateAuthFailed
 )
 
 // dialEntry is the production SessionEntry for a forward-mode (dial-out)
@@ -292,10 +312,11 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 				return
 			}
 			// Auth failures are permanent — no point retrying.
-			if isAuthFailed(err) {
+			if transport.IsAuthFailed(err) {
 				slog.Error("session auth failed; giving up",
 					"role", "daemon", "session", e.name, "err", err)
 				e.mu.Lock()
+				e.intState = stateAuthFailed
 				e.dialErr = err
 				done := e.dialDone
 				e.dialing = false
@@ -445,8 +466,15 @@ func (e *dialEntry) State() SessionState {
 	defer e.mu.Unlock()
 
 	stateStr := "connecting"
-	if e.intState == stateConnected {
+	switch e.intState {
+	case stateConnected:
 		stateStr = "connected"
+	case stateAuthFailed:
+		// A permanent authentication rejection: the peer's pin does not match
+		// ours, and the loop has stopped. "auth_failed" signals a permanent
+		// configuration error, not a transient reconnect condition. Consumers
+		// must not treat this as "connecting" and wait for recovery.
+		stateStr = "auth_failed"
 	}
 
 	return SessionState{
@@ -494,10 +522,4 @@ func (e *dialEntry) Close(err error) {
 // tunnel.OpenControl so the logic lives in exactly one place.
 func openControlStream(ctx context.Context, conn transport.Conn) (*control.Client, error) {
 	return tunnel.OpenControl(ctx, conn, "quic-link daemon", control.OpenOpts{})
-}
-
-// isAuthFailed reports whether err is a transport authentication failure that
-// will not self-heal (wrong pin, cert rejection).
-func isAuthFailed(err error) bool {
-	return transport.AuthError(err) != nil
 }

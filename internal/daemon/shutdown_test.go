@@ -56,7 +56,7 @@ func TestRun_SocketRemovedOnShutdown(t *testing.T) {
 
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock())
+		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock(), nil)
 	}()
 
 	// Wait for the socket to appear (daemon is ready).
@@ -94,7 +94,7 @@ func TestRun_SocketAlwaysRemoved(t *testing.T) {
 
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock())
+		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock(), nil)
 	}()
 
 	if err := waitForSocket(sock, 2*time.Second); err != nil {
@@ -133,7 +133,7 @@ func TestDaemon_IsUnprivileged(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock())
+		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock(), nil)
 	}()
 	if err := waitForSocket(sock, 2*time.Second); err != nil {
 		cancel()
@@ -179,7 +179,7 @@ func TestSecretNonDisclosure_NoFullPinOrKeyBytesInLogs(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() {
-		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock())
+		runDone <- daemon.Run(ctx, minimalCfg(), sock, pool, newFixedClock(), nil)
 	}()
 
 	if err := waitForSocket(sock, 2*time.Second); err != nil {

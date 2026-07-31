@@ -32,6 +32,11 @@ type ConnStats struct {
 	// LatestRTT is the most recent RTT sample derived from an ACK frame
 	// (RFC 9002: latest_rtt = ack_delay subtracted from send-to-ack time).
 	LatestRTT time.Duration
+	// MeanDeviation is the mean deviation of RTT samples (RFC 9002, §5.3).
+	// It is initialised to zero and becomes non-zero only after the first
+	// genuine ACK-based RTT sample arrives. Callers can use MeanDeviation == 0
+	// as a reliable signal that no real measurement has been taken yet.
+	MeanDeviation time.Duration
 }
 
 // Stream is a single bidirectional data channel over a Conn.

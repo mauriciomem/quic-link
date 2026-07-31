@@ -164,21 +164,76 @@ func classifyDialError(err error) error {
 	return err
 }
 
-// AuthError reports whether err (typically a connection-close cause or a
-// post-handshake read error) indicates the peer rejected authentication — a
-// TLS-alert-range QUIC transport error other than an ALPN mismatch. It returns
-// the error wrapped in ErrAuthFailed, or nil if err is not an auth rejection.
-// This lets callers detect a pin rejection that arrives AFTER the local
-// handshake completes (the agent-rejects-client direction), where the failure
-// surfaces on the connection rather than at Dial.
-func AuthError(err error) error {
+// isTLSAuthAlert is the single location that encodes the TLS-alert-range rule.
+// It returns true when err carries a raw *quic.TransportError whose code is in
+// the TLS-alert range (RFC 9001) and is not the ALPN-mismatch code.
+//
+// An ALPN mismatch (alertNoAppProtocol) is explicitly excluded: it means the
+// client and server are running different binary versions and the operator must
+// rebuild both ends, not chase credentials. Reporting it as "auth failed"
+// would send the operator in the wrong direction.
+//
+// Both AuthError and IsAuthFailed call this function so the range rule cannot
+// drift between them.
+func isTLSAuthAlert(err error) (*quic.TransportError, bool) {
 	var te *quic.TransportError
 	if errors.As(err, &te) &&
 		te.ErrorCode >= tlsAlertBase && te.ErrorCode <= tlsAlertMax &&
 		te.ErrorCode != alertNoAppProtocol {
-		return fmt.Errorf("%w (peer rejected the pin: TLS error 0x%x)", ErrAuthFailed, uint64(te.ErrorCode))
+		return te, true
 	}
-	return nil
+	return nil, false
+}
+
+// AuthError constructs an ErrAuthFailed-wrapped error when err carries an
+// unclassified TLS-alert-range QUIC transport error (other than ALPN mismatch).
+// Use it to translate a raw connection-close cause into a classified error that
+// the caller can propagate up the call stack.
+//
+// When to use: call AuthError on a raw error coming from the QUIC layer (e.g.
+// a connection-close cause from context.Cause(conn.Context())) to produce a
+// well-formed error for the caller to return.
+//
+// When NOT to use as a predicate: the returned error wraps only ErrAuthFailed;
+// the original *quic.TransportError is discarded. Therefore AuthError is NOT
+// idempotent — calling AuthError on its own output returns nil. Use IsAuthFailed
+// to test whether an error (at any point in the pipeline) represents an auth
+// failure.
+//
+// Standing rule for dial+control paths: check both the returned error AND
+// context.Cause(conn.Context()). In the agent-rejects-client direction the TLS
+// alert surfaces only on the connection close cause, not at Dial.
+func AuthError(err error) error {
+	te, ok := isTLSAuthAlert(err)
+	if !ok {
+		return nil
+	}
+	return fmt.Errorf("%w (peer rejected the pin: TLS error 0x%x)", ErrAuthFailed, uint64(te.ErrorCode))
+}
+
+// IsAuthFailed reports whether err represents a transport authentication
+// failure — either already classified (wraps ErrAuthFailed) or raw (carries an
+// unclassified TLS-alert-range *quic.TransportError other than ALPN mismatch).
+//
+// Use IsAuthFailed to test; use AuthError to construct. The predicate is
+// idempotent: IsAuthFailed(AuthError(e)) == IsAuthFailed(e) for any e where
+// the original test returns true, because it checks the ErrAuthFailed sentinel
+// that AuthError wraps rather than looking for the original TransportError.
+//
+// An ALPN mismatch is explicitly NOT reported as an auth failure, because it
+// means mismatched binary versions — the operator must rebuild both ends, not
+// adjust credentials.
+//
+// Standing rule for dial+control paths: check both the error returned by the
+// call AND context.Cause(conn.Context()), since a pin rejected by the agent
+// surfaces only on the connection close cause in the agent-rejects-client
+// direction (the client's own TLS handshake has already completed by then).
+func IsAuthFailed(err error) bool {
+	if errors.Is(err, ErrAuthFailed) {
+		return true
+	}
+	_, ok := isTLSAuthAlert(err)
+	return ok
 }
 
 // ---- quicListener wraps *quic.Listener ----------------------------------------
@@ -255,9 +310,10 @@ func (c *quicConn) AcceptStream(ctx context.Context) (Stream, error) {
 func (c *quicConn) Stats() ConnStats {
 	cs := c.c.ConnectionStats()
 	return ConnStats{
-		MinRTT:      cs.MinRTT,
-		SmoothedRTT: cs.SmoothedRTT,
-		LatestRTT:   cs.LatestRTT,
+		MinRTT:        cs.MinRTT,
+		SmoothedRTT:   cs.SmoothedRTT,
+		LatestRTT:     cs.LatestRTT,
+		MeanDeviation: cs.MeanDeviation,
 	}
 }
 

@@ -6,12 +6,14 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/daemon"
+	"github.com/mauriciomem/quic-link/internal/edge"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/transport"
@@ -189,18 +191,61 @@ Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then reset.`,
 				return t, nil
 			}
 
+			// Acquire the TCP listener pairs for all enabled servers before
+			// building the pool. This is the single point where ports are
+			// allocated: both the pool (for status reporting) and the edges
+			// (for accepting connections) consume the same result, so the
+			// reported ports always reflect what is actually bound.
+			//
+			// Iteration is in sorted name order so that when two servers'
+			// deterministic port blocks collide, the same server wins the base
+			// block on every restart. Randomised map iteration would make the
+			// winner a coin flip, breaking the property that a user who learns
+			// server X is on a given port can rely on it across restarts.
+			serverNames := make([]string, 0, len(cfg.Servers))
+			for name := range cfg.Servers {
+				serverNames = append(serverNames, name)
+			}
+			sort.Strings(serverNames)
+
+			alloc := edge.PortAllocator{}
+			boundPorts := make(map[string][2]int)
+			prebuiltListeners := make(map[string][2]net.Listener)
+			for _, name := range serverNames {
+				srv := cfg.Servers[name]
+				if srv.Enabled != nil && !*srv.Enabled {
+					continue
+				}
+				sshLn, dkrLn, acquireErr := alloc.AcquirePair(name, srv.LocalPorts)
+				if acquireErr != nil {
+					slog.Error("daemon: cannot acquire port pair for server; skipping edge",
+						"role", "daemon", "server", name, "err", acquireErr)
+					continue
+				}
+				sshPort := sshLn.Addr().(*net.TCPAddr).Port
+				dkrPort := dkrLn.Addr().(*net.TCPAddr).Port
+				boundPorts[name] = [2]int{sshPort, dkrPort}
+				prebuiltListeners[name] = [2]net.Listener{sshLn, dkrLn}
+			}
+
 			pool, err := daemon.NewRealPool(
 				cmd.Context(),
 				cfg,
 				makeTransport,
 				daemon.DefaultReconnectPolicy(),
 				daemon.WallClock{},
+				boundPorts,
 			)
 			if err != nil {
+				// Close pre-acquired listeners to avoid a file-descriptor leak.
+				for _, pair := range prebuiltListeners {
+					pair[0].Close()
+					pair[1].Close()
+				}
 				return fmt.Errorf("daemon: build pool: %w", err)
 			}
 
-			return daemon.Run(cmd.Context(), cfg, sock, pool, daemon.WallClock{})
+			return daemon.Run(cmd.Context(), cfg, sock, pool, daemon.WallClock{}, prebuiltListeners)
 		},
 	}
 

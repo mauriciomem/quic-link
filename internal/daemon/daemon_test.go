@@ -106,12 +106,12 @@ func TestStatusJSON_GoldenFile(t *testing.T) {
 			DockerPort: 42001,
 		},
 		{
-			Name:       "server2",
-			State:      "disabled",
-			Transport:  "dial",
-			Since:      clock.Now(),
-			SSHPort:    43000,
-			DockerPort: 43001,
+			Name:      "server2",
+			State:     "disabled",
+			Transport: "dial",
+			Since:     clock.Now(),
+			// SSHPort and DockerPort are 0: a disabled server has no listeners.
+			// The golden captures this as {"ssh":0,"docker":0}.
 		},
 	}
 

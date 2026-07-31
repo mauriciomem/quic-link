@@ -39,7 +39,7 @@ func startTestDaemon(t *testing.T, sock string) (cancel context.CancelFunc, done
 	ctx, c := context.WithCancel(context.Background())
 	ch := make(chan error, 1)
 	go func() {
-		ch <- daemon.Run(ctx, cfg, sock, &fakePoolForCmd{}, daemon.WallClock{})
+		ch <- daemon.Run(ctx, cfg, sock, &fakePoolForCmd{}, daemon.WallClock{}, nil)
 	}()
 
 	deadline := time.Now().Add(3 * time.Second)

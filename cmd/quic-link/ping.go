@@ -176,6 +176,7 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 	var (
 		successful     int
 		totalHandshake float64
+		successfulRTT  int // probes with a genuine transport RTT measurement
 		totalSmoothed  float64
 		totalMin       float64
 		successfulRPC  int
@@ -212,13 +213,24 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 			continue
 		}
 
-		fmt.Printf("probe %d/%d: handshake=%v smoothed_rtt=%v min_rtt=%v latest_rtt=%v\n",
-			i, count,
-			res.HandshakeTime.Round(time.Microsecond),
-			res.SmoothedRTT.Round(time.Microsecond),
-			res.MinRTT.Round(time.Microsecond),
-			res.LatestRTT.Round(time.Microsecond),
-		)
+		// Format transport RTT: when HasRTT is false the QUIC implementation has
+		// not yet taken a genuine ACK-based sample and the values are a seeded
+		// placeholder. Printing "n/a" avoids presenting fabricated numbers as
+		// measurements; prose format is intentionally not a contract.
+		if res.HasRTT {
+			fmt.Printf("probe %d/%d: handshake=%v [measured] smoothed_rtt=%v min_rtt=%v latest_rtt=%v\n",
+				i, count,
+				res.HandshakeTime.Round(time.Microsecond),
+				res.SmoothedRTT.Round(time.Microsecond),
+				res.MinRTT.Round(time.Microsecond),
+				res.LatestRTT.Round(time.Microsecond),
+			)
+		} else {
+			fmt.Printf("probe %d/%d: handshake=%v [transport RTT: n/a — no ACK sample yet]\n",
+				i, count,
+				res.HandshakeTime.Round(time.Microsecond),
+			)
+		}
 		// Application-level control-stream RPC round-trip, labelled distinctly
 		// from the transport RTT. A control failure is non-fatal: the transport
 		// numbers above are still meaningful.
@@ -226,13 +238,21 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 			fmt.Printf("           control_rpc: FAILED (%v)\n", res.RPCErr)
 		} else {
 			fmt.Printf("           control_rpc_rtt=%v\n", res.RPCRoundTrip.Round(time.Microsecond))
+			// Surface an invariant violation loudly. This does not change the
+			// exit code — it is purely a diagnostic warning for the operator.
+			if res.RPCInvariantViolation != nil {
+				fmt.Printf("           WARNING: %v\n", res.RPCInvariantViolation)
+			}
 			totalRPC += float64(res.RPCRoundTrip)
 			successfulRPC++
 		}
 		successful++
 		totalHandshake += float64(res.HandshakeTime)
-		totalSmoothed += float64(res.SmoothedRTT)
-		totalMin += float64(res.MinRTT)
+		if res.HasRTT {
+			successfulRTT++
+			totalSmoothed += float64(res.SmoothedRTT)
+			totalMin += float64(res.MinRTT)
+		}
 	}
 
 	if successful == 0 {
@@ -241,11 +261,18 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 	n := float64(successful)
 	fmt.Printf("--- %s ping statistics ---\n", server)
 	fmt.Printf("%d probes sent, %d successful\n", count, successful)
-	fmt.Printf("avg: handshake=%v smoothed_rtt=%v min_rtt=%v\n",
-		time.Duration(totalHandshake/n).Round(time.Microsecond),
-		time.Duration(totalSmoothed/n).Round(time.Microsecond),
-		time.Duration(totalMin/n).Round(time.Microsecond),
-	)
+	if successfulRTT > 0 {
+		fmt.Printf("avg: handshake=%v smoothed_rtt=%v min_rtt=%v (%d/%d measured)\n",
+			time.Duration(totalHandshake/n).Round(time.Microsecond),
+			time.Duration(totalSmoothed/float64(successfulRTT)).Round(time.Microsecond),
+			time.Duration(totalMin/float64(successfulRTT)).Round(time.Microsecond),
+			successfulRTT, successful,
+		)
+	} else {
+		fmt.Printf("avg: handshake=%v [transport RTT: n/a — no ACK samples in any probe]\n",
+			time.Duration(totalHandshake/n).Round(time.Microsecond),
+		)
+	}
 	if successfulRPC > 0 {
 		fmt.Printf("avg: control_rpc_rtt=%v (%d/%d ok)\n",
 			time.Duration(totalRPC/float64(successfulRPC)).Round(time.Microsecond),

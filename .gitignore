@@ -19,3 +19,9 @@ certs/
 *.csr
 *.pem
 *.srl
+
+# Carter internal state
+.carter/
+
+# Key metadata sidecars
+*.pem.meta

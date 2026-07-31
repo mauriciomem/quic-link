@@ -41,6 +41,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"time"
 
@@ -67,6 +68,12 @@ const shutdownDeadline = 5 * time.Second
 // removes the socket file. The socket is always removed, even if the drain
 // deadline fires, so a future invocation can reclaim the path cleanly.
 //
+// prebuiltListeners carries the already-bound TCP listener pairs keyed by
+// server name. Each entry is [ssh, docker]. Passing pre-built listeners rather
+// than acquiring them inside Run ensures the pool and the edges consume the
+// same result: there is exactly one place where ports are bound. A nil map
+// means "no edges" (used in tests that do not need the local-port edge layer).
+//
 // Dependencies are passed as interfaces so tests can inject fakes without
 // touching the QUIC or filesystem layers.
 func Run(
@@ -75,6 +82,7 @@ func Run(
 	socketPath string,
 	pool SessionPool,
 	clock Clock,
+	prebuiltListeners map[string][2]net.Listener,
 ) error {
 	// Disable core dumps at startup to remove the accidental-core-file
 	// key-leak path. A core dump written while the key is resident in memory
@@ -112,23 +120,16 @@ func Run(
 
 	slog.Info("daemon started", "role", "daemon", "socket", socketPath)
 
-	// Build one localPortEdge per enabled server. If a port pair cannot be
-	// acquired for a server, log loudly and continue — one bad port must not
-	// stop the entire fleet. The edge adapter satisfies both ipc.AttachPool and
-	// edge.ConnSource via the same poolAttachAdapter struct.
-	alloc := edge.PortAllocator{}
+	// Build one localPortEdge per pre-acquired listener pair. The listeners were
+	// bound before the pool was constructed so the pool and the edges share the
+	// same result — there is exactly one place where ports are allocated.
 	var edges []*edge.LocalPortEdge
 	for _, name := range sortedConfigServerNames(cfg.Servers) {
-		srv := cfg.Servers[name]
-		if srv.Enabled != nil && !*srv.Enabled {
+		pair, ok := prebuiltListeners[name]
+		if !ok {
 			continue
 		}
-		sshLn, dkrLn, err := alloc.AcquirePair(name, srv.LocalPorts)
-		if err != nil {
-			slog.Error("daemon: cannot acquire port pair for server; skipping edge",
-				"role", "daemon", "server", name, "err", err)
-			continue
-		}
+		sshLn, dkrLn := pair[0], pair[1]
 		e := edge.NewLocalPortEdge(ctx, name, sshLn, dkrLn, attachPool)
 		edges = append(edges, e)
 		slog.Info("daemon: edge listening",
