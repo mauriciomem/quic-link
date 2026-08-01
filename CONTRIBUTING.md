@@ -1,12 +1,34 @@
 # Contributing
 
-quic-link has a versioned wire protocol and a frozen status contract. Small changes can have non-obvious reach. Read this before opening a PR.
+quic-link is a single Go binary that tunnels SSH and Docker traffic between a
+client-side daemon and a server-side agent over one mutually-authenticated
+QUIC connection. See `README.md` for what it does and how to use it, and
+`ARCHITECTURE.md` for how it's built.
 
----
+## Current status: not open for contributions yet
 
-## Build and test gate
+This is a single-maintainer project in active development. The wire protocol,
+CLI surface, and config schema are all still moving, and reviewing external
+changes against a design that hasn't settled yet would slow both of us down.
+Pull requests aren't being accepted at this stage.
 
-Every PR must pass these commands before requesting review:
+That's a "not yet," not a "no." Once the core is stable, contributions will be
+genuinely welcome, and interest in the project now is appreciated.
+
+## What you can do in the meantime
+
+- **Try it and report your experience.** Real usage on real machines is the
+  most useful feedback there is.
+- **Open an issue for a bug.** Include your OS, the command you ran, and what
+  you expected versus what happened.
+- **Open an issue for a question.** If something in the README or the CLI
+  `--help` output is unclear or looks wrong, that's worth flagging even if it
+  turns out to be intentional.
+- **Watch the repository** if you want to know when contributions open up.
+
+## Build and test
+
+If you want to build from source or read the code, this is the whole loop:
 
 ```bash
 go build ./...
@@ -14,65 +36,10 @@ go vet ./...
 go test -race -count=1 ./...
 ```
 
-`-count=1` disables test caching — goroutine-leak checks (`goleak`) run per-execution. If your package spawns goroutines, add `goleak.VerifyTestMain` to its `TestMain`.
-
----
-
-## Start with the contract
-
-Before writing code, define what the feature does externally:
-
-- **New CLI verb:** write the synopsis, flags, stdout contract, and exit codes in `internal-docs/docs/` first.
-- **New config key:** add it to the config schema. Unknown keys are a startup error.
-- **New `status --json` field:** bump `schema` and update the golden file — see invariants below.
-
-Unsure whether your change crosses a contract boundary? Open an issue first.
-
----
-
-## Wire-change stop sign
-
-Any change to frame layout, field semantics, or status codes is a **breaking change**:
-
-1. Re-read the protocol spec in `internal-docs/docs/` before touching anything.
-2. Bump `ProtoVersion` in `internal/proto` **and** the ALPN string in `internal/transport`.
-3. Add a test vector in the same commit as the code.
-4. Note the impact in your PR — both ends must be rebuilt simultaneously.
-
----
-
-## Invariants
-
-These are not style preferences. Violations break operator-visible contracts.
-
-| Rule | What it means |
-|---|---|
-| **Typed errors, not `os.Exit`** | Verbs return typed errors; `main()` is the single place that maps them to exit codes. No `os.Exit` outside `main.go`. |
-| **Godoc on every exported symbol** | Plain English answering "what is this?" or "what does it do / require / return on error?". No internal spec citations in `.go` files; RFC references are fine. |
-| **Every goroutine has an owner and a teardown path** | If it is not in `internal/daemon`'s goroutine ownership table, it is a leak candidate. Decide who cancels its context before you start it. `goleak` enforces this in tests. |
-| **`status --json` byte-shape is frozen** | No field additions, renames, or reordering without bumping `schema` and regenerating `testdata/status_golden.json`. Include the updated golden file in your PR. |
-| **Authentication is always on** | No code path leads to an unauthenticated connection — no debug flag, no loopback exemption. Tests use `internal/transport/mem` with injectable peer certs; real TLS is not needed in unit tests. |
-| **No secrets in tracked files, config, or logs** | Private keys live only at their on-disk 0600 path. Do not commit keys, tokens, passwords, or connection strings anywhere in the tracked repository. |
-
----
-
-## Doc maintenance
-
-When editing files in `internal-docs/docs/`:
-
-- Every doc has a `Version`, `Last-updated`, `Status`, and `## Changelog`. Editing means adding a changelog line and bumping the version.
-- Architecture decision records are **immutable once accepted**. Write a superseding record instead of editing an accepted one.
-
----
-
-## Commits and PRs
-
-- **Small vertical slices.** Each PR is independently runnable and testable.
-- **Demo sentence.** PR description must include: "After this PR, `quic-link X` does Y."
-- **Reference the acceptance item** your PR satisfies, if one exists.
-
----
+`-count=1` disables test caching so goroutine-leak checks (`goleak`) run on
+every execution.
 
 ## Where to ask
 
-Open an issue. Design questions go to an issue (or a proposed decision record) before any implementation — not embedded in a PR.
+Open an issue. That's the front door for bug reports, questions, and anything
+else related to the project.
