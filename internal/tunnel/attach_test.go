@@ -13,9 +13,100 @@ import (
 
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/proto"
+	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/transport/mem"
 )
+
+// ---- shared mem-agent harness ------------------------------------------------
+//
+// memSetup wires a fake agent (tunnel.Serve) over an in-memory transport hub
+// with real identities, giving tests a ready-to-dial client transport. It was
+// formerly shared with connManager's own white-box tests; those are gone (the
+// dial-and-reconnect mechanics they exercised now live in internal/daemon
+// against dialEntry), but DoAttach still needs a live conn to attach streams
+// to, so the harness stays.
+type memSetup struct {
+	hub        *mem.Hub
+	clientT    transport.Transport
+	serverAddr string
+	rtr        *router.Router
+}
+
+// newMemSetup creates identities, starts a fake agent via tunnel.Serve,
+// and returns the harness. The agent context is tied to t's cleanup.
+func newMemSetup(t *testing.T) *memSetup {
+	t.Helper()
+
+	clientLeaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (client): %v", err)
+	}
+	serverLeaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity (server): %v", err)
+	}
+
+	hub := mem.NewHub()
+	srvAddr := "agent:1"
+	srvT := hub.Transport(srvAddr, mem.WithCert(serverLeaf))
+	cliT := hub.Transport("client:1", mem.WithCert(clientLeaf))
+
+	ln, err := srvT.Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	// A minimal router with a dummy tcp target keeps the agent happy.
+	// We don't need real traffic to flow; we only need the control stream.
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { echoLn.Close() })
+	go runEchoSrv(echoLn)
+
+	rtr, err := router.New(map[string]string{"ssh": "tcp://" + echoLn.Addr().String()}, nil)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		ln.Close()
+	})
+	go Serve(ctx, ln, rtr) //nolint:errcheck
+
+	return &memSetup{
+		hub:        hub,
+		clientT:    cliT,
+		serverAddr: srvAddr,
+		rtr:        rtr,
+	}
+}
+
+func runEchoSrv(ln net.Listener) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			buf := make([]byte, 4096)
+			for {
+				n, err := c.Read(buf)
+				if n > 0 {
+					c.Write(buf[:n]) //nolint:errcheck
+				}
+				if err != nil {
+					return
+				}
+			}
+		}(c)
+	}
+}
 
 // ---- DoAttach tests ---------------------------------------------------------
 
@@ -25,13 +116,12 @@ func TestDoAttach_ByteExact(t *testing.T) {
 	t.Parallel()
 	s := newMemSetup(t)
 
-	mgr := &connManager{t: s.clientT, serverAddr: s.serverAddr}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := mgr.Establish(ctx)
+	conn, err := s.clientT.Dial(ctx, s.serverAddr)
 	if err != nil {
-		t.Fatalf("Establish: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 
 	// Build a local pipe pair: one end is "local" for DoAttach, the other is ours.
@@ -74,13 +164,12 @@ func TestDoAttach_HalfClose(t *testing.T) {
 	t.Parallel()
 	s := newMemSetup(t)
 
-	mgr := &connManager{t: s.clientT, serverAddr: s.serverAddr}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := mgr.Establish(ctx)
+	conn, err := s.clientT.Dial(ctx, s.serverAddr)
 	if err != nil {
-		t.Fatalf("Establish: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 
 	localA, localB := net.Pipe()
@@ -116,13 +205,12 @@ func TestDoAttach_Reset(t *testing.T) {
 	t.Parallel()
 	s := newMemSetup(t)
 
-	mgr := &connManager{t: s.clientT, serverAddr: s.serverAddr}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := mgr.Establish(ctx)
+	conn, err := s.clientT.Dial(ctx, s.serverAddr)
 	if err != nil {
-		t.Fatalf("Establish: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 
 	localA, localB := net.Pipe()
@@ -151,13 +239,12 @@ func TestDoAttach_UnknownTarget(t *testing.T) {
 	t.Parallel()
 	s := newMemSetup(t)
 
-	mgr := &connManager{t: s.clientT, serverAddr: s.serverAddr}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := mgr.Establish(ctx)
+	conn, err := s.clientT.Dial(ctx, s.serverAddr)
 	if err != nil {
-		t.Fatalf("Establish: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 
 	localA, localB := net.Pipe()
@@ -186,13 +273,12 @@ func TestDoAttach_RelayAck(t *testing.T) {
 	t.Parallel()
 	s := newMemSetup(t)
 
-	mgr := &connManager{t: s.clientT, serverAddr: s.serverAddr}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := mgr.Establish(ctx)
+	conn, err := s.clientT.Dial(ctx, s.serverAddr)
 	if err != nil {
-		t.Fatalf("Establish: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 
 	localA, localB := net.Pipe()

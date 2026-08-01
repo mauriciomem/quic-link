@@ -12,6 +12,46 @@ import (
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
+// AwaitResponse reads the agent's response frame, enforcing the response
+// deadline. On timeout, context cancellation, or a read error it resets the
+// stream (which also unblocks the read goroutine) and returns an error.
+// It is exported so callers outside this package (e.g. a stdio bridge in cmd/)
+// can reuse the same await behaviour without duplicating the timer/select logic.
+func AwaitResponse(ctx context.Context, stream transport.Stream, d time.Duration) (proto.Response, error) {
+	return awaitResponse(ctx, stream, d)
+}
+
+// awaitResponse is the unexported implementation.
+func awaitResponse(ctx context.Context, stream transport.Stream, d time.Duration) (proto.Response, error) {
+	type result struct {
+		resp proto.Response
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		resp, err := proto.ReadResponse(stream)
+		ch <- result{resp, err}
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			stream.Reset(proto.StreamResetCode)
+			return proto.Response{}, res.err
+		}
+		return res.resp, nil
+	case <-timer.C:
+		stream.Reset(proto.StreamResetCode)
+		return proto.Response{}, fmt.Errorf("timed out after %s waiting for response", d)
+	case <-ctx.Done():
+		stream.Reset(proto.StreamResetCode)
+		return proto.Response{}, ctx.Err()
+	}
+}
+
 // StreamConn is the minimal surface DoAttach needs: an already-established,
 // already-authenticated connection on which it opens exactly one stream. It
 // never dials. Both a real transport.Conn and the daemon's pooled conn satisfy

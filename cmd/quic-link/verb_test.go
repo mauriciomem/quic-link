@@ -152,7 +152,7 @@ addr = "127.0.0.1:19999"
 pin  = "`+pin+`"
 `)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately so tunnel.Connect returns quickly
+	cancel() // cancel immediately so the daemon owner's dial attempt returns quickly
 	err := runVerbCtx(ctx, []string{"--config", path, "connect", "server1"})
 	code := exitCode(err)
 	if code == 2 {

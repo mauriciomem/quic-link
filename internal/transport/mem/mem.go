@@ -1,6 +1,6 @@
 // Package mem provides an in-memory implementation of the transport interfaces
-// defined in internal/transport. It is test infrastructure for the connect and
-// reconnect machinery: running the full tunnel.Connect/Serve stack over mem
+// defined in internal/transport. It is test infrastructure for the dial and
+// reconnect machinery: running the full dial-and-serve stack over mem
 // eliminates the need for UDP sockets, QUIC crypto, or any OS privileges, making
 // the tests fast, deterministic, and free of networking flake.
 //

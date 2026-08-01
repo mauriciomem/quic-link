@@ -10,7 +10,7 @@ Which role the process plays is determined entirely by its configuration file:
 
 | Role | Activated by | What it does |
 |---|---|---|
-| **Owner** (client) | A `[servers.*]` block | Dials the agent, holds a session pool, exposes local ports and a unix socket for short verbs. Two spellings: `quic-link connect` (foreground) and `quic-link daemon` (background). Exactly one owner runs at a time — the socket is the lock. |
+| **Owner** (client) | A `[servers.*]` block | Dials the agent(s), holds a session pool, and binds local TCP ports plus a unix socket for short verbs. `quic-link daemon [--server NAME]` is the one owner verb; it runs in the foreground and expects a service manager (systemd user unit, launchd agent, shell `&`) to background it. `quic-link connect [SERVER]` is a hidden, deprecated alias for `daemon --server SERVER` and will be removed in a future release. Exactly one owner runs at a time — the unix socket is the lock. |
 | **Agent** (server) | An `[agent]` block | Listens for the owner's QUIC connection, maintains a route table of named targets, and dials the real local service for each stream. |
 
 The same binary handles both, so upgrading is always an atomic event: build once, deploy to both ends.
@@ -21,7 +21,7 @@ The same binary handles both, so upgrading is always an atomic event: build once
 
 - **One QUIC session per configured server.** The owner dials eagerly at start and reconnects on drop; there is no "connect on first use" lazy path.
 - **Multiplexed streams.** Every service interaction (an SSH login, a Docker API call) is a separate QUIC stream inside the single session. Streams are opened cheaply with no new handshake.
-- **One control stream per session.** The very first stream the owner opens is a gRPC-over-QUIC control channel. It is used for liveness (`ping`) and status RPCs; it also serves as the session's heartbeat — if it closes, the session is torn down and reconnected.
+- **One control stream per session.** The very first stream the owner opens is a gRPC-over-QUIC control channel. It carries the `Ping` RPC (used by the `ping` verb) and doubles as the session's heartbeat — if it closes, the session is torn down and reconnected. `quic-link status --json` is answered separately, over the owner's local unix socket, not this control stream.
 - **Logical targets, never raw addresses.** Every data stream opens with a short header naming a *logical target* (e.g., `"ssh"`, `"docker"`). The agent's route table is the sole resolution and authorization boundary. No client ever names a raw `ip:port`.
 
 **Why QUIC?** Three reasons that matter for correctness: (1) streams are independent under packet loss, so a stalled Docker image pull cannot block keystrokes; (2) stream half-close (`FIN`) and reset (`RST`) are first-class QUIC concepts, so they can be faithfully relayed across the tunnel; (3) TLS 1.3 is built in, so there is no separate encryption layer to manage.
@@ -33,24 +33,28 @@ The same binary handles both, so upgrading is always an atomic event: build once
 Tracing one SSH connection from a terminal through the full stack:
 
 ```
-1.  Terminal          ssh -p 2222 user@127.0.0.1
-2.  Local edge        quic-link owner accepts the TCP connection on :2222
-3.  Header stamp      owner frames a header: { kind: "tcp", target: "ssh" }
-                      and opens a new QUIC stream, writing the header frame first
-4.  IPC path*         if using the daemon: the CLI verb sends an attach request
-                      over the unix socket; the daemon looks up the pooled session
-                      and opens the stream on the verb's behalf
-5.  Agent router      agent reads the header, checks the target is in the route table
+1.  Terminal          ssh -p 50330 user@127.0.0.1
+2.  Local edge        the daemon's edge accept-loop accepts the TCP connection
+                      on the bound port for this server's "ssh" target
+3.  Header stamp      the edge opens a new QUIC stream on the pooled session and
+                      writes a header first: { kind: "tcp", target: "ssh" }
+4.  Agent router      agent reads the header, checks the target is in the route table
                       and authorized, then dials tcp://127.0.0.1:22
-6.  Response frame    agent sends back { status: 0, msg: "ok" } on the stream
-7.  Splice (×2)       bytes flow bidirectionally:
+5.  Response frame    agent sends back { status: 0, msg: "ok" } on the stream
+6.  Splice (×2)       bytes flow bidirectionally:
                         local TCP conn ↔ QUIC stream ↔ sshd TCP conn
                       half-close on one side becomes a stream half-close on the other;
                       an error becomes a QUIC stream reset — never converted
-8.  Return path       sshd's reply retraces steps 7 → 6 → 5 → 3 → 2 → 1
+7.  Return path       sshd's reply retraces steps 6 → 5 → 4 → 3 → 2 → 1
 ```
 
-\* Step 4 reflects the daemon model being built in the current phase. The `connect` foreground owner performs steps 2–3 directly; the full daemon socket-and-pool path is in progress. Today's code connects the two models via `connManager` — see `internal/daemon` and `internal/ipc`.
+The ssh/Docker local ports splice directly inside the daemon process — no unix
+socket round trip. The unix socket (`internal/ipc`) is a separate path used by
+short-lived CLI verbs that are not raw TCP clients: `status` asks the daemon for
+a session snapshot, and `stdio` asks it to open one stream on the pooled session
+and hand back a connection to splice against stdin/stdout. Both paths converge
+on the same `tunnel.DoAttach` splice primitive so the wire behaviour is
+identical either way.
 
 ---
 
@@ -64,17 +68,18 @@ Tracing one SSH connection from a terminal through the full stack:
 | `internal/identity` | Ed25519 key generation and loading; pin derivation (`base64(SHA-256(SPKI))`); pinning TLS config builders | stdlib `crypto/`, `crypto/x509` |
 | `internal/config` | TOML config loader; `flags > env > file > defaults` precedence; role-scoped semantic validation | `pelletier/go-toml/v2` |
 | `internal/router` | Agent-side route table: named targets → `tcp://` or `unix://` addresses; allow-all authorization call-site | `internal/proto` |
-| `internal/tunnel` | Bidirectional byte splice (`Pipe`); agent `Serve` loop; owner `Connect` session setup | `internal/proto`, `internal/transport`, `internal/router`, `internal/control` |
-| `internal/control` | gRPC control stream over QUIC: `Ping` RPC; net.Conn adapter over a `transport.Stream` | `google.golang.org/grpc`, `internal/transport` |
+| `internal/tunnel` | Bidirectional byte splice (`Pipe`, `DoAttach`); agent `Serve` loop; the shared `OpenControl` helper that classifies an auth rejection identically for every caller (daemon pool, `ping`, `stdio`) | `internal/proto`, `internal/transport`, `internal/router`, `internal/control` |
+| `internal/control` | gRPC control stream over QUIC: `Ping` RPC (`GetStatus` reserved, not yet implemented); net.Conn adapter over a `transport.Stream` | `google.golang.org/grpc`, `internal/transport` |
 | `internal/ipc` | Unix socket IPC frame set (framed CBOR); socket server and client; `StatusProvider` and `AttachPool` interfaces | `internal/proto`, `fxamacker/cbor/v2` |
-| `internal/daemon` | Lifecycle, session pool, status snapshot, signal-driven shutdown; orchestrates ipc + tunnel; owns the goroutine table | `internal/config`, `internal/ipc`, `internal/transport` |
+| `internal/daemon` | Lifecycle, session pool (`dialEntry` — the single dial-and-classify implementation, one reconnect loop), status snapshot, signal-driven shutdown; orchestrates ipc + tunnel | `internal/config`, `internal/ipc`, `internal/transport` |
+| `internal/edge` | Local TCP listeners the daemon binds and holds for each server's targets (ssh, docker); accept-loops splice directly via `tunnel.DoAttach` | `internal/config`, `internal/tunnel` |
 | `internal/probe` | `ping` verb: handshake timing + RTT sampling (RFC 9002 connection stats) | `internal/transport`, `internal/control` |
 
 ---
 
-## Internal spec corpus
-
-Deep protocol specs, config key schemas, CLI contracts, and architecture decision records live in `internal-docs/docs/`. That directory is **gitignored and maintainer-generated** — it is not part of the tracked repository. If you are a contributor reading only the tracked tree, this file plus `CONTRIBUTING.md` are your entry point. If you have access to the internal docs, the numbered files (01 through 07) correspond to the layers described above.
+This file, together with `README.md` (what it does, how to use it) and
+`CONTRIBUTING.md` (how to build, test, and report issues), is the complete
+entry point for anyone reading only the tracked repository.
 
 ---
 
