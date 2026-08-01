@@ -34,7 +34,7 @@ transport RTT statistics and control-stream RPC round-trip time.
 Each probe opens a fresh QUIC connection so the handshake cost is measured
 independently. SERVER is the name of a server defined in the config file; if
 omitted and exactly one enabled server exists, it is used automatically.`,
-		Args: cobra.MaximumNArgs(1),
+		Args: wrapArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cmd.Flags()
 

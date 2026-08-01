@@ -23,12 +23,12 @@ a restart instruction.
 
 The --json flag prints the frozen machine-readable shape to stdout (CONTRACT):
   {"schema":1,"identity":{"created":"...","age_days":N,"rotation_due":false},
-   "servers":[{"name":"...","session":"connected|connecting|listening|disabled",
+   "servers":[{"name":"...","session":"connected|connecting|listening|disabled|auth_failed",
    "transport":"dial|listen","since_ms":N,"local_ports":{"ssh":N,"docker":N}}]}
 
 The "session" field is an open enum: consumers must tolerate unrecognized values
 by treating them as "not healthy / see logs".`,
-		Args: cobra.NoArgs,
+		Args: wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sock, err := daemonSocketPath(a.cfg)
 			if err != nil {

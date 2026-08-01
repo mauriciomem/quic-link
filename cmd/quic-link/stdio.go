@@ -38,7 +38,7 @@ func newStdioCmd(a *app) *cobra.Command {
 		Use:    "stdio SERVER TARGET",
 		Short:  "Connect a single stream to TARGET via SERVER over stdin/stdout",
 		Hidden: true,
-		Args:   cobra.ExactArgs(2),
+		Args:   wrapArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cmd.Flags()
 

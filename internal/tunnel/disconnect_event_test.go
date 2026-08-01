@@ -129,6 +129,15 @@ func TestClientDisconnectEvent_UncleanDeparture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("control.Open: %v", err)
 	}
+	// Reap the local gRPC client's background goroutines at test end, but only
+	// AFTER the abrupt CloseWithError below has already happened (t.Cleanup
+	// runs after the test body returns). This keeps the "unclean departure"
+	// property intact: the client never signals a graceful shutdown to the
+	// agent — conn.CloseWithError tears down the wire first, and Close here
+	// only releases already-local goroutine state afterward, so it does not
+	// weaken what this test proves about the agent's behaviour on an abrupt
+	// drop.
+	t.Cleanup(func() { client.Close() }) //nolint:errcheck
 	if _, err := client.PingRTT(ctx); err != nil {
 		t.Fatalf("PingRTT: %v", err)
 	}

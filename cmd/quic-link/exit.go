@@ -27,14 +27,25 @@ func exitCodeForError(err error) int {
 	if errors.As(err, &fe) {
 		return fe.code
 	}
+	// ssh's own exit status passes through unchanged — this is the one verb
+	// whose exit code is not this CLI's taxonomy at all.
+	var ee *errExecExitCode
+	if errors.As(err, &ee) {
+		return ee.code
+	}
 	var se *statusError
 	if errors.As(err, &se) {
 		return exitCodeForStatus(se.status)
 	}
 	var ownerRunning *errOwnerRunningType
 	var squatter *errSquatterType
+	var dockerNotReady *errDockerNotReady
 	switch {
 	case errors.Is(err, transport.ErrUnreachable):
+		return 3
+	case errors.As(err, &dockerNotReady):
+		// docker-env's zero-port rule: keeps "eval $(quic-link docker-env)"
+		// a safe no-op instead of exporting DOCKER_HOST to a dead port.
 		return 3
 	case errors.Is(err, transport.ErrAuthFailed):
 		return 4

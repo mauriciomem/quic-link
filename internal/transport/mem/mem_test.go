@@ -74,7 +74,8 @@ func TestStream_OpenAcceptPairing(t *testing.T) {
 
 // TestStream_HalfClose verifies that Stream.Close() is a half-close: the peer's
 // Read returns io.EOF after draining, but the REVERSE direction keeps flowing.
-// This is the INV-6 guarantee: a clean FIN stays a FIN.
+// A clean close must stay a clean close (FIN), never get converted into an
+// abrupt reset.
 func TestStream_HalfClose(t *testing.T) {
 	t.Parallel()
 	hub := mem.NewHub()
@@ -148,8 +149,8 @@ func TestStream_HalfClose(t *testing.T) {
 }
 
 // TestStream_Reset verifies that Reset abruptly terminates BOTH directions.
-// The peer's Read AND Write must return an error — the clean FIN (EOF) must
-// NOT be used. This is the other half of INV-6.
+// The peer's Read AND Write must return an error: an abrupt close must stay
+// abrupt (a reset), never get softened into a clean FIN (EOF).
 func TestStream_Reset(t *testing.T) {
 	t.Parallel()
 	hub := mem.NewHub()

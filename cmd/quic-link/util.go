@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/mauriciomem/quic-link/internal/identity"
 )
 
@@ -20,6 +22,25 @@ var errUsage = errors.New("usage error")
 // command-line validation failure (wrong flags, missing arguments, etc.).
 func usageErrorf(format string, args ...any) error {
 	return fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), errUsage)
+}
+
+// wrapArgs wraps a cobra positional-argument validator (cobra.ExactArgs,
+// cobra.MaximumNArgs, cobra.NoArgs, etc.) so a violation reports as a usage
+// error (exit 2).
+//
+// cobra calls the Args validator from a code path entirely separate from
+// flag parsing: ValidateArgs's error propagates straight up to
+// ExecuteContext unwrapped, so without this wrapper a wrong argument count
+// would fall through exitCodeForError's default case and exit 1 instead of
+// the CLI contract's 2. Every command that sets an Args validator must wrap
+// it with this helper.
+func wrapArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := validate(cmd, args); err != nil {
+			return usageErrorf("%s", err)
+		}
+		return nil
+	}
 }
 
 // defaultKeyPath resolves ~/.config/quic-link/key.pem on every OS.

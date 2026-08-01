@@ -112,7 +112,7 @@ Exactly one owner may hold the socket at a time. A second invocation exits 3
 and tells you to use 'quic-link status' or stop the running owner first.
 
 Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then exit.`,
-		Args: cobra.NoArgs,
+		Args: wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemonOwner(cmd, a.cfg, serverName)
 		},

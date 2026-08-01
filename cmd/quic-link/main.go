@@ -1,11 +1,16 @@
 // Command quic-link is a minimal QUIC tunnel with mutual Ed25519 pin
 // authentication. Choose a role with a subcommand:
 //
-//	quic-link keygen   -- generate an Ed25519 identity and print its pin
-//	quic-link agent    -- QUIC agent; forwards streams to local services
-//	quic-link daemon   -- session owner; manages QUIC sessions and the local socket
-//	quic-link ping     -- measures handshake time and RTT to an agent
-//	quic-link stdio    -- (hidden) single-stream stdio bridge
+//	quic-link keygen      -- generate an Ed25519 identity and print its pin
+//	quic-link agent       -- QUIC agent; forwards streams to local services
+//	quic-link daemon      -- session owner; manages QUIC sessions and the local socket
+//	quic-link status      -- show the daemon's current session state
+//	quic-link ssh         -- ssh to a server through quic-link
+//	quic-link docker-env  -- print an eval-able DOCKER_HOST export
+//	quic-link attach      -- attach to a tmux session on a server (sugar for ssh)
+//	quic-link ping        -- measures handshake time and RTT to an agent
+//	quic-link version     -- print the CLI build version and wire protocol version
+//	quic-link stdio       -- (hidden) single-stream stdio bridge
 //
 // "serve" is accepted as a deprecated alias for "agent".
 // "connect" is accepted as a deprecated alias for "daemon --server NAME".

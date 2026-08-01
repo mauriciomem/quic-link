@@ -28,7 +28,7 @@ func newConnectCmd(a *app) *cobra.Command {
 It will be removed in a future release. Use 'daemon --server NAME' for the
 same behaviour. With no SERVER argument and exactly one enabled server in the
 config, that server is used automatically.`,
-		Args: cobra.MaximumNArgs(1),
+		Args: wrapArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Print a deprecation warning to stderr. It must go to stderr so it
 			// does not pollute stdout contracts (scp/ssh byte streams etc.).

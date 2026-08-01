@@ -60,62 +60,22 @@ Examples:
 		SilenceUsage: true,
 
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Load the config file. An empty configPath means "try the
-			// default location; missing is fine." An explicit path that does
-			// not exist is an error (wrapped ErrInvalid → exit 2).
-			// keygen creates the identity before any config need exist and
-			// reads nothing from config, so a missing or malformed config must
-			// never block key generation. Every other verb loads config here.
-			var cfg *config.Config
-			if cmd.Name() == "keygen" {
-				cfg = config.Defaults()
-			} else {
-				loaded, lerr := config.Load(a.configPath)
-				if lerr != nil {
-					return lerr
-				}
-				cfg = loaded
-			}
-			a.cfg = cfg
-
-			// Effective log level: --log-level flag wins over the file/env
-			// value, which wins over the built-in default ("info").
-			levelStr := cfg.Log.Level // already has file/env/default applied
-			if cmd.Root().PersistentFlags().Lookup("log-level").Changed {
-				levelStr = a.logLevel
-			}
-			level, err := parseLogLevel(levelStr)
-			if err != nil {
-				return err
-			}
-
-			// Choose the log output format. "json" → structured JSON;
-			// "text" (and the empty default) → human-readable text.
-			// Any other value is a configuration error (exit 2).
-			format := cfg.Log.Format
-			if format == "" {
-				format = "text"
-			}
-			switch format {
-			case "text":
-				slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-					Level: level,
-				})))
-			case "json":
-				slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-					Level: level,
-				})))
-			default:
-				return usageErrorf("unknown log.format %q: must be text or json", format)
-			}
-
-			return nil
+			return persistentPreRun(a, cmd, args)
 		},
 	}
 
 	// Global flags available to every subcommand.
 	root.PersistentFlags().StringVar(&a.configPath, "config", "", "path to config file (optional)")
 	root.PersistentFlags().StringVar(&a.logLevel, "log-level", "info", "log verbosity: debug, info, warn, or error")
+
+	// cobra's own flag-parsing errors (unknown flag, malformed value) bypass
+	// every hand-written usageErrorf call site and reach ExecuteContext as a
+	// plain error, which exitCodeForError's default case maps to exit 1. Wrap
+	// them so the CLI's "usage error exits 2" contract holds for cobra's own
+	// errors too, not just the ones this codebase constructs by hand.
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return usageErrorf("%s", err)
+	})
 
 	// Register subcommands, passing the shared app so each verb can reach
 	// the loaded config after PersistentPreRunE populates a.cfg.
@@ -127,9 +87,70 @@ Examples:
 		newStdioCmd(a),
 		newDaemonCmd(a),
 		newStatusCmd(a),
+		newSSHCmd(a),
+		newDockerEnvCmd(a),
+		newAttachCmd(a),
+		newVersionCmd(),
 	)
 
 	return root
+}
+
+// persistentPreRun implements the root command's PersistentPreRunE: it loads
+// config, resolves the effective log level, and installs the slog handler.
+// Extracted from newRootCmd as a named function only to keep that constructor
+// shorter; behaviour is unchanged.
+func persistentPreRun(a *app, cmd *cobra.Command, args []string) error {
+	// Load the config file. An empty configPath means "try the
+	// default location; missing is fine." An explicit path that does
+	// not exist is an error (wrapped ErrInvalid → exit 2).
+	// keygen creates the identity before any config need exist and
+	// reads nothing from config, so a missing or malformed config must
+	// never block key generation. Every other verb loads config here.
+	var cfg *config.Config
+	if cmd.Name() == "keygen" {
+		cfg = config.Defaults()
+	} else {
+		loaded, lerr := config.Load(a.configPath)
+		if lerr != nil {
+			return lerr
+		}
+		cfg = loaded
+	}
+	a.cfg = cfg
+
+	// Effective log level: --log-level flag wins over the file/env
+	// value, which wins over the built-in default ("info").
+	levelStr := cfg.Log.Level // already has file/env/default applied
+	if cmd.Root().PersistentFlags().Lookup("log-level").Changed {
+		levelStr = a.logLevel
+	}
+	level, err := parseLogLevel(levelStr)
+	if err != nil {
+		return err
+	}
+
+	// Choose the log output format. "json" → structured JSON;
+	// "text" (and the empty default) → human-readable text.
+	// Any other value is a configuration error (exit 2).
+	format := cfg.Log.Format
+	if format == "" {
+		format = "text"
+	}
+	switch format {
+	case "text":
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: level,
+		})))
+	case "json":
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+			Level: level,
+		})))
+	default:
+		return usageErrorf("unknown log.format %q: must be text or json", format)
+	}
+
+	return nil
 }
 
 // parseLogLevel converts a level name to the corresponding slog.Level.
