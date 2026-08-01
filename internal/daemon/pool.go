@@ -536,28 +536,28 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 			slog.Info("connected to server", "role", "daemon", "session", e.name)
 		}
 
-		// probeKilled is closed by the liveness probe immediately before it
-		// calls conn.CloseWithError. This lets the runLoop distinguish a
-		// probe-declared death (already logged by the probe) from a natural
-		// QUIC drop (needs a "session lost" log here).
-		probeKilled := make(chan struct{})
+		// probeResult carries structured detail from the liveness probe when it
+		// is the one that declared the session dead. It is nil when the drop
+		// was a natural QUIC event (NAT timeout, agent restart, idle timeout).
+		// The channel is buffered-1 so the probe goroutine never blocks on send.
+		probeResult := make(chan *probeDeathDetail, 1)
 
 		// Launch the liveness probe goroutine under this entry's context.
 		// It runs concurrently with the <-conn.Context().Done() wait below.
-		// When the probe detects consecutive failures it closes probeKilled,
-		// then closes the connection via CloseWithError, which cancels
-		// conn.Context() and causes the <-conn.Context().Done() below to fire
-		// — the same path as a natural drop. This avoids double-triggering:
-		// whichever fires first (probe or natural drop) cancels conn.Context(),
-		// and the other either observes a closed conn context (and stops) or
-		// observes a connection that is already being torn down. The probe
-		// goroutine is joined via the probeDone channel before proceeding to
-		// the next loop iteration.
+		// When the probe detects consecutive failures it sends its detail on
+		// probeResult, then closes the connection via CloseWithError, which
+		// cancels conn.Context() and causes the <-conn.Context().Done() below
+		// to fire — the same path as a natural drop. This avoids
+		// double-triggering: whichever fires first (probe or natural drop)
+		// cancels conn.Context(), and the other either observes a closed conn
+		// context (and stops) or observes a connection already being torn down.
+		// The probe goroutine is joined via the probeDone channel before
+		// proceeding to the next loop iteration.
 		probeDone := make(chan struct{})
 		probeCtx, probeCancel := context.WithCancel(ctx)
 		go func() {
 			defer close(probeDone)
-			e.runLivenessProbe(probeCtx, conn, cclient, probeKilled)
+			e.runLivenessProbe(probeCtx, conn, cclient, probeResult)
 		}()
 
 		// Wait for the connection to drop (either a natural QUIC drop or the
@@ -575,18 +575,29 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 			return
 		}
 
-		// Log the drop. If the probe killed the connection it already logged
-		// the "declaring session dead" event; only log here on a natural drop
-		// (NAT timeout, network change, agent restart, QUIC idle timeout) so
-		// that operators can see the event even when the first reconnect
-		// succeeds and no retry warning is ever emitted.
+		// Emit the canonical "session lost" event exactly once per actual loss,
+		// regardless of which detector noticed it. Operators can find every
+		// session loss by filtering on this single message. The structured
+		// attribute "detector" distinguishes the liveness probe path from a
+		// natural QUIC drop (NAT timeout, agent restart, idle timeout). When
+		// the probe was the detector, its failure count is included as additional
+		// context, but the canonical event is never suppressed.
 		select {
-		case <-probeKilled:
-			// Probe-declared death — already logged by the probe; no duplicate.
-		default:
+		case detail := <-probeResult:
+			// The liveness probe declared the death; include its diagnostic detail.
 			slog.Warn("session lost; reconnecting",
 				"role", "daemon",
 				"session", e.name,
+				"detector", "liveness_probe",
+				"consecutive_probe_failures", detail.consecutiveFailures,
+			)
+		default:
+			// Natural QUIC drop (NAT timeout, network change, agent restart,
+			// QUIC idle timeout) — no probe detail available.
+			slog.Warn("session lost; reconnecting",
+				"role", "daemon",
+				"session", e.name,
+				"detector", "quic_drop",
 			)
 		}
 
@@ -611,16 +622,24 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 	}
 }
 
+// probeDeathDetail carries structured context from the liveness probe when it
+// is the detector that declared a session lost. Sent on the probeResult channel
+// so the runLoop can emit the canonical "session lost" event with the probe's
+// diagnostic detail attached.
+type probeDeathDetail struct {
+	consecutiveFailures int
+}
+
 // runLivenessProbe sends periodic Ping RPCs over cclient while probeCtx is
 // not cancelled. If FailThreshold consecutive probes time out or fail, it
-// closes probeKilled (signalling the runLoop that this is a probe-declared
-// death, not a natural drop) and then calls conn.CloseWithError so the main
-// runLoop can re-dial. Probe failures caused by context cancellation (daemon
-// shutting down) are not counted and do not trigger a reconnect.
+// sends its diagnostic detail on probeResult and then calls conn.CloseWithError
+// so the main runLoop can re-dial. Probe failures caused by context
+// cancellation (daemon shutting down) are not counted and do not trigger a
+// reconnect.
 //
 // The probe goroutine is the sole caller of cclient.PingRTT inside a
 // connected session — the control client is not used anywhere else concurrently.
-func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Conn, cclient *control.Client, probeKilled chan<- struct{}) {
+func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Conn, cclient *control.Client, probeResult chan<- *probeDeathDetail) {
 	consecutiveFailures := 0
 	interval := e.liveness.Interval()
 	timeout := e.liveness.Timeout()
@@ -663,15 +682,15 @@ func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Co
 		)
 
 		if consecutiveFailures >= threshold {
-			slog.Info("liveness probe threshold reached; declaring session dead",
-				"role", "daemon",
-				"session", e.name,
-				"consecutive_probe_failures", consecutiveFailures,
-			)
-			// Signal the runLoop that this drop was probe-declared (not a
-			// natural QUIC drop), so it does not emit a redundant "session
-			// lost" warning that would confuse operators looking at the log.
-			close(probeKilled)
+			// Send diagnostic detail to the runLoop so it can emit the
+			// canonical "session lost" event with probe context attached.
+			// The channel is buffered-1; this send never blocks. The runLoop
+			// always reads after <-probeDone, so the send completes before
+			// the channel is GC'd.
+			select {
+			case probeResult <- &probeDeathDetail{consecutiveFailures: consecutiveFailures}:
+			default:
+			}
 			// Close the connection so conn.Context() is cancelled, waking the
 			// main runLoop's <-conn.Context().Done(). The error code 0 is an
 			// application-level graceful close; the agent will see a

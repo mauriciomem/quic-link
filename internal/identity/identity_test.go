@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -273,6 +274,65 @@ func TestReadMetaAbsent(t *testing.T) {
 	if present {
 		t.Fatal("ReadMeta: present = true for absent file, want false")
 	}
+}
+
+// TestVerifyPin_ErrorOmitsFullPin asserts that when verifyPin rejects a peer,
+// the error message contains only an 8-character prefix of the peer pin and
+// NOT the full 44-character pin. This prevents the full pin from appearing in
+// log sinks via error-wrapping chains (field-observed in a real campaign where
+// the final slog.Error logged the full pin through the error's Error() string).
+//
+// Pre-fix failure mode: verifyPin returned fmt.Errorf("%w: peer pin %s", ErrPinMismatch, pin)
+// where pin was the full 44-character base64 string. The error propagated
+// through transport.ErrAuthFailed wrapping to a final "fatal error" log line
+// that printed the full pin — falsifying the security review claim that the
+// error never reached slog.
+func TestVerifyPin_ErrorOmitsFullPin(t *testing.T) {
+	t.Parallel()
+
+	// Build a verifyPin callback with an empty allowed set so every peer is rejected.
+	cb := verifyPin(map[string]struct{}{})
+
+	// Generate a real key and build its carrier cert so we can exercise the
+	// rejection path with a real 44-character pin.
+	key := mustKey(t)
+	carrier, err := SelfSignedCarrier(key)
+	if err != nil {
+		t.Fatalf("SelfSignedCarrier: %v", err)
+	}
+	fullPin := PinFromCert(carrier.Leaf) // 44-character base64 string
+
+	rawDER := carrier.Leaf.Raw
+	rejErr := cb([][]byte{rawDER}, nil)
+	if rejErr == nil {
+		t.Fatal("expected rejection error, got nil")
+	}
+	if !errors.Is(rejErr, ErrPinMismatch) {
+		t.Fatalf("error does not wrap ErrPinMismatch: %v", rejErr)
+	}
+
+	errStr := rejErr.Error()
+
+	// The full 44-character pin must NOT appear in the error string.
+	// A pin is always exactly 44 characters (32 bytes SHA-256 → base64std).
+	if len(fullPin) != 44 {
+		t.Fatalf("test invariant: expected 44-char pin, got %d chars: %q", len(fullPin), fullPin)
+	}
+	if strings.Contains(errStr, fullPin) {
+		t.Errorf("full pin (%d chars) appears in error string; want only 8-char prefix.\n"+
+			"pre-fix: verifyPin included the full pin in its error message, which propagated "+
+			"to slog.Error via error-wrapping chains in the field.\n"+
+			"error: %q\nfull pin: %q", len(fullPin), errStr, fullPin)
+	}
+
+	// The 8-character prefix MUST appear so the operator can identify the peer.
+	prefix := fullPin[:8]
+	if !strings.Contains(errStr, prefix) {
+		t.Errorf("8-char pin prefix %q not found in error; operators need it to identify the peer.\nerror: %q",
+			prefix, errStr)
+	}
+
+	t.Logf("error string (no full pin): %q", errStr)
 }
 
 func mustKey(t *testing.T) ed25519.PrivateKey {

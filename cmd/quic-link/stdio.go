@@ -130,13 +130,24 @@ func newStdioCmd(a *app) *cobra.Command {
 				default:
 					var ae *ipc.AttachStatusError
 					if errors.As(aerr, &ae) {
-						// The agent refused the target. The daemon already translated
-						// the agent's protocol status into a final process exit code
-						// (stored in ae.Status); casting it back to a proto.Status
-						// here would re-map it through the wrong table and produce
-						// the wrong exit code. Use errFinalExitCode to carry the
-						// code through exitCodeForError unchanged.
-						fmt.Fprintf(os.Stderr, "agent refused: %s\n", ae.Msg)
+						// The daemon already translated the protocol status into a
+						// final process exit code (stored in ae.Status). Cast it
+						// back to proto.Status would re-map it through the wrong
+						// table; use errFinalExitCode to carry it through unchanged.
+						//
+						// Choose the error prefix based on who produced the failure:
+						//   exit 3 = daemon-side (session not ready, pool not
+						//             connected) — no agent was ever reached.
+						//   exit 4/5 = agent-side (auth rejected or target refused)
+						//             — the agent responded with a non-OK status.
+						// Using "agent refused" for exit 3 would send the operator
+						// to the wrong host to debug — the problem is the daemon's
+						// connection to the agent, not the agent itself.
+						if ae.Status == 3 {
+							fmt.Fprintf(os.Stderr, "%s\n", ae.Msg)
+						} else {
+							fmt.Fprintf(os.Stderr, "agent refused: %s\n", ae.Msg)
+						}
 						return &errFinalExitCode{code: ae.Status, msg: ae.Msg}
 					}
 					// Any other daemon error: fall through to direct dial.

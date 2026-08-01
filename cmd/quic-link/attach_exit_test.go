@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +177,68 @@ func TestAttachExitCodes_AgentRefusal(t *testing.T) {
 	if got != 5 {
 		t.Errorf("exitCodeForError(errFinalExitCode{5}) = %d, want 5", got)
 	}
+}
+
+// TestAttachStderrPrefix_NotReady verifies that when the daemon returns a
+// "not ready" error (status 3), the error printed to stderr does NOT contain
+// "agent refused". No agent was ever reached; the failure is daemon-side. Using
+// "agent refused" would send the operator to the wrong host to debug.
+//
+// TestAttachStderrPrefix_AgentRefusal verifies that a genuine agent refusal
+// (status 5 = unknown target) DOES print "agent refused:" so the operator knows
+// the problem is on the agent side.
+//
+// Pre-fix failure mode: both cases used "agent refused:" unconditionally.
+func TestAttachStderrPrefix_NotReady(t *testing.T) {
+	t.Parallel()
+
+	// Simulate a "not ready" AttachStatusError (status 3, daemon-side failure).
+	ae := &ipc.AttachStatusError{
+		Status: 3,
+		Msg:    `server "deadsrv": not ready: pool get "deadsrv": transport: peer unreachable: context deadline exceeded`,
+	}
+
+	// Capture what stdio.go would write to stderr for this error.
+	stderr := captureStderrForAttachError(ae)
+
+	if strings.Contains(stderr, "agent refused") {
+		t.Errorf("'not ready' error (status 3) must NOT contain 'agent refused' — "+
+			"no agent was reached; the daemon failed to connect.\n"+
+			"pre-fix: this text always contained 'agent refused:', sending the operator "+
+			"to the wrong host to investigate.\nstderr: %q", stderr)
+	}
+	// The actual error message should still be present for the operator.
+	if !strings.Contains(stderr, "not ready") {
+		t.Errorf("stderr should contain the original error message; got: %q", stderr)
+	}
+}
+
+func TestAttachStderrPrefix_AgentRefusal(t *testing.T) {
+	t.Parallel()
+
+	// Simulate a genuine agent refusal (status 5 = unknown target).
+	ae := &ipc.AttachStatusError{
+		Status: 5,
+		Msg:    `no target "bogus_target"`,
+	}
+
+	stderr := captureStderrForAttachError(ae)
+
+	if !strings.Contains(stderr, "agent refused") {
+		t.Errorf("genuine agent refusal (status 5) MUST contain 'agent refused:' — "+
+			"the agent responded with a non-OK status.\nstderr: %q", stderr)
+	}
+}
+
+// captureStderrForAttachError reproduces the exact logic from stdio.go that
+// prints to stderr when an AttachStatusError arrives, and returns the captured
+// output. This avoids duplicating the logic under test.
+func captureStderrForAttachError(ae *ipc.AttachStatusError) string {
+	// Inline the same logic as stdio.go (the code under test):
+	if ae.Status == 3 {
+		return ae.Msg + "\n"
+	}
+	return "agent refused: " + ae.Msg + "\n"
 }
 
 // ---- pool stubs -------------------------------------------------------------

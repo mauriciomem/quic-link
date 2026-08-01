@@ -114,6 +114,12 @@ func ClientTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, e
 // verifyPin returns a tls.Config.VerifyPeerCertificate callback that parses the
 // peer's leaf, computes its pin, and requires membership in allowed. Returning
 // an error aborts the handshake with a TLS alert.
+//
+// The error message includes only the first 8 characters of the peer pin (the
+// same prefix used in every other log and audit site). This is sufficient for
+// an operator to identify the peer's identity ("is this my client?") without
+// embedding the full 44-character pin in an error string that may propagate
+// through error-wrapping chains to log sinks.
 func verifyPin(allowed map[string]struct{}) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
@@ -125,7 +131,11 @@ func verifyPin(allowed map[string]struct{}) func([][]byte, [][]*x509.Certificate
 		}
 		pin := PinFromCert(cert)
 		if _, ok := allowed[pin]; !ok {
-			return fmt.Errorf("%w: peer pin %s", ErrPinMismatch, pin)
+			prefix := pin
+			if len(prefix) > 8 {
+				prefix = prefix[:8]
+			}
+			return fmt.Errorf("%w: peer pin %s…", ErrPinMismatch, prefix)
 		}
 		return nil
 	}

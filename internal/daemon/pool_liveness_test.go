@@ -8,8 +8,9 @@ package daemon_test
 //         is never emitted.
 //  C3d — the liveness probe detects a dead agent substantially faster than
 //         the QUIC idle timeout (driven via injected fast policy).
-//  F2  — "session lost" is logged at drop time on a natural QUIC drop, even
-//         when the first reconnect succeeds (the historically silent case).
+//  F2  — "session lost" is logged on every drop regardless of which detector
+//         (liveness probe or natural QUIC) noticed it, with a "detector"
+//         structured attribute distinguishing the two paths.
 //  F4a — transport rebind fires after exactly transportRebindAfter consecutive
 //         dial failures.
 //  F4b — rebind does NOT fire before transportRebindAfter failures.
@@ -31,14 +32,26 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/control"
+	controlpb "github.com/mauriciomem/quic-link/internal/control/proto"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/identity"
+	"github.com/mauriciomem/quic-link/internal/proto"
 	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/transport/mem"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
+
+// newFreezeableGRPCServer creates a gRPC server registered with a freezableServer.
+func newFreezeableGRPCServer(srv *freezableServer) *grpc.Server {
+	gs := grpc.NewServer()
+	controlpb.RegisterControlServer(gs, srv)
+	return gs
+}
 
 // ---- C3a: stateReconnecting → JSON "connecting" ----------------------------
 
@@ -393,25 +406,136 @@ func TestLivenessProbe_DetectsDeadAgentFast(t *testing.T) {
 		time.Since(agentDiedAt).Round(time.Millisecond), detectionBudget)
 }
 
-// ---- F2: session-lost event logged on natural drop where first reconnect succeeds
+// ---- F2: canonical session-lost event fires on both detectors ---------------
 
-// TestSessionLost_LoggedOnNaturalDrop verifies that when a session drops
-// naturally (agent restart) and the FIRST reconnect attempt succeeds, a
-// "session lost" Warn-level log is emitted at the moment of the drop.
+// freezableServer is an agent-side gRPC Ping server that can be "frozen":
+// after Freeze() is called, Ping handlers block indefinitely instead of
+// responding. This simulates a network cut at the gRPC level — the QUIC
+// connection stays open (no CONNECTION_CLOSE) but PingRTT calls time out.
+// The liveness probe then declares the session dead, not the natural QUIC drop.
+type freezableServer struct {
+	controlpb.UnimplementedControlServer
+	frozen chan struct{} // closed by Freeze; Ping blocks on it after the signal
+	once   sync.Once
+}
+
+// Freeze makes subsequent Ping calls block indefinitely.
+func (s *freezableServer) Freeze() {
+	s.once.Do(func() { close(s.frozen) })
+}
+
+// Ping implements the gRPC ControlServer interface. Before Freeze is called
+// it responds normally; after Freeze it blocks until the stream context expires.
+func (s *freezableServer) Ping(ctx context.Context, req *controlpb.PingRequest) (*controlpb.PingResponse, error) {
+	select {
+	case <-s.frozen:
+		// Frozen: block until the context expires so the caller's probe times out.
+		<-ctx.Done()
+		return nil, ctx.Err()
+	default:
+		// Not yet frozen: respond normally so Establish succeeds.
+		return &controlpb.PingResponse{Nonce: req.GetNonce()}, nil
+	}
+}
+
+// freezableAgentServer accepts one QUIC connection, handles the control stream
+// header handshake, and then serves gRPC using a freezableServer. Once
+// readyCh is closed (the pool has connected), the caller can call
+// srv.Freeze() to make subsequent Ping RPCs time out, simulating a network cut
+// without sending a QUIC CONNECTION_CLOSE.
+func freezableAgentServer(
+	t *testing.T,
+	ctx context.Context,
+	ln transport.Listener,
+	srv *freezableServer,
+	readyCh chan<- struct{},
+) {
+	t.Helper()
+
+	conn, err := ln.Accept(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		t.Errorf("freezableAgentServer: accept: %v", err)
+		return
+	}
+
+	// Accept the control stream.
+	stream, err := conn.AcceptStream(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		t.Errorf("freezableAgentServer: accept stream: %v", err)
+		return
+	}
+
+	// Read and validate the control header.
+	hdr, err := proto.ReadHeader(stream)
+	if err != nil {
+		t.Errorf("freezableAgentServer: read header: %v", err)
+		return
+	}
+	if hdr.Kind != proto.KindControl {
+		t.Errorf("freezableAgentServer: expected control kind, got %v", hdr.Kind)
+		return
+	}
+
+	// Send OK so control.Open can continue to the gRPC setup.
+	if err := proto.WriteResponse(stream, proto.Response{Status: proto.StatusOK}); err != nil {
+		t.Errorf("freezableAgentServer: write response: %v", err)
+		return
+	}
+
+	// Serve gRPC with the freezable server. The initial Establish Ping will
+	// succeed (not frozen yet); subsequent PingRTT calls from the liveness
+	// probe will block after Freeze() is called.
+	ln2 := control.NewSingleConnListener(control.NewConn(stream))
+	gs := newFreezeableGRPCServer(srv)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- gs.Serve(ln2) }()
+
+	// Signal that the gRPC server is ready for connections.
+	if readyCh != nil {
+		select {
+		case readyCh <- struct{}{}:
+		default:
+		}
+	}
+
+	// Hold the gRPC server alive until the context expires. Do NOT close the
+	// QUIC connection — we want the probe to be the first detector.
+	<-ctx.Done()
+	gs.Stop()
+	_ = ln2.Close()
+	<-serveErr
+}
+
+// TestSessionLost_ProbeDetector verifies that the canonical "session lost"
+// event fires even when the liveness probe is the detector that notices the
+// drop — the production-dominant case (probe wins the race in ~25 s vs. QUIC
+// idle timeout at 60 s).
 //
-// This is the exact silent case: before the fix, if the agent restarted
-// quickly and the pool reconnected on the first attempt, the "agent lost;
-// reconnecting" line only appeared on a failed dial — so an operator watching
-// logs would never see any indication that the session had dropped at all.
+// This replaces the old TestSessionLost_LoggedOnNaturalDrop which used a 10 s
+// probe interval to prevent the probe from winning, thereby testing a path that
+// almost never executes in production. A test that only passes by disabling the
+// mechanism that breaks it is not testing the real system.
 //
-// Pre-fix failure mode: the test asserts the presence of "session lost" in
-// logs; before the fix that string was never emitted on the natural-drop /
-// first-reconnect-succeeds path, so the assertion would fail.
+// The test uses a "silent minimal server" that completes the control handshake
+// (so the pool reaches "connected") then stops responding. The liveness probe
+// fires in ~60 ms and declares the session dead. The test asserts:
+//  1. "session lost; reconnecting" appears in the log (the canonical event).
+//  2. "detector" is "liveness_probe" (the structured attribute identifying who noticed).
+//  3. The canonical event appears exactly once (de-duplication is preserved).
 //
-// The test uses real QUIC over loopback: kill the first agent, start a second
-// one at the same address, and confirm the pool reaches "connected" again AND
-// that the "session lost" log appeared.
-func TestSessionLost_LoggedOnNaturalDrop(t *testing.T) {
+// Pre-fix failure mode: before the fix, the probe path sent on a "probeKilled"
+// channel which the runLoop checked with select-default, causing the canonical
+// event to be suppressed on the probe path. Exactly the path that fires in
+// production was the one that suppressed the log — so operators saw zero
+// "session lost" events across 34 drops in a real campaign. The test would fail
+// because "session lost" never appeared in the log.
+func TestSessionLost_ProbeDetector(t *testing.T) {
 	// NOT parallel — replaces the global slog logger.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -438,34 +562,39 @@ func TestSessionLost_LoggedOnNaturalDrop(t *testing.T) {
 		t.Fatalf("ClientTLS: %v", err)
 	}
 
-	// Start the first agent on a fixed loopback addr.
-	serverUDP1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatalf("server UDP 1: %v", err)
-	}
-	serverAddr := serverUDP1.LocalAddr().String()
+	// Build the freezable server that can simulate network death without
+	// sending CONNECTION_CLOSE.
+	frzSrv := &freezableServer{frozen: make(chan struct{})}
 
-	serverTr1, err := transport.NewQUICTransport(serverUDP1, serverTLS, nil)
+	// Start the QUIC server.
+	serverUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
-		serverUDP1.Close()
-		t.Fatalf("server transport 1: %v", err)
+		t.Fatalf("server UDP: %v", err)
 	}
+	t.Cleanup(func() { serverUDP.Close() })
 
-	ln1, err := serverTr1.Listen()
+	serverTr, err := transport.NewQUICTransport(serverUDP, serverTLS, nil)
 	if err != nil {
-		serverTr1.Close()
-		serverUDP1.Close()
-		t.Fatalf("server listen 1: %v", err)
+		serverUDP.Close()
+		t.Fatalf("server transport: %v", err)
 	}
+	t.Cleanup(func() { serverTr.Close() })
 
-	rtr, err := router.New(map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
+	ln, err := serverTr.Listen()
 	if err != nil {
-		t.Fatalf("router.New: %v", err)
+		t.Fatalf("server listen: %v", err)
 	}
-	serveCtx1, serveCancel1 := context.WithCancel(ctx)
-	go tunnel.Serve(serveCtx1, ln1, rtr) //nolint:errcheck
+	t.Cleanup(func() { ln.Close() })
+	serverAddr := ln.Addr().String()
 
-	// Build the client pool pointing at the fixed server address.
+	// readyCh is closed when the gRPC server is up and the Establish Ping has
+	// been served. We can freeze the server and wait for the probe to fire.
+	readyCh := make(chan struct{}, 1)
+	agentCtx, agentCancel := context.WithCancel(ctx)
+	defer agentCancel()
+	go freezableAgentServer(t, agentCtx, ln, frzSrv, readyCh)
+
+	// Client transport.
 	clientUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
 		t.Fatalf("client UDP: %v", err)
@@ -480,15 +609,20 @@ func TestSessionLost_LoggedOnNaturalDrop(t *testing.T) {
 
 	cfg := config.Defaults()
 	cfg.Servers = map[string]config.Server{
-		"drop-test": {Addr: serverAddr},
+		"probe-detector-test": {Addr: serverAddr},
 	}
 
-	// Use the default liveness policy (10s interval). The goal is to let the
-	// natural QUIC connection drop (from the server closing its transport) fire
-	// conn.Context().Done() before the probe has a chance to run. With a 10s
-	// probe interval, the QUIC CONNECTION_CLOSE from the dying agent reaches
-	// the client orders of magnitude faster, so the drop is natural not
-	// probe-declared.
+	// Inject a very fast liveness policy so the probe wins the race against the
+	// QUIC idle timeout (60 s). With 20 ms interval + 10 ms timeout + threshold
+	// 2, the probe detects a dead agent in ~60 ms — orders of magnitude before
+	// the 60 s QUIC idle timeout. This reproduces the production scenario where
+	// the probe is almost always the first detector.
+	fastPolicy := fastLivenessPolicy{
+		interval:  20 * time.Millisecond,
+		timeout:   10 * time.Millisecond,
+		threshold: 2,
+	}
+
 	pool, err := daemon.NewRealPoolWithLiveness(
 		ctx, cfg,
 		func(_ string, _ config.Server) (transport.Transport, error) {
@@ -497,35 +631,215 @@ func TestSessionLost_LoggedOnNaturalDrop(t *testing.T) {
 		zeroBackoffPolicy{},
 		daemon.WallClock{},
 		nil,
-		daemon.DefaultLivenessPolicy{},
+		fastPolicy,
 	)
 	if err != nil {
 		t.Fatalf("NewRealPoolWithLiveness: %v", err)
 	}
 	defer pool.Close()
 
-	// Wait for the pool to reach "connected".
-	waitConnCtx, waitConnCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer waitConnCancel()
+	// Wait for the pool to connect (the freezable server serves the initial Ping).
+	connCtx, connCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer connCancel()
 	for {
 		if len(pool.State()) > 0 && pool.State()[0].State == "connected" {
 			break
 		}
 		select {
-		case <-waitConnCtx.Done():
+		case <-connCtx.Done():
 			t.Fatalf("pool did not connect within deadline; state: %v", pool.State())
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
 
-	// Kill the first agent abruptly (simulates a NAT timeout or agent crash).
-	serveCancel1()
-	ln1.Close()
-	serverTr1.Close()
-	serverUDP1.Close()
+	// Now freeze the server: subsequent PingRTT calls from the liveness probe
+	// will block until their per-call context expires (10 ms timeout). The QUIC
+	// connection remains open (no CloseWithError is ever called) so the probe,
+	// not the QUIC idle timeout, is the sole detector. This is the production
+	// scenario: NAT timeout or network cut — QUIC is silent but alive.
+	frzSrv.Freeze()
 
-	// Wait for the pool to detect the drop (state transitions away from "connected").
-	dropCtx, dropCancel := context.WithTimeout(ctx, 10*time.Second)
+	// Wait for the pool to flip away from "connected" (probe has fired).
+	dropCtx, dropCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer dropCancel()
+	for {
+		if len(pool.State()) > 0 && pool.State()[0].State != "connected" {
+			break
+		}
+		select {
+		case <-dropCtx.Done():
+			t.Fatalf("pool did not detect drop via liveness probe within deadline; "+
+				"state: %v; probe policy: interval=%v timeout=%v threshold=%d",
+				pool.State(), fastPolicy.interval, fastPolicy.timeout, fastPolicy.threshold)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Give the runLoop one more tick to emit the log after the state flip.
+	time.Sleep(20 * time.Millisecond)
+
+	logs := buf.String()
+
+	// Assertion 1: the canonical event must appear.
+	if !strings.Contains(logs, "session lost; reconnecting") {
+		t.Errorf("expected \"session lost; reconnecting\" in logs when probe is the detector;\n"+
+			"pre-fix: this was suppressed on the probe path (probeKilled select-default) "+
+			"so operators saw zero session-lost events across 34 drops in the field.\n"+
+			"log output:\n%s", logs)
+	}
+
+	// Assertion 2: the structured attribute must identify the liveness probe
+	// as the detector, so operators know who noticed the drop.
+	if !strings.Contains(logs, "detector=liveness_probe") {
+		t.Errorf("expected \"detector=liveness_probe\" attribute on the session-lost event;\n"+
+			"this attribute distinguishes probe-declared death from a natural QUIC drop.\n"+
+			"log output:\n%s", logs)
+	}
+
+	// Assertion 3: the canonical event must appear exactly once — de-duplication
+	// must still hold (the old probeKilled mechanism's de-dup must be preserved).
+	count := strings.Count(logs, "session lost; reconnecting")
+	if count != 1 {
+		t.Errorf("expected exactly 1 \"session lost; reconnecting\" line; got %d.\n"+
+			"de-duplication is broken: the event must fire once regardless of detector.\n"+
+			"log output:\n%s", count, logs)
+	}
+}
+
+// TestSessionLost_NaturalDropDetector verifies that the canonical "session lost"
+// event fires on the natural QUIC drop path (no probe involvement) with the
+// correct "detector=quic_drop" attribute.
+//
+// Uses a very slow probe (10 s interval) so the QUIC CONNECTION_CLOSE from the
+// dying server reaches the client before the probe fires. This is the complement
+// of TestSessionLost_ProbeDetector which covers the probe path.
+//
+// Pre-fix failure mode: before the session-lost event was added for the natural
+// drop path, the "agent lost; reconnecting" line only appeared on a failed dial.
+// On a fast restart (first reconnect succeeds) the log was silent — operators
+// would never see any indication that the session had dropped.
+func TestSessionLost_NaturalDropDetector(t *testing.T) {
+	// NOT parallel — replaces the global slog logger.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var buf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	prev := slog.Default()
+	slog.SetDefault(logger)
+	defer slog.SetDefault(prev)
+
+	serverKey, serverPin := genPoolLivenessIdentity(t)
+	clientKey, clientPin := genPoolLivenessIdentity(t)
+
+	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	if err != nil {
+		t.Fatalf("ServerTLS: %v", err)
+	}
+	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	if err != nil {
+		t.Fatalf("ClientTLS: %v", err)
+	}
+
+	serverUDP1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("server UDP 1: %v", err)
+	}
+	t.Cleanup(func() { serverUDP1.Close() })
+	serverAddr := serverUDP1.LocalAddr().String()
+
+	serverTr1, err := transport.NewQUICTransport(serverUDP1, serverTLS, nil)
+	if err != nil {
+		serverUDP1.Close()
+		t.Fatalf("server transport 1: %v", err)
+	}
+	t.Cleanup(func() { serverTr1.Close() })
+
+	ln1, err := serverTr1.Listen()
+	if err != nil {
+		t.Fatalf("server listen 1: %v", err)
+	}
+	t.Cleanup(func() { ln1.Close() })
+
+	rtr, err := router.New(map[string]string{"ssh": "tcp://127.0.0.1:22"}, nil)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	serveCtx1, serveCancel1 := context.WithCancel(ctx)
+	defer serveCancel1()
+	go tunnel.Serve(serveCtx1, ln1, rtr) //nolint:errcheck
+
+	clientUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("client UDP: %v", err)
+	}
+	t.Cleanup(func() { clientUDP.Close() })
+
+	clientTr, err := transport.NewQUICTransport(clientUDP, clientTLS, nil)
+	if err != nil {
+		t.Fatalf("client transport: %v", err)
+	}
+	t.Cleanup(func() { clientTr.Close() })
+
+	cfg := config.Defaults()
+	cfg.Servers = map[string]config.Server{
+		"natural-drop-test": {Addr: serverAddr},
+	}
+
+	// Use a slow probe (10 s interval) so the natural QUIC CONNECTION_CLOSE
+	// from the dying server fires conn.Context().Done() before the probe has
+	// a chance to run. The server closes its transport explicitly, which sends
+	// a CONNECTION_CLOSE that reaches the client in milliseconds — far faster
+	// than the 10 s probe interval.
+	slowPolicy := fastLivenessPolicy{
+		interval:  10 * time.Second,
+		timeout:   5 * time.Second,
+		threshold: 2,
+	}
+
+	pool, err := daemon.NewRealPoolWithLiveness(
+		ctx, cfg,
+		func(_ string, _ config.Server) (transport.Transport, error) {
+			return clientTr, nil
+		},
+		zeroBackoffPolicy{},
+		daemon.WallClock{},
+		nil,
+		slowPolicy,
+	)
+	if err != nil {
+		t.Fatalf("NewRealPoolWithLiveness: %v", err)
+	}
+	defer pool.Close()
+
+	// Wait for "connected".
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	for {
+		if len(pool.State()) > 0 && pool.State()[0].State == "connected" {
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Fatalf("pool did not connect within deadline; state: %v", pool.State())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// Kill the first agent by cancelling the serve context. The tunnel.Serve
+	// goroutine's serveConn function detects ctx cancellation on the next
+	// AcceptStream call and calls conn.CloseWithError(0, "agent shutting down"),
+	// sending a QUIC CONNECTION_CLOSE to the client. This is a natural QUIC
+	// drop: the probe context (10 s interval) has not fired yet so the drop is
+	// detected by the QUIC layer, not the probe.
+	serveCancel1()
+	ln1.Close() // stop accepting new connections
+
+	// Wait for the state to flip away from "connected".
+	// The QUIC CONNECTION_CLOSE arrives in milliseconds; budget 5 s.
+	dropCtx, dropCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer dropCancel()
 	for {
 		if len(pool.State()) > 0 && pool.State()[0].State != "connected" {
@@ -538,58 +852,28 @@ func TestSessionLost_LoggedOnNaturalDrop(t *testing.T) {
 		}
 	}
 
-	// Bring up a second agent at the SAME address. The pool's first reconnect
-	// attempt should succeed, so "agent lost; reconnecting" is never emitted —
-	// but "session lost; reconnecting" must have been logged at the drop moment.
-	serverUDP2, err := net.ListenUDP("udp4", &net.UDPAddr{
-		IP:   net.ParseIP("127.0.0.1"),
-		Port: serverUDP1.LocalAddr().(*net.UDPAddr).Port, // same port
-	})
-	if err != nil {
-		t.Skipf("cannot re-bind server port %s for second agent: %v", serverAddr, err)
-	}
-	t.Cleanup(func() { serverUDP2.Close() })
+	// Give the runLoop one tick to emit the log.
+	time.Sleep(20 * time.Millisecond)
 
-	serverTr2, err := transport.NewQUICTransport(serverUDP2, serverTLS, nil)
-	if err != nil {
-		t.Fatalf("server transport 2: %v", err)
-	}
-	t.Cleanup(func() { serverTr2.Close() })
-
-	ln2, err := serverTr2.Listen()
-	if err != nil {
-		t.Fatalf("server listen 2: %v", err)
-	}
-	t.Cleanup(func() { ln2.Close() })
-
-	serveCtx2, serveCancel2 := context.WithCancel(ctx)
-	defer serveCancel2()
-	go tunnel.Serve(serveCtx2, ln2, rtr) //nolint:errcheck
-
-	// Wait for the pool to reconnect to the new agent.
-	reconnCtx, reconnCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer reconnCancel()
-	for {
-		if len(pool.State()) > 0 && pool.State()[0].State == "connected" {
-			break
-		}
-		select {
-		case <-reconnCtx.Done():
-			t.Logf("pool state at timeout: %v", pool.State())
-			// If the port cannot be reused immediately, accept that and skip.
-			t.Skipf("pool did not reconnect within deadline; this can happen if the OS " +
-				"delays port reuse. The 'session lost' log assertion below is the key check.")
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	t.Logf("pool reconnected successfully (first reconnect attempt succeeded)")
-
-	// The "session lost" warning must have been emitted at the moment of the
-	// natural drop — regardless of whether the first reconnect succeeded.
 	logs := buf.String()
-	if !strings.Contains(logs, "session lost") {
-		t.Errorf("expected \"session lost\" in logs on natural drop where first reconnect succeeded;\n"+
-			"before the fix this string was never emitted on this path\nlog output:\n%s", logs)
+
+	// Canonical event must appear.
+	if !strings.Contains(logs, "session lost; reconnecting") {
+		t.Errorf("expected \"session lost; reconnecting\" on natural drop;\n"+
+			"log output:\n%s", logs)
+	}
+
+	// On a natural drop the detector attribute must be "quic_drop", not "liveness_probe".
+	if !strings.Contains(logs, "detector=quic_drop") {
+		t.Errorf("expected \"detector=quic_drop\" on natural drop (probe interval is 10 s, "+
+			"well after the QUIC CONNECTION_CLOSE arrived);\nlog output:\n%s", logs)
+	}
+
+	// Exactly one canonical event.
+	count := strings.Count(logs, "session lost; reconnecting")
+	if count != 1 {
+		t.Errorf("expected exactly 1 \"session lost; reconnecting\" line; got %d\nlog output:\n%s",
+			count, logs)
 	}
 }
 
