@@ -223,8 +223,11 @@ suffix = "internal"
 	if !strings.Contains(err.Error(), "naming") {
 		t.Errorf("error %q does not mention the offending key 'naming'", err.Error())
 	}
-	if !strings.Contains(err.Error(), "05-config.md") {
-		t.Errorf("error %q does not mention the doc path", err.Error())
+	if !strings.Contains(err.Error(), "docs/configuration.md") {
+		t.Errorf("error %q does not mention the public doc path", err.Error())
+	}
+	if strings.Contains(err.Error(), "internal-docs") {
+		t.Errorf("error %q references internal-docs, which is gitignored and unreadable by a public user: %s", err.Error(), err.Error())
 	}
 }
 
@@ -248,8 +251,11 @@ autohrized_clients = []
 	if !strings.Contains(err.Error(), "autohrized_clients") {
 		t.Errorf("error %q does not mention 'autohrized_clients'", err.Error())
 	}
-	if !strings.Contains(err.Error(), "05-config.md") {
-		t.Errorf("error %q does not mention the doc path", err.Error())
+	if !strings.Contains(err.Error(), "docs/configuration.md") {
+		t.Errorf("error %q does not mention the public doc path", err.Error())
+	}
+	if strings.Contains(err.Error(), "internal-docs") {
+		t.Errorf("error %q references internal-docs, which is gitignored and unreadable by a public user: %s", err.Error(), err.Error())
 	}
 }
 

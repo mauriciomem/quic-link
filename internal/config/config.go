@@ -3,7 +3,7 @@
 // Flag overrides are applied by the caller after Load returns.
 //
 // The config file format is TOML; the schema is defined in
-// internal-docs/docs/05-config.md. Structural errors (unknown keys, wrong
+// docs/configuration.md. Structural errors (unknown keys, wrong
 // types) are detected by strict decoding. Semantic errors (missing required
 // fields, invalid pins) are detected by Validate.
 package config
@@ -202,7 +202,7 @@ func loadFile(cfg *Config, path string, explicitPath bool) error {
 		var sme *toml.StrictMissingError
 		if errors.As(err, &sme) {
 			return fmt.Errorf(
-				"config %s: unknown key or table:\n%s\nsee internal-docs/docs/05-config.md for valid keys: %w",
+				"config %s: unknown key or table:\n%s\nsee docs/configuration.md for valid keys: %w",
 				path, sme.String(), ErrInvalid,
 			)
 		}

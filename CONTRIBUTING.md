@@ -3,7 +3,7 @@
 quic-link is a single Go binary that tunnels SSH and Docker traffic between a
 client-side daemon and a server-side agent over one mutually-authenticated
 QUIC connection. See `README.md` for what it does and how to use it, and
-`ARCHITECTURE.md` for how it's built.
+`docs/architecture.md` for how it's built.
 
 ## Current status: not open for contributions yet
 
@@ -38,6 +38,14 @@ go test -race -count=1 ./...
 
 `-count=1` disables test caching so goroutine-leak checks (`goleak`) run on
 every execution.
+
+A plain `go build` produces a binary where `quic-link version` reports `dev`
+and `none`. To stamp a real version and commit into the binary, pass them at
+build time via linker flags:
+
+```bash
+go build -ldflags "-X github.com/mauriciomem/quic-link/internal/buildinfo.version=<VER> -X github.com/mauriciomem/quic-link/internal/buildinfo.commit=<SHA>" ./...
+```
 
 ## Where to ask
 
