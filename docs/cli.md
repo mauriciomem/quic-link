@@ -1,6 +1,6 @@
 # CLI reference
 
-*This page is written for people, not scripts. It is kept reasonably current, but it
+*This page is meant to be kept reasonably current, but it
 might drift a little behind the code. If something here does not match what you see,
 the CLI's own `--help` output is the final word.*
 

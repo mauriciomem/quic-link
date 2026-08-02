@@ -1,10 +1,10 @@
 # Platform notes (Linux & macOS)
 
-*This page is written for people, not scripts. It is kept reasonably current, but it
+*This page is meant to be kept reasonably current, but it
 might drift a little behind the code. If something here does not match what you see,
 the CLI's own `--help` output is the final word.*
 
-## Binding UDP port 443
+## Binding well-known UDP ports
 
 Ports below 1024 require elevated privileges on both Linux and macOS.
 

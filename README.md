@@ -28,11 +28,10 @@ This produces `quic-link` in the repository root; the rest of this guide assumes
 it's on your `PATH` or you're invoking it by full path.
 
 **1. Generate an identity on each host (one-time).** Authentication is mutual
-raw-public-key pinning: each host holds an Ed25519 key, and the two ends verify
-each other's *pin*, `base64(SHA-256(public key))`, during the handshake.
+raw-public-key pinning: each host holds a key, and the two ends verify
+each other's *pin* during the handshake.
 
 ```bash
-# On BOTH the agent host and the client host:
 quic-link keygen
 # -> pin: <base64>      (key written to ~/.config/quic-link/key.pem)
 ```
@@ -41,10 +40,10 @@ Note each host's pin and **exchange them out of band**. `keygen` is idempotent
 (running it again just reprints the existing pin); `keygen --force` rotates the
 key, and peers must re-pair with the new pin.
 
-**2. On the agent host** (UDP port 443 must be reachable):
+**2. On the agent host**:
 
 ```bash
-quic-link agent --listen :443 --authorized-client <client-pin>
+quic-link agent --listen :4433 --authorized-client <client-pin>
 ```
 
 `--authorized-client` is repeatable; at least one pin is required. The built-in
@@ -52,9 +51,8 @@ quic-link agent --listen :443 --authorized-client <client-pin>
 `--docker-addr` overrides the Docker socket; `--route NAME=ADDR` adds any
 further target.
 
-> Binding port 443 needs elevated privileges on Linux and macOS. If you hit
-> `permission denied`, see
-> [Binding UDP port 443](docs/platform-notes.md#binding-udp-port-443) for a
+> Binding well-known ports needs elevated privileges on Linux and macOS. See
+> [Binding well-known UDP ports](docs/platform-notes.md#binding-well-known-udp-ports) for a
 > high-port workaround or the Linux capability grant.
 
 **3. On the client, describe the server in a config file.** Write
@@ -63,7 +61,7 @@ naming the agent's address and pin:
 
 ```toml
 [servers.myserver]
-addr = "myserver.example.com:443"
+addr = "myserver.example.com:4433"
 pin  = "<agent-pin>"
 ```
 
@@ -89,14 +87,16 @@ Use them directly, or reach for the porcelain verbs instead:
 ```bash
 ssh -p 50330 user@127.0.0.1
 docker -H tcp://127.0.0.1:50331 ps
+```
 
-# equivalently:
+Or:
+
+```bash
 quic-link ssh myserver
 eval $(quic-link docker-env myserver) && docker ps
 ```
 
-A second `quic-link daemon` while one is already active exits with code 3: only
-one daemon owns the local socket at a time.
+Only one `quic-link daemon` owns the local socket at a time.
 
 > On macOS 15 and later, a LAN connection can time out until the terminal app is
 > granted Local Network access. See
@@ -121,6 +121,6 @@ mismatched pin.
 - [`docs/platform-notes.md`](docs/platform-notes.md): the two gotchas above,
   plus the UDP receive buffer note
 
-Each page is kept reasonably current but may drift a little behind the code; the
-CLI's own `--help` is always the final word. Interested in contributing or
+Each page is kept reasonably current but may drift a little behind the code. Use the
+CLI's own `--help` to have always the final word. Interested in contributing or
 building from source? See [`CONTRIBUTING.md`](CONTRIBUTING.md).

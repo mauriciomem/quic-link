@@ -1,10 +1,10 @@
 # Architecture
 
-*This page is written for people, not scripts. It is kept reasonably current, but it
+*This page is meant to be kept reasonably current, but it
 might drift a little behind the code. If something here does not match what you see,
 the CLI's own `--help` output is the final word.*
 
-quic-link is a single Go binary that acts as both a **client-side daemon** and a
+quic-link is a single binary that acts as both a **client-side daemon** and a
 **server-side agent**, carrying SSH, Docker, and other TCP-ish traffic over one
 mutually-authenticated QUIC connection. There are no CA files: authentication is
 mandatory Ed25519 public-key pinning. One binary, two roles, selected by config.
