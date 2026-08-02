@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -366,7 +367,52 @@ func validateServers(c *Config) ([]string, error) {
 			return warns, err
 		}
 	}
+	if err := validateDistinctListenPins(c.Servers); err != nil {
+		return warns, err
+	}
 	return warns, nil
+}
+
+// validateDistinctListenPins rejects two servers that wait to be connected to
+// while sharing a pin, which means sharing a keypair.
+//
+// A server this machine dials is identified by its address, so two of those may
+// share an identity harmlessly. A server that waits has no address of its own to
+// tell it apart by: an inbound peer presenting that pin could belong to either
+// entry, and a log line naming the peer would name both. The check is therefore
+// scoped to waiting servers only, and skips disabled ones, which are never
+// managed and so can never receive a connection.
+//
+// Servers are visited in sorted order so the same pair is always reported for a
+// given config rather than whichever the map happened to yield first.
+func validateDistinctListenPins(servers map[string]Server) error {
+	names := make([]string, 0, len(servers))
+	for name := range servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	firstSeenAt := make(map[string]string, len(names))
+	for _, name := range names {
+		srv := servers[name]
+		if srv.Enabled != nil && !*srv.Enabled {
+			continue
+		}
+		if srv.Listen == "" || srv.Addr != "" {
+			continue
+		}
+		if other, dup := firstSeenAt[srv.Pin]; dup {
+			return fmt.Errorf(
+				"servers.%s and servers.%s share a pin; servers that wait to be "+
+					"connected to must each have their own key, because an incoming "+
+					"connection is identified by its pin and nothing else could tell "+
+					"the two apart: %w",
+				other, name, ErrInvalid,
+			)
+		}
+		firstSeenAt[srv.Pin] = name
+	}
+	return nil
 }
 
 // validateServer validates one server entry and returns a wrapped ErrInvalid on
