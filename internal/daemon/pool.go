@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -14,23 +15,50 @@ import (
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
-// ExponentialReconnectPolicy is the production reconnect policy: exponential
-// backoff starting at Base, multiplied by Factor each attempt, capped at Cap.
-// After StableAfter_ of connected uptime the attempt counter resets.
+// ExponentialReconnectPolicy is the production reconnect policy: full-jitter
+// exponential backoff. Base multiplied by Factor each attempt gives a ceiling,
+// capped at Cap, and the actual wait is drawn uniformly from zero up to that
+// ceiling. After StableAfter_ of connected uptime the attempt counter resets.
+//
+// The jitter is the point, not a refinement. Without it every client that lost
+// the same agent retries in lockstep, so each retry round arrives as a
+// synchronised burst and the recovering agent is hit hardest exactly when it is
+// least able to cope. Spreading each client's wait across the whole interval
+// flattens those bursts. This is the algorithm published as "full jitter" in
+// AWS's Exponential Backoff And Jitter article; the two nearby variants,
+// equal jitter and decorrelated jitter, spread differently and are not what is
+// specified here.
 type ExponentialReconnectPolicy struct {
 	Base         time.Duration
 	Factor       float64
 	Cap          time.Duration
 	StableAfter_ time.Duration
+
+	// Rand draws the jitter fraction, in [0,1). Leave it nil in production:
+	// nil means the shared generator from the standard library, which is
+	// seeded automatically and safe to call from several session goroutines
+	// at once. Tests set it to assert an exact sequence rather than a range.
+	Rand func() float64
 }
 
 // Backoff returns the wait duration before attempt n (0-indexed).
 func (p ExponentialReconnectPolicy) Backoff(n int) time.Duration {
-	d := float64(p.Base) * math.Pow(p.Factor, float64(n))
-	if d > float64(p.Cap) {
-		d = float64(p.Cap)
+	if n < 0 {
+		n = 0
 	}
-	return time.Duration(d)
+	// Ceiling first. A large n overflows the exponential to +Inf, which
+	// compares greater than Cap and so is clamped like any other overshoot;
+	// that keeps a long outage from producing a nonsense duration.
+	ceiling := float64(p.Base) * math.Pow(p.Factor, float64(n))
+	if ceiling > float64(p.Cap) {
+		ceiling = float64(p.Cap)
+	}
+
+	draw := p.Rand
+	if draw == nil {
+		draw = rand.Float64
+	}
+	return time.Duration(draw() * ceiling)
 }
 
 // StableAfter returns the uptime after which the backoff counter resets on drop.
@@ -175,8 +203,9 @@ func NewRealPoolWithLiveness(
 		if srv.Enabled != nil && !*srv.Enabled {
 			// Disabled servers: report 0/0 — nothing is listening.
 			p.entries[name] = &disabledEntry{
-				name:  name,
-				since: clock.Now(),
+				name:      name,
+				since:     clock.Now(),
+				transport: configuredTransport(srv),
 			}
 			p.order = append(p.order, name)
 			continue
@@ -262,9 +291,25 @@ func sortedServerNames(servers map[string]config.Server) []string {
 
 // ---- disabledEntry ----------------------------------------------------------
 
+// configuredTransport reports which side opens the connection for a server, as
+// its configuration asks for it: a listen address with no dial address means
+// the peer connects to us. Everything else is the ordinary case where we dial
+// out, which is also the safe answer for a half-written config, since it is
+// what the daemon would actually attempt.
+func configuredTransport(srv config.Server) string {
+	if srv.Listen != "" && srv.Addr == "" {
+		return "listen"
+	}
+	return "dial"
+}
+
 type disabledEntry struct {
 	name  string
 	since time.Time
+	// transport is the direction this server's config asks for, kept so a
+	// disabled entry still reports the truth about itself rather than
+	// assuming the forward-mode default.
+	transport string
 }
 
 func (e *disabledEntry) Get(_ context.Context) (Conn, error) {
@@ -275,7 +320,7 @@ func (e *disabledEntry) State() SessionState {
 	return SessionState{
 		Name:      e.name,
 		State:     "disabled",
-		Transport: "dial",
+		Transport: e.transport,
 		Since:     e.since,
 		// SSHPort and DockerPort are 0: no listener is bound for a disabled
 		// server. A status field that reports phantom ports is worse than
