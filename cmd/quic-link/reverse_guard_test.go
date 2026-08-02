@@ -32,8 +32,14 @@ pin    = "`+pin+`"
 // runDaemonBriefly starts the daemon and cancels it shortly after, so a config
 // that is accepted does not block the test. Startup failures return before the
 // cancellation ever matters.
+//
+// It gives the daemon a socket directory of its own. The single-instance check
+// runs before any address is bound, so without isolation a daemon already
+// running for real on the same machine answers first and every one of these
+// tests reports that instead of the thing it is actually checking.
 func runDaemonBriefly(t *testing.T, args ...string) error {
 	t.Helper()
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
 	return runVerbCtx(ctx, args)

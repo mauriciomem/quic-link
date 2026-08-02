@@ -243,8 +243,8 @@ pin    = "`+pin+`"
 	if exitCode(err) != 2 {
 		t.Errorf("expected exit 2 for reverse-mode ping server, got %d: %v", exitCode(err), err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "later phase") {
-		t.Errorf("error should mention 'later phase', got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no address to ping") {
+		t.Errorf("error should explain there is no address to ping, got: %v", err)
 	}
 }
 
@@ -361,22 +361,4 @@ authorized_clients = ["`+pin+`"]
 	}
 }
 
-// TestAgentReverseMode verifies that an agent configured with dial= (reverse
-// mode) gives the "not yet supported; later phase" message and exit 2.
-func TestAgentReverseMode(t *testing.T) {
-	unsetQLEnvForTest(t)
-	pin := mustTestPin(t)
-	path := writeTestConfig(t, `
-schema = 1
-[agent]
-dial = "remote.example.com:7443"
-authorized_clients = ["`+pin+`"]
-`)
-	err := runVerb([]string{"--config", path, "agent"})
-	if exitCode(err) != 2 {
-		t.Errorf("expected exit 2 for reverse-mode agent, got %d: %v", exitCode(err), err)
-	}
-	if err == nil || !strings.Contains(err.Error(), "later phase") {
-		t.Errorf("error should mention 'later phase', got: %v", err)
-	}
-}
+// An agent configured to connect out is now supported; see agent_dial_test.go.

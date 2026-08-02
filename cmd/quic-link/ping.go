@@ -91,11 +91,13 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 				return usageErrorf("server %q is disabled; set enabled = true in the config to use it", serverName)
 			}
 
-			// --- reverse-mode guard ------------------------------------
-
+			// ping measures a round trip on a connection it opens itself, and
+			// a server that waits for its agent to connect has no address for
+			// anyone to open one to. Its session belongs to the daemon, so that
+			// is where to look at it.
 			if srv.Listen != "" && srv.Addr == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("reverse mode (listen) is not yet supported; it runs in a later phase")
+				return usageErrorf("server %q waits for its agent to connect, so there is no address to ping; "+
+					"use 'quic-link status' to see whether its session is up", serverName)
 			}
 
 			if srv.Addr == "" {

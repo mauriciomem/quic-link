@@ -82,25 +82,6 @@ func newStdioCmd(a *app) *cobra.Command {
 				}
 			}
 
-			// reverse-mode guard: "listen" without "addr" is not-yet-implemented
-			// reverse mode. This IS a usage/config error — the operator wrote a
-			// config that requests a mode that does not exist yet — so exit 2 is
-			// appropriate. No usage screen: the config is the source of truth here.
-			if srv.Listen != "" && srv.Addr == "" {
-				return usageErrorf("reverse mode (listen) is not yet supported; it runs in a later phase")
-			}
-
-			if srv.Addr == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("--server is required (or add SERVER to the config with an addr)")
-			}
-
-			serverPin, err := identity.ParsePin(srv.Pin)
-			if err != nil {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("pin is required and must be a valid pin: %v", err)
-			}
-
 			effectiveKey := a.cfg.Identity.KeyFile
 			if flags.Changed("key") {
 				effectiveKey = keyFile
@@ -152,6 +133,30 @@ func newStdioCmd(a *app) *cobra.Command {
 					}
 					// Any other daemon error: fall through to direct dial.
 				}
+			}
+
+			// Everything below dials the agent directly, which only a server
+			// that has an address to dial can do. A server that waits for its
+			// agent to connect has no address of its own, and its session is
+			// held by the daemon, so without one there is nothing to fall back
+			// to. These checks live here rather than earlier because a reverse
+			// server reached through a running daemon is perfectly usable and
+			// must not be refused on the way past.
+			if srv.Listen != "" && srv.Addr == "" {
+				return &errFinalExitCode{
+					code: 3,
+					msg: fmt.Sprintf("server %q waits for its agent to connect, so it has no address to dial directly; "+
+						"start the daemon so it can hold the session", serverName),
+				}
+			}
+			if srv.Addr == "" {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("--server is required (or add SERVER to the config with an addr)")
+			}
+			serverPin, perr := identity.ParsePin(srv.Pin)
+			if perr != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				return usageErrorf("pin is required and must be a valid pin: %v", perr)
 			}
 
 			return stdioRun(cmd.Context(), srv.Addr, target, effectiveKey, serverPin)
