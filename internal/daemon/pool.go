@@ -171,6 +171,21 @@ func NewRealPoolWithLiveness(
 			return nil, fmt.Errorf("pool: build transport for %q: %w", name, err)
 		}
 
+		// Which kind of entry a server gets follows the same predicate that
+		// decides what direction it reports, so the two can never disagree.
+		// Falling through to a dialing entry for a server configured to wait
+		// would build one with no address and retry nothing forever.
+		if configuredTransport(srv) == transportListen {
+			ln, lerr := t.Listen()
+			if lerr != nil {
+				_ = t.Close()
+				return nil, fmt.Errorf("pool: listen for %q: %w", name, lerr)
+			}
+			p.entries[name] = newListenEntry(ctx, name, ln, t, sshPort, dockerPort, clock, liveness)
+			p.order = append(p.order, name)
+			continue
+		}
+
 		// Capture name and srv for the closure — do not use the loop variable
 		// directly (Go loop-variable capture: each iteration creates fresh
 		// bindings in Go ≥1.22, but we make the capture explicit for clarity).
@@ -243,11 +258,18 @@ func sortedServerNames(servers map[string]config.Server) []string {
 // the peer connects to us. Everything else is the ordinary case where we dial
 // out, which is also the safe answer for a half-written config, since it is
 // what the daemon would actually attempt.
+// The two directions a server can be configured for, as reported by status and
+// as used to decide which kind of entry the pool builds for it.
+const (
+	transportDial   = "dial"
+	transportListen = "listen"
+)
+
 func configuredTransport(srv config.Server) string {
 	if srv.Listen != "" && srv.Addr == "" {
-		return "listen"
+		return transportListen
 	}
-	return "dial"
+	return transportDial
 }
 
 type disabledEntry struct {
@@ -632,16 +654,32 @@ type probeDeathDetail struct {
 // The probe goroutine is the sole caller of cclient.PingRTT inside a
 // connected session — the control client is not used anywhere else concurrently.
 func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Conn, cclient *control.Client, probeResult chan<- *probeDeathDetail) {
+	runLivenessProbeOn(probeCtx, e.clock, e.liveness, e.name, conn, cclient, probeResult)
+}
+
+// runLivenessProbeOn is the probe itself, independent of which kind of entry
+// owns the session. The control client sits on this side of the connection
+// whichever end opened the transport, so the probe is identical in both
+// directions; only what the caller does after a detected loss differs.
+func runLivenessProbeOn(
+	probeCtx context.Context,
+	clock Clock,
+	liveness LivenessPolicy,
+	name string,
+	conn transport.Conn,
+	cclient *control.Client,
+	probeResult chan<- *probeDeathDetail,
+) {
 	consecutiveFailures := 0
-	interval := e.liveness.Interval()
-	timeout := e.liveness.Timeout()
-	threshold := e.liveness.FailThreshold()
+	interval := liveness.Interval()
+	timeout := liveness.Timeout()
+	threshold := liveness.FailThreshold()
 
 	for {
 		select {
 		case <-probeCtx.Done():
 			return
-		case <-e.clock.After(interval):
+		case <-clock.After(interval):
 		}
 
 		if probeCtx.Err() != nil {
@@ -667,7 +705,7 @@ func (e *dialEntry) runLivenessProbe(probeCtx context.Context, conn transport.Co
 		consecutiveFailures++
 		slog.Warn("liveness probe failed",
 			"role", "daemon",
-			"session", e.name,
+			"session", name,
 			"consecutive_probe_failures", consecutiveFailures,
 			"threshold", threshold,
 			"err", err,
@@ -807,7 +845,7 @@ func (e *dialEntry) State() SessionState {
 	return SessionState{
 		Name:       e.name,
 		State:      stateStr,
-		Transport:  "dial",
+		Transport:  transportDial,
 		Since:      e.since,
 		SSHPort:    e.sshPort,
 		DockerPort: e.dockerPort,

@@ -61,6 +61,21 @@ func Serve(ctx context.Context, ln transport.Listener, rtr *router.Router, opts 
 	}
 }
 
+// ServeConn handles every stream on one already-established connection, whether
+// this side accepted it or opened it. Nothing below this point depends on which
+// end opened the transport: the peer identity comes from the connection's own
+// certificate, and the route table is enforced the same way either way.
+//
+// It returns when the connection is gone, so a caller that opened the
+// connection can use it as the body of its own reconnect loop.
+func ServeConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opts ...ServeOpts) {
+	var opt ServeOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	serveConn(ctx, conn, rtr, opt)
+}
+
 // serveConn derives the peer identity once and handles all streams on a
 // single accepted QUIC connection. It also enforces the control-stream open
 // deadline: if the client does not open a control stream within
