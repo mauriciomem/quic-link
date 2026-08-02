@@ -32,6 +32,13 @@ type reverseRig struct {
 
 func newReverseRig(t *testing.T) *reverseRig {
 	t.Helper()
+	return newReverseRigWithClock(t, daemon.WallClock{})
+}
+
+// newReverseRigWithClock builds the same rig with an injected clock, so a
+// test can move time instead of waiting for it.
+func newReverseRigWithClock(t *testing.T, clock daemon.Clock) *reverseRig {
+	t.Helper()
 
 	hub := mem.NewHub()
 	daemonLeaf, _, err := mem.NewIdentity()
@@ -53,7 +60,7 @@ func newReverseRig(t *testing.T) *reverseRig {
 		ctx, cfg,
 		func(_ string, _ config.Server) (transport.Transport, error) { return daemonT, nil },
 		daemon.DefaultReconnectPolicy(),
-		daemon.WallClock{},
+		clock,
 		nil,
 	)
 	if err != nil {
