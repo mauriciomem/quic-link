@@ -124,6 +124,25 @@ Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then exit.`,
 	return cmd
 }
 
+// refuseReverseMode reports a usage error when the named server is configured
+// for reverse mode, where the agent dials in rather than being dialed. A
+// listen address with no dial address is exactly that shape. Running it is not
+// implemented yet, and the failure without this check is silent and confusing:
+// the session entry would be built with an empty address and would retry
+// forever, logging a reconnect line that never resolves.
+//
+// Both the scoped and the unscoped daemon paths call this so the two give a
+// user the identical message; it is also the single place to delete once
+// reverse mode is implemented.
+func refuseReverseMode(name string, srv config.Server) error {
+	if srv.Listen == "" || srv.Addr != "" {
+		return nil
+	}
+	return usageErrorf("server %q uses reverse mode (listen); "+
+		"reverse mode is not yet supported and will be implemented in a later release",
+		name)
+}
+
 // runDaemonOwner is the shared implementation used by both the daemon command
 // and the connect command (which is a deprecated alias). scope is the server
 // name from --server NAME; an empty string means "all enabled servers".
@@ -143,17 +162,36 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 			return usageErrorf("server %q is disabled; set enabled = true in the config to use it",
 				scope)
 		}
-		// Reverse mode (listen without addr) is not yet implemented.
-		if srv.Listen != "" && srv.Addr == "" {
-			return usageErrorf("server %q uses reverse mode (listen); "+
-				"reverse mode is not yet supported and will be implemented in a later release",
-				scope)
+		if err := refuseReverseMode(scope, srv); err != nil {
+			return err
 		}
 		// Narrow the config to only the requested server. The original cfg is
 		// not mutated — we build a shallow copy with a single-entry Servers map.
 		narrowed := *cfg
 		narrowed.Servers = map[string]config.Server{scope: srv}
 		cfg = &narrowed
+	} else {
+		// Unscoped: this daemon manages every enabled server, so every one of
+		// them must be a mode we can actually run. Checked here, before the
+		// socket path is resolved and before any other I/O, so the refusal
+		// costs nothing and leaves nothing behind. Names are visited in sorted
+		// order so a config with more than one reverse-mode server always
+		// reports the same one rather than a random pick per run.
+		names := make([]string, 0, len(cfg.Servers))
+		for name := range cfg.Servers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			srv := cfg.Servers[name]
+			if srv.Enabled != nil && !*srv.Enabled {
+				// A disabled server is never managed, so its mode is moot.
+				continue
+			}
+			if err := refuseReverseMode(name, srv); err != nil {
+				return err
+			}
+		}
 	}
 
 	// Resolve the socket path (also creates and verifies the directory).
