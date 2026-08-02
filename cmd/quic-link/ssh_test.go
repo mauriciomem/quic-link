@@ -9,6 +9,131 @@ import (
 	"testing"
 )
 
+// ---- --config propagation into the generated ProxyCommand -------------------
+//
+// Field-found defect (Step 1b.2b two-host campaign): ssh did not thread the
+// parent invocation's explicitly-set --config into the ProxyCommand it
+// generates, so the spawned stdio child fell back to the default config path
+// and could not find a server that exists only in the config the user
+// explicitly selected. This mirrors the existing --server/--pin threading:
+// the child needs the parent's connection context, and --config is part of
+// that context.
+
+// TestSSH_ConfigMode_PropagatesExplicitConfigFlag pins the fix: when
+// --config was explicitly given on the parent invocation, the generated
+// ProxyCommand must contain a --config token followed by the same,
+// shell-quoted, path.
+func TestSSH_ConfigMode_PropagatesExplicitConfigFlag(t *testing.T) {
+	unsetQLEnvForTest(t)
+	pin := mustTestPin(t)
+	path := writeTestConfig(t, `
+schema = 1
+[servers.server1]
+addr = "127.0.0.1:7443"
+pin  = "`+pin+`"
+`)
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	installSSHStub(t, argvFile, 0)
+
+	err := runVerb([]string{"--config", path, "ssh", "server1"})
+	if err != nil {
+		t.Fatalf("ssh: %v", err)
+	}
+	argv := readArgvFile(t, argvFile)
+	proxyCmd := findFlagValue(argv, "ProxyCommand=")
+	if proxyCmd == "" {
+		t.Fatal("no -o ProxyCommand=... found in argv")
+	}
+
+	wantToken := "--config " + shellQuote(path)
+	if !strings.Contains(proxyCmd, wantToken) {
+		t.Errorf("ProxyCommand %q does not contain %q (the explicitly-set "+
+			"--config was not threaded through, so the spawned stdio child "+
+			"would read the default config instead of the one the user "+
+			"selected)", proxyCmd, wantToken)
+	}
+}
+
+// TestSSH_ConfigMode_NoExplicitConfig_OmitsConfigFlag guards the opposite
+// direction: when the user did NOT pass --config (the common case, default
+// config path), the generated ProxyCommand must contain no --config token
+// at all. Synthesizing one would hardcode a resolved default path into the
+// ProxyCommand and change behaviour for every user who relies on the
+// default location.
+func TestSSH_ConfigMode_NoExplicitConfig_OmitsConfigFlag(t *testing.T) {
+	unsetQLEnvForTest(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	pin := mustTestPin(t)
+	// Write the config at the DEFAULT path so ssh's own config-based
+	// resolution succeeds without --config being passed at all.
+	defaultDir := filepath.Join(tmp, ".config", "quic-link")
+	if err := os.MkdirAll(defaultDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defaultPath := filepath.Join(defaultDir, "config.toml")
+	content := "schema = 1\n[servers.server1]\naddr = \"127.0.0.1:7443\"\npin  = \"" + pin + "\"\n"
+	if err := os.WriteFile(defaultPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write default config: %v", err)
+	}
+
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	installSSHStub(t, argvFile, 0)
+
+	err := runVerb([]string{"ssh", "server1"})
+	if err != nil {
+		t.Fatalf("ssh: %v", err)
+	}
+	argv := readArgvFile(t, argvFile)
+	proxyCmd := findFlagValue(argv, "ProxyCommand=")
+	if proxyCmd == "" {
+		t.Fatal("no -o ProxyCommand=... found in argv")
+	}
+	if strings.Contains(proxyCmd, "--config") {
+		t.Errorf("ProxyCommand %q must not contain --config when the user "+
+			"never set it (would hardcode a resolved default path)", proxyCmd)
+	}
+}
+
+// TestBuildProxyCommand_ConfigPathWithSpaces_RoundTripsThroughShell proves
+// the --config path is quoted the same way the binary path already is (the
+// same technique TestShellQuoteRoundTrips_PathWithSpaces pins), by actually
+// running the generated command line through a real shell rather than
+// comparing strings. A stub "print-argv" binary stands in for quic-link
+// itself so the real argv a shell would hand to it is observable.
+func TestBuildProxyCommand_ConfigPathWithSpaces_RoundTripsThroughShell(t *testing.T) {
+	base := t.TempDir()
+	configWithSpaces := filepath.Join(base, "dir with spaces", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configWithSpaces), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	stub := filepath.Join(stubDir, "print-argv")
+	script := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"
+	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+
+	proxyCmd := buildProxyCommand(stub, false, "", "", configWithSpaces)
+
+	out, err := exec.Command("sh", "-c", proxyCmd).Output()
+	if err != nil {
+		t.Fatalf("sh -c %q: %v", proxyCmd, err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	t.Logf("shell-parsed argv: %#v", lines)
+
+	idx := indexOf(lines, "--config")
+	if idx == -1 || idx+1 >= len(lines) {
+		t.Fatalf("no --config token found in shell-parsed argv %#v (proxyCmd=%q)", lines, proxyCmd)
+	}
+	if got := lines[idx+1]; got != configWithSpaces {
+		t.Errorf("shell round-trip of the quoted config path = %q, want %q (proxyCmd=%q)",
+			got, configWithSpaces, proxyCmd)
+	}
+}
+
 // TestShellQuoteRoundTrips_PathWithSpaces pins the quoting behaviour by
 // actually running the quoted string through a real shell and checking the
 // original string comes back byte-exact. This is the same failure mode the
@@ -131,6 +256,45 @@ func findFlagValue(argv []string, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// sshDestination replicates real ssh's own destination-parsing rule closely
+// enough for these tests: ssh's grammar is "ssh [options] destination
+// [command]", so it scans argv left to right and treats the FIRST
+// non-option token as the destination. This helper skips "-o" together with
+// its following value, and skips any other bare flag token (one that
+// starts with "-", consuming no value of its own — sufficient for the only
+// other flags these tests exercise, "-v" and "-t"), then returns the first
+// remaining token.
+//
+// This exists because asserting merely that a destination string appears
+// SOMEWHERE in argv cannot distinguish a correctly-ordered argv from a
+// broken one where the same string is misparsed as part of a remote
+// command — exactly the failure mode a field-found defect slipped through
+// under (destination appended after the passthrough instead of before it).
+func sshDestination(argv []string) string {
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		if a == "-o" {
+			i++ // skip the value that belongs to -o
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue // a bare flag with no value of its own, e.g. -v, -t
+		}
+		return a
+	}
+	return ""
+}
+
+// indexOf returns the index of the first element in argv equal to s, or -1.
+func indexOf(argv []string, s string) int {
+	for i, a := range argv {
+		if a == s {
+			return i
+		}
+	}
+	return -1
 }
 
 // ---- config-mode tests -------------------------------------------------------
@@ -348,9 +512,75 @@ pin  = "`+pin+`"
 		t.Fatalf("ssh: %v", err)
 	}
 	argv := readArgvFile(t, argvFile)
-	joined := strings.Join(argv, " ")
-	if !strings.Contains(joined, "-v -t server1") {
-		t.Errorf("expected passthrough args '-v -t' before final 'server1', got argv=%#v", argv)
+	t.Logf("argv: %#v", argv)
+
+	// ssh's own grammar is "ssh [options] destination [command]": the
+	// destination must come BEFORE ssh's own passthrough flags, not after,
+	// or a real ssh would misparse a remote command in the passthrough as
+	// the destination (see TestSSH_DashDashPassthrough_RemoteCommand). A
+	// plain substring check on the joined argv is not reliable here: the
+	// generated "-o HostKeyAlias=server1" token itself contains the literal
+	// substring "server1 -v -t" is NOT guaranteed to be absent even under
+	// the broken ordering, so this asserts on argv INDICES instead, the
+	// same technique the remote-command test below uses.
+	if got := sshDestination(argv); got != "server1" {
+		t.Errorf("ssh would parse the destination as %q, want %q; argv=%#v", got, "server1", argv)
+	}
+	destIdx := indexOf(argv, "server1")
+	if destIdx == -1 {
+		t.Fatalf("destination %q not found anywhere in argv=%#v", "server1", argv)
+	}
+	if destIdx+2 >= len(argv) || argv[destIdx+1] != "-v" || argv[destIdx+2] != "-t" {
+		t.Errorf("expected destination 'server1' immediately followed by passthrough '-v' '-t', got argv=%#v", argv)
+	}
+}
+
+// TestSSH_DashDashPassthrough_RemoteCommand pins the exact field-found
+// defect: a passthrough containing a remote COMMAND (not just ssh's own
+// flags) must not be misparsed as the destination. Real ssh's grammar is
+// "ssh [options] destination [command]"; before the fix, this verb appended
+// the destination AFTER the passthrough, so real ssh parsed the
+// passthrough's first non-option token ("echo hi", quoted as one argv
+// element) — or, for -o-prefixed passthrough, whatever followed the -o
+// pairs — as the destination instead of "server1".
+func TestSSH_DashDashPassthrough_RemoteCommand(t *testing.T) {
+	unsetQLEnvForTest(t)
+	pin := mustTestPin(t)
+	path := writeTestConfig(t, `
+schema = 1
+[servers.server1]
+addr = "127.0.0.1:7443"
+pin  = "`+pin+`"
+`)
+	argvFile := filepath.Join(t.TempDir(), "argv")
+	installSSHStub(t, argvFile, 0)
+
+	err := runVerb([]string{
+		"--config", path, "ssh", "server1", "--",
+		"-o", "BatchMode=yes", "echo hi",
+	})
+	if err != nil {
+		t.Fatalf("ssh: %v", err)
+	}
+	argv := readArgvFile(t, argvFile)
+	t.Logf("argv: %#v", argv)
+
+	if got := sshDestination(argv); got != "server1" {
+		t.Errorf("ssh would parse the destination as %q, want %q (the remote command "+
+			"must not be mistaken for the destination); argv=%#v", got, "server1", argv)
+	}
+
+	destIdx := indexOf(argv, "server1")
+	if destIdx == -1 {
+		t.Fatalf("destination %q not found anywhere in argv=%#v", "server1", argv)
+	}
+	cmdIdx := indexOf(argv, "echo hi")
+	if cmdIdx == -1 {
+		t.Fatalf("remote command %q not found in argv=%#v", "echo hi", argv)
+	}
+	if cmdIdx < destIdx {
+		t.Errorf("remote command at index %d appears BEFORE the destination at index %d; "+
+			"ssh's grammar requires the destination first, argv=%#v", cmdIdx, destIdx, argv)
 	}
 }
 

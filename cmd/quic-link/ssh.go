@@ -151,18 +151,27 @@ func bareServerName(serverArg string) string {
 
 // buildProxyCommand returns the ProxyCommand value passed to ssh via
 // -o ProxyCommand=<value>. flagMode selects the config-free form, which
-// threads --server/--pin into the generated stdio invocation.
+// threads --server/--pin into the generated stdio invocation. configPath, if
+// non-empty, threads the parent invocation's explicitly-set --config into
+// the same generated command, so the spawned stdio child reads the same
+// config file the parent was told to use instead of silently falling back
+// to the default path. Callers must pass "" when the user did not
+// explicitly set --config; this function does not decide that, it only
+// includes what it is given.
 //
 // The emitted string is deliberately not a contract surface: only
 // "no user file touched" and "exit code is ssh's own" are guaranteed to
 // hold across releases.
-func buildProxyCommand(binPath string, flagMode bool, serverFlag, pinFlag string) string {
-	quotedBin := shellQuote(binPath)
+func buildProxyCommand(binPath string, flagMode bool, serverFlag, pinFlag string, configPath string) string {
+	prefix := shellQuote(binPath)
+	if configPath != "" {
+		prefix += " --config " + shellQuote(configPath)
+	}
 	if flagMode {
 		return fmt.Sprintf("%s stdio --server %s --pin %s %%n ssh",
-			quotedBin, shellQuote(serverFlag), shellQuote(pinFlag))
+			prefix, shellQuote(serverFlag), shellQuote(pinFlag))
 	}
-	return fmt.Sprintf("%s stdio %%n ssh", quotedBin)
+	return fmt.Sprintf("%s stdio %%n ssh", prefix)
 }
 
 // runSSH is the ssh verb's implementation. It parses this command's own args
@@ -242,20 +251,46 @@ func runSSHCore(cmd *cobra.Command, a *app, serverArg string, passthrough []stri
 		return fmt.Errorf("resolve quic-link's own executable path: %w", err)
 	}
 
-	proxyCommand := buildProxyCommand(binPath, flagMode, serverFlag, pinFlag)
+	// Only thread --config through when the user actually set it on this
+	// invocation. --config is a persistent flag on the root command, so
+	// cmd.Flags().Changed reads it via the same shared flag object that
+	// PersistentPreRunE already parsed — cobra passes the full argument
+	// list (including flags that precede the subcommand name) down to the
+	// leaf command's own flag parse, and mergePersistentFlags folds the
+	// root's persistent flags into the leaf's FlagSet by reference, not by
+	// copy, so this Changed() check is exactly as reliable as the
+	// --server/--pin checks already used above. A default (unset) config
+	// path must never be synthesized here: that would hardcode a resolved
+	// path into the ProxyCommand and change behaviour for the common case
+	// of relying on the default location.
+	var configPath string
+	if cmd.Flags().Changed("config") {
+		configPath = a.configPath
+	}
+
+	proxyCommand := buildProxyCommand(binPath, flagMode, serverFlag, pinFlag, configPath)
 
 	sshPath, err := exec.LookPath(sshBinary)
 	if err != nil {
 		return fmt.Errorf("ssh binary not found in PATH: %w", err)
 	}
 
+	// Real ssh's grammar is "ssh [options] destination [command]": the
+	// destination must precede any passthrough, or a remote command in the
+	// passthrough (attach's synthesized "tmux attach -t SESSION", or a
+	// user's own "-- ... echo hi") gets misparsed as the destination and
+	// everything meant as the destination gets misparsed as part of the
+	// command instead. Placing the destination first is safe: OpenSSH
+	// permutes its own -o/-t/etc. flags appearing after the destination
+	// (verified against OpenSSH 10.2p1), so ssh's own passthrough flags
+	// still work exactly as before, immediately after the destination.
 	sshArgs := make([]string, 0, len(passthrough)+5)
 	sshArgs = append(sshArgs,
 		"-o", "ProxyCommand="+proxyCommand,
 		"-o", "HostKeyAlias="+bareServer,
 	)
-	sshArgs = append(sshArgs, passthrough...)
 	sshArgs = append(sshArgs, serverArg)
+	sshArgs = append(sshArgs, passthrough...)
 
 	child := exec.CommandContext(cmd.Context(), sshPath, sshArgs...)
 	child.Stdin = os.Stdin
