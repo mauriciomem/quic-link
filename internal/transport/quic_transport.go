@@ -219,6 +219,42 @@ func isTLSAuthAlert(err error) (*quic.TransportError, bool) {
 	return nil, false
 }
 
+// ErrRoleMismatch means the peer authenticated but is playing the same role we
+// are, which happens when both ends are configured with one key between them.
+// It is deliberately not an authentication failure: the credentials were
+// accepted, so telling an operator to check their pins would send them the
+// wrong way.
+var ErrRoleMismatch = errors.New("transport: peer is configured for the same role (both ends appear to share one key)")
+
+// IsRoleMismatch reports whether err is a peer closing the connection because
+// our roles collided. The close arrives as an application error code, well
+// outside the TLS-alert range an authentication failure uses, so the two can
+// never be confused for one another.
+func IsRoleMismatch(err error) bool {
+	if errors.Is(err, ErrRoleMismatch) {
+		return true
+	}
+	code, ok := appCloseCode(err)
+	return ok && code == roleMismatchCode
+}
+
+// appCloseCode extracts the application close code from whichever transport
+// produced the error.
+func appCloseCode(err error) (uint64, bool) {
+	var coder AppCloseCoder
+	if errors.As(err, &coder) {
+		return coder.AppCloseCode()
+	}
+	var ae *quic.ApplicationError
+	if errors.As(err, &ae) {
+		return uint64(ae.ErrorCode), true
+	}
+	return 0, false
+}
+
+// roleMismatchCode is the application close code reserved for a role collision.
+const roleMismatchCode = 0x02
+
 // AuthError constructs an ErrAuthFailed-wrapped error when err carries an
 // unclassified TLS-alert-range QUIC transport error (other than ALPN mismatch).
 // Use it to translate a raw connection-close cause into a classified error that

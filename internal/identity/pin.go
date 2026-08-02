@@ -20,6 +20,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -71,4 +73,32 @@ func ParsePin(s string) (string, error) {
 		return "", fmt.Errorf("pin must be base64 of a 32-byte SHA-256: decoded %d bytes, want %d", len(raw), sha256.Size)
 	}
 	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// PinForKeyFile returns the pin of the key stored at path, expanding a leading
+// ~ the way every other path in the config is. It is a convenience for callers
+// that need to recognise their own identity without keeping the key itself
+// around.
+func PinForKeyFile(path string) (string, error) {
+	key, err := LoadKey(ExpandHome(path))
+	if err != nil {
+		return "", err
+	}
+	return PinForKey(key)
+}
+
+// ExpandHome replaces a leading ~ with the user's home directory. Paths in the
+// config are written the way a person would type them.
+func ExpandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }

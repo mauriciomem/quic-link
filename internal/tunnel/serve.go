@@ -24,7 +24,25 @@ type ServeOpts struct {
 	// when a connecting client's self-reported key age exceeds the threshold.
 	// The advisory is informational only and never closes or rejects a session.
 	WarnKeyAgeDays int
+	// OwnPin is this endpoint's own identity. When set, a peer presenting it is
+	// refused: the two ends would be sharing one keypair, so neither could tell
+	// which role the other was playing. Leave empty to skip the check.
+	OwnPin string
 }
+
+// SameIdentityAsPeer reports whether the peer is using our own identity. It is
+// the one role confusion that survives the handshake, because a peer holding
+// any other key is already refused by the pin check.
+func SameIdentityAsPeer(ownPin string, peer router.Identity) bool {
+	return ownPin != "" && peer.Pin == ownPin
+}
+
+// RoleMismatchCode is sent when a peer authenticates but is playing the same
+// role we are, which means the two ends are configured with one identity
+// between them. Under pinning a peer that holds the wrong key is refused during
+// the handshake, so this is the one role confusion that can get far enough to
+// need saying out loud.
+const RoleMismatchCode = 0x02
 
 const (
 	// controlOpenDeadline bounds how long after a session is established the
@@ -89,6 +107,15 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 		_ = conn.CloseWithError(0x02, "no peer identity")
 		return
 	}
+	if SameIdentityAsPeer(opt.OwnPin, peer) {
+		slog.Error("peer is using our own identity; refusing the session. "+
+			"Both ends are configured with the same key, so neither can tell which role the other is playing: "+
+			"generate a separate key for each end",
+			"role", "agent", "peer", peer.Short())
+		_ = conn.CloseWithError(RoleMismatchCode, "peer presented our own identity")
+		return
+	}
+
 	sessionStart := time.Now()
 	slog.Info("session established", "role", "agent", "peer", peer.Short())
 

@@ -10,6 +10,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
+	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
 // Session close codes used when this side ends a connection deliberately. They
@@ -66,6 +67,9 @@ type listenEntry struct {
 	liveness   LivenessPolicy
 	sshPort    int
 	dockerPort int
+	// ownPin is this daemon's own identity, used to refuse a peer that turns
+	// out to be using it. Empty disables the check.
+	ownPin string
 
 	mu            sync.Mutex
 	intState      internalConnState
@@ -95,6 +99,7 @@ func newListenEntry(
 	ln transport.Listener,
 	t transport.Transport,
 	sshPort, dockerPort int,
+	ownPin string,
 	clock Clock,
 	liveness LivenessPolicy,
 ) *listenEntry {
@@ -107,6 +112,7 @@ func newListenEntry(
 		liveness:   liveness,
 		sshPort:    sshPort,
 		dockerPort: dockerPort,
+		ownPin:     ownPin,
 		intState:   stateConnecting,
 		since:      clock.Now(),
 		waiting:    make(chan struct{}),
@@ -183,6 +189,19 @@ func (e *listenEntry) runLoop(ctx context.Context) {
 // displacing a session that is currently working.
 func (e *listenEntry) promote(ctx context.Context, conn transport.Conn) bool {
 	peer := peerPrefix(conn)
+
+	// A peer holding any key other than the one we expect was already refused
+	// during the handshake. The case that survives is the peer holding OUR key,
+	// which means one identity is doing duty for both ends and neither of us
+	// can tell which role the other is playing.
+	if id, err := router.IdentityFromCerts(conn.PeerCertificates()); err == nil &&
+		tunnel.SameIdentityAsPeer(e.ownPin, id) {
+		slog.Error("incoming peer is using our own identity; refusing it. "+
+			"Both ends are configured with the same key: generate a separate key for each end",
+			"role", "daemon", "session", e.name, "peer", peer)
+		_ = conn.CloseWithError(tunnel.RoleMismatchCode, "peer presented our own identity")
+		return false
+	}
 
 	openCtx, cancel := context.WithTimeout(ctx, controlOpenTimeout)
 	cclient, err := openControlStream(openCtx, conn)

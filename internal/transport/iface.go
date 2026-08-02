@@ -100,6 +100,15 @@ type Transport interface {
 	Close() error
 }
 
+// AppCloseCoder is implemented by the error a transport reports when the peer
+// closed a connection with an application-level code. It exists so a caller can
+// recognise a specific close reason without knowing which transport produced
+// it, which keeps those checks working over the in-memory transport as well as
+// over QUIC.
+type AppCloseCoder interface {
+	AppCloseCode() (uint64, bool)
+}
+
 // LocalAddrProvider is an optional interface implemented by transports that can
 // report the local network address of their underlying socket. The dial loop
 // uses it to log the UDP source 4-tuple on each attempt, which is essential for

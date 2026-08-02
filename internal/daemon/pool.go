@@ -10,6 +10,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/control"
+	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
@@ -143,6 +144,11 @@ func NewRealPoolWithLiveness(
 		entries: make(map[string]SessionEntry),
 	}
 
+	// Our own identity, so an entry can refuse a peer that turns out to be
+	// using it. An unreadable key is not fatal here: the transport factory
+	// needs the same key and will fail with a better message.
+	ownPin, _ := identity.PinForKeyFile(cfg.Identity.KeyFile)
+
 	names := sortedServerNames(cfg.Servers)
 	for _, name := range names {
 		srv := cfg.Servers[name]
@@ -181,7 +187,7 @@ func NewRealPoolWithLiveness(
 				_ = t.Close()
 				return nil, fmt.Errorf("pool: listen for %q: %w", name, lerr)
 			}
-			p.entries[name] = newListenEntry(ctx, name, ln, t, sshPort, dockerPort, clock, liveness)
+			p.entries[name] = newListenEntry(ctx, name, ln, t, sshPort, dockerPort, ownPin, clock, liveness)
 			p.order = append(p.order, name)
 			continue
 		}

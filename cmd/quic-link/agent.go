@@ -210,8 +210,16 @@ func agentRun(ctx context.Context, listen, dial string, routes map[string]string
 		return fmt.Errorf("router: %w", err)
 	}
 
+	// Our own pin, so a peer that turns out to be using our key is refused
+	// rather than served as though it were a client.
+	ownPin, err := identity.PinForKey(key)
+	if err != nil {
+		return fmt.Errorf("own pin: %w", err)
+	}
+	serveOpts := tunnel.ServeOpts{WarnKeyAgeDays: idCfg.WarnKeyAgeDays, OwnPin: ownPin}
+
 	if dial != "" {
-		return agentDialOut(ctx, dial, tlsConf, rtr, authorized, idCfg)
+		return agentDialOut(ctx, dial, tlsConf, rtr, authorized, serveOpts)
 	}
 
 	// The agent binds a dual-stack ("udp") socket rather than an IPv4-only
@@ -259,7 +267,7 @@ func agentRun(ctx context.Context, listen, dial string, routes map[string]string
 		"targets", rtr.Targets(),
 		"authorized_clients", len(authorized),
 	)
-	return tunnel.Serve(ctx, ln, rtr, tunnel.ServeOpts{WarnKeyAgeDays: idCfg.WarnKeyAgeDays})
+	return tunnel.Serve(ctx, ln, rtr, serveOpts)
 }
 
 // agentDialOut runs the agent against a client that waits rather than connects.
@@ -272,7 +280,7 @@ func agentDialOut(
 	tlsConf *tls.Config,
 	rtr *router.Router,
 	authorized pinList,
-	idCfg config.Identity,
+	serveOpts tunnel.ServeOpts,
 ) error {
 	// Bind IPv4-only for the same reason every other initiating path in this
 	// binary does: a dual-stack socket on macOS silently fails to transmit to
@@ -298,8 +306,7 @@ func agentDialOut(
 		"authorized_clients", len(authorized),
 	)
 
-	return tunnel.DialAndServe(ctx, t, dial, rtr, backoff.Default(), tunnel.WallClock{},
-		tunnel.ServeOpts{WarnKeyAgeDays: idCfg.WarnKeyAgeDays})
+	return tunnel.DialAndServe(ctx, t, dial, rtr, backoff.Default(), tunnel.WallClock{}, serveOpts)
 }
 
 // checkKeyAge reads the key's .meta sidecar and warns (or refuses) when the

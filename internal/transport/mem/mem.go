@@ -389,6 +389,10 @@ type closeError struct {
 	msg  string
 }
 
+// AppCloseCode reports the application close code the peer used, so callers can
+// classify a close the same way they would over a real transport.
+func (e *closeError) AppCloseCode() (uint64, bool) { return e.code, true }
+
 func (e *closeError) Error() string {
 	return fmt.Sprintf("mem: conn closed with code %d: %s", e.code, e.msg)
 }
