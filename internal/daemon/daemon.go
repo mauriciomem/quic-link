@@ -45,6 +45,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/edge"
 	"github.com/mauriciomem/quic-link/internal/ipc"
@@ -261,15 +262,10 @@ type SessionEntry interface {
 }
 
 // ReconnectPolicy controls the backoff timing for a session that has dropped.
-// Extracted behind an interface so tests can drive reconnect sequences without
-// wall-clock waits.
-type ReconnectPolicy interface {
-	// Backoff returns the duration to wait before attempt number n (0-indexed).
-	Backoff(n int) time.Duration
-	// StableAfter returns the duration after which a connected session is
-	// considered stable, resetting the backoff counter on the next drop.
-	StableAfter() time.Duration
-}
+// It is an alias for the shared policy interface: whichever endpoint dials owns
+// reconnection, which is this side in forward mode and the agent in reverse
+// mode, so the schedule itself lives in a package both can import.
+type ReconnectPolicy = backoff.Policy
 
 // Clock abstracts time so status snapshots and backoff timers are deterministic
 // under test. Inject a fixed-time fake when building golden-file test data.
