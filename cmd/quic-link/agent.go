@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/router"
@@ -19,6 +21,7 @@ import (
 func newAgentCmd(a *app) *cobra.Command {
 	var (
 		listen     string
+		dial       string
 		sshAddr    string
 		dockerAddr string
 		keyFile    string
@@ -70,7 +73,8 @@ future release. Use "agent" in new deployments.`,
 			if agentCfg == nil {
 				// Only allocate if at least one agent flag was set; otherwise
 				// leave nil so Validate can report the block is missing.
-				if flags.Changed("listen") || flags.Changed("ssh-addr") ||
+				if flags.Changed("listen") || flags.Changed("dial") ||
+					flags.Changed("ssh-addr") ||
 					flags.Changed("docker-addr") || flags.Changed("route") ||
 					flags.Changed("key") || flags.Changed("authorized-client") {
 					agentCfg = &config.Agent{}
@@ -108,6 +112,16 @@ future release. Use "agent" in new deployments.`,
 						agentCfg.Routes[name] = addr
 					}
 				}
+				if flags.Changed("dial") {
+					agentCfg.Dial = dial
+					// A dial address and a listen address are two different
+					// answers to the same question. Taking the flag means
+					// dropping any listen address the file supplied, or
+					// validation would reject the merged view for setting both.
+					if !flags.Changed("listen") {
+						agentCfg.Listen = ""
+					}
+				}
 				if flags.Changed("key") {
 					a.cfg.Identity.KeyFile = keyFile
 				}
@@ -121,13 +135,6 @@ future release. Use "agent" in new deployments.`,
 
 			// Write back so Validate operates on the merged view.
 			a.cfg.Agent = agentCfg
-
-			// --- reverse-mode guard ------------------------------------
-			// Reverse mode (agent dials out) is not yet implemented.
-			if agentCfg != nil && agentCfg.Dial != "" && agentCfg.Listen == "" {
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("reverse mode (dial) is not yet supported; it runs in a later phase")
-			}
 
 			// --- validate the effective config -------------------------
 			// authorized_clients empty is always a hard error under RoleAgent
@@ -147,15 +154,16 @@ future release. Use "agent" in new deployments.`,
 				effectiveKey = keyFile
 			}
 
-			effectiveListen := agentCfg.Listen
 			effectiveClients := pinList(agentCfg.AuthorizedClients)
 			effectiveRoutes := agentCfg.Routes
 
-			return agentRun(cmd.Context(), effectiveListen, effectiveRoutes, effectiveKey, effectiveClients, a.cfg.Identity)
+			return agentRun(cmd.Context(), agentCfg.Listen, agentCfg.Dial,
+				effectiveRoutes, effectiveKey, effectiveClients, a.cfg.Identity)
 		},
 	}
 
-	cmd.Flags().StringVar(&listen, "listen", "", "UDP address to listen on (default :443)")
+	cmd.Flags().StringVar(&listen, "listen", "", "UDP address to wait for connections on (default :443)")
+	cmd.Flags().StringVar(&dial, "dial", "", "UDP address of a client that waits for this agent to connect (mutually exclusive with --listen)")
 	cmd.Flags().StringVar(&sshAddr, "ssh-addr", "tcp://127.0.0.1:22", "ssh route address (tcp://host:port)")
 	cmd.Flags().StringVar(&dockerAddr, "docker-addr", "unix:///var/run/docker.sock", "docker daemon address (unix:///path or tcp://host:port)")
 	cmd.Flags().Var(&routes, "route", "additional route as NAME=ADDR (repeatable; tcp://host:port or unix:///path)")
@@ -170,7 +178,7 @@ future release. Use "agent" in new deployments.`,
 // routes is the full set of route overrides to hand to the router; it is
 // merged over the router's built-in ssh and docker defaults. idCfg carries the
 // key-age hygiene settings from the identity config block.
-func agentRun(ctx context.Context, listen string, routes map[string]string, keyFile string, authorized pinList, idCfg config.Identity) error {
+func agentRun(ctx context.Context, listen, dial string, routes map[string]string, keyFile string, authorized pinList, idCfg config.Identity) error {
 	// Check the age of the local identity key before binding any network
 	// resources. An absent .meta file means the key age is unknown — we
 	// silently skip the check rather than treating the absence as an alarm.
@@ -184,7 +192,15 @@ func agentRun(ctx context.Context, listen string, routes map[string]string, keyF
 	if err != nil {
 		return fmt.Errorf("load identity key: %w", err)
 	}
-	tlsConf, err := identity.ServerTLS(key, authorized)
+	// The set of identities we accept is the same either way: which end opens
+	// the connection does not change who we are willing to talk to. Only the
+	// shape of the TLS configuration differs.
+	var tlsConf *tls.Config
+	if dial != "" {
+		tlsConf, err = identity.AgentDialTLS(key, authorized)
+	} else {
+		tlsConf, err = identity.AgentListenTLS(key, authorized)
+	}
 	if err != nil {
 		return fmt.Errorf("TLS config: %w", err)
 	}
@@ -192,6 +208,10 @@ func agentRun(ctx context.Context, listen string, routes map[string]string, keyF
 	rtr, err := router.New(routes, router.AllowAll{})
 	if err != nil {
 		return fmt.Errorf("router: %w", err)
+	}
+
+	if dial != "" {
+		return agentDialOut(ctx, dial, tlsConf, rtr, authorized, idCfg)
 	}
 
 	// The agent binds a dual-stack ("udp") socket rather than an IPv4-only
@@ -240,6 +260,46 @@ func agentRun(ctx context.Context, listen string, routes map[string]string, keyF
 		"authorized_clients", len(authorized),
 	)
 	return tunnel.Serve(ctx, ln, rtr, tunnel.ServeOpts{WarnKeyAgeDays: idCfg.WarnKeyAgeDays})
+}
+
+// agentDialOut runs the agent against a client that waits rather than connects.
+// The route table and everything below it are unchanged; what is different is
+// that this side opens the connection, and so is the side responsible for
+// reopening it.
+func agentDialOut(
+	ctx context.Context,
+	dial string,
+	tlsConf *tls.Config,
+	rtr *router.Router,
+	authorized pinList,
+	idCfg config.Identity,
+) error {
+	// Bind IPv4-only for the same reason every other initiating path in this
+	// binary does: a dual-stack socket on macOS silently fails to transmit to
+	// on-link IPv4 neighbours, because the first outbound datagram has no
+	// prior context for the OS to route from. The agent's listening socket is
+	// dual-stack precisely because it is not initiating, so the convention
+	// there is the opposite one and must not be copied here.
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		return fmt.Errorf("UDP socket: %w", err)
+	}
+	defer udpConn.Close()
+
+	t, err := transport.NewQUICTransport(udpConn, tlsConf, nil)
+	if err != nil {
+		return fmt.Errorf("transport: %w", err)
+	}
+	defer t.Close()
+
+	slog.Info("quic-link agent connecting out",
+		"dial", dial,
+		"targets", rtr.Targets(),
+		"authorized_clients", len(authorized),
+	)
+
+	return tunnel.DialAndServe(ctx, t, dial, rtr, backoff.Default(), tunnel.WallClock{},
+		tunnel.ServeOpts{WarnKeyAgeDays: idCfg.WarnKeyAgeDays})
 }
 
 // checkKeyAge reads the key's .meta sidecar and warns (or refuses) when the
