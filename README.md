@@ -1,6 +1,6 @@
 # quic-link
 
-quic-link is a single Go binary — a client-side **daemon** and a server-side
+quic-link is a single binary — a client-side **daemon** and a server-side
 **agent** — that multiplexes named services over one mutually-authenticated
 QUIC session. Each end holds a key and pins the other's public key during the
 handshake.
@@ -39,13 +39,15 @@ with the new pin).
 ```bash
 quic-link agent \
   --listen :443 \
-  --service-addr 127.0.0.1:22 \
   --authorized-client <client-pin>
 ```
 
 `--authorized-client` is repeatable; at least one pin is required (the agent
-refuses to start with an empty set). `--docker-addr` overrides the Docker socket
-(default `unix:///var/run/docker.sock`).
+refuses to start with an empty set). The built-in `ssh` route already defaults
+to `tcp://127.0.0.1:22`; override it with `--ssh-addr` if sshd listens
+elsewhere. `--docker-addr` overrides the Docker socket (default
+`unix:///var/run/docker.sock`). `--route NAME=ADDR` (repeatable) adds any
+further route, for example `--route pg-app=tcp://127.0.0.1:5432`.
 
 **3. On the client, describe the server in a config file**
 
@@ -150,12 +152,6 @@ activity` even though the network is fine.
 - Grant your terminal (Terminal, iTerm, VS Code) under **System Settings →
   Privacy & Security → Local Network**, then re-run.
 - Running under `sudo` bypasses the check — useful to confirm this is the cause.
-
-### `--service-addr` is a dial target, not a bind address
-
-`agent --service-addr` is the address the agent *dials* to reach sshd. Use
-`127.0.0.1:22`, not `0.0.0.0:22` (`0.0.0.0` is a wildcard listen address and is
-not a valid dial target).
 
 ---
 

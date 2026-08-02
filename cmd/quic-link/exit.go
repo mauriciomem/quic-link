@@ -40,8 +40,12 @@ func exitCodeForError(err error) int {
 	var ownerRunning *errOwnerRunningType
 	var squatter *errSquatterType
 	var dockerNotReady *errDockerNotReady
+	var daemonNotRunning *errDaemonNotRunning
 	switch {
 	case errors.Is(err, transport.ErrUnreachable):
+		return 3
+	case errors.As(err, &daemonNotRunning):
+		// fwd's own no-fallback rule: no daemon was ever reached.
 		return 3
 	case errors.As(err, &dockerNotReady):
 		// docker-env's zero-port rule: keeps "eval $(quic-link docker-env)"

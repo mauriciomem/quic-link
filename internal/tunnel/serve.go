@@ -270,6 +270,23 @@ func (c *controlState) isOpen() bool {
 	return c.open
 }
 
+// UnknownTargetMessage returns the exact wording used for an unknown-target
+// refusal (the Msg carried alongside proto.StatusUnknownTarget). It is
+// exported so a client-side caller — fwd's startup preflight, specifically —
+// can recognize this one specific case among the several distinct causes
+// grouped under exit code 5 (unknown target, dial failure, draining) without
+// guessing at the agent's free-text message from the client side. Changing
+// this string's wording is not a wire-protocol change: Response.Msg has
+// always been implementation-defined free text, not a field whose bytes or
+// semantics are part of the frame layout.
+func UnknownTargetMessage(target string) string {
+	return unknownTargetMessage(target)
+}
+
+func unknownTargetMessage(target string) string {
+	return fmt.Sprintf("no target %q", target)
+}
+
 // replyDialError maps a router.Dial failure to the protocol response and
 // returns an error for logging. Expected refusals (unknown target,
 // unauthorized) return nil so they do not log loudly; a genuine dial failure is
@@ -279,7 +296,7 @@ func replyDialError(stream transport.Stream, h proto.Header, err error) error {
 	case errors.Is(err, router.ErrUnknownTarget):
 		_ = proto.WriteResponse(stream, proto.Response{
 			Status: proto.StatusUnknownTarget,
-			Msg:    fmt.Sprintf("no target %q", h.Target),
+			Msg:    unknownTargetMessage(h.Target),
 		})
 		_ = stream.Close()
 		return nil

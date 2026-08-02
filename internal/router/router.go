@@ -48,6 +48,13 @@ func New(overrides map[string]string, policy Policy) (*Router, error) {
 	}
 	routes := make(map[string]route, len(merged))
 	for name, raw := range merged {
+		// Defense in depth: the --route flag parser and the config
+		// validators are expected to catch a bad name first, but the
+		// route table itself must never silently accept one that slipped
+		// through some other call site.
+		if err := ValidateRouteName(name); err != nil {
+			return nil, fmt.Errorf("route %q: %w", name, err)
+		}
 		network, address, err := parseAddr(raw)
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", name, err)

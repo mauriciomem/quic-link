@@ -470,6 +470,70 @@ docker   = "unix:///var/run/docker.sock"
 	}
 }
 
+// TestBadRouteNameHardError verifies that a route name violating the shared
+// naming rule (letters/digits/dash/underscore/dot, <=64 bytes) is a hard
+// error under the agent role, wrapping ErrInvalid so it exits 2 rather than
+// only being caught later inside router.New (which would exit 1).
+func TestBadRouteNameHardError(t *testing.T) {
+	unsetAllQLEnv(t)
+	pin := mustPin(t)
+	path := writeConfig(t, `
+schema = 1
+[agent]
+listen = ":7443"
+authorized_clients = ["`+pin+`"]
+[agent.routes]
+"pg:app" = "tcp://127.0.0.1:5432"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, err = cfg.Validate(config.RoleAgent)
+	if err == nil {
+		t.Fatal("expected error for invalid route name, got nil")
+	}
+	if !errors.Is(err, config.ErrInvalid) {
+		t.Errorf("error does not wrap ErrInvalid: %v", err)
+	}
+}
+
+// TestBadRouteNameIsWarningUnderClientRole verifies the converse: the same
+// bad route name is a warning, not a hard error, when the active role is
+// client (the agent block is present but inactive).
+func TestBadRouteNameIsWarningUnderClientRole(t *testing.T) {
+	unsetAllQLEnv(t)
+	pin := mustPin(t)
+	path := writeConfig(t, `
+schema = 1
+[servers.s1]
+addr = "1.2.3.4:7443"
+pin  = "`+pin+`"
+[agent]
+listen = ":7443"
+authorized_clients = ["`+pin+`"]
+[agent.routes]
+"pg:app" = "tcp://127.0.0.1:5432"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	warnings, err := cfg.Validate(config.RoleClient)
+	if err != nil {
+		t.Fatalf("Validate(RoleClient): unexpected hard error: %v", err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "pg:app") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about invalid route name pg:app, got warnings: %v", warnings)
+	}
+}
+
 // ---- precedence matrix ------------------------------------------------------
 
 // TestPrecedenceDefaultLessThanFileLessThanEnv verifies the ordering:

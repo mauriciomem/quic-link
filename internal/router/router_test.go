@@ -50,6 +50,61 @@ func TestParseAddr(t *testing.T) {
 	}
 }
 
+// TestNewRejectsBadRouteName verifies that New validates every route name
+// through ValidateRouteName as defense in depth, even though the flag and
+// config call sites are expected to catch a bad name first. The error must
+// not be silently accepted here: a name that would be rejected everywhere
+// else must not slip through router construction.
+func TestNewRejectsBadRouteName(t *testing.T) {
+	_, err := New(map[string]string{"pg:app": "tcp://127.0.0.1:5432"}, nil)
+	if err == nil {
+		t.Fatal("New with an invalid route name: want error, got nil")
+	}
+}
+
+// TestNew_OverrideWinsOverBuiltin proves that an override for a built-in
+// route name ("ssh") actually takes effect: Dial must reach the overridden
+// address, not the tcp://127.0.0.1:22 built-in default.
+func TestNew_OverrideWinsOverBuiltin(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "override.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("unix listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) { defer c.Close(); io.Copy(c, c) }(c) //nolint:errcheck
+		}
+	}()
+
+	r, err := New(map[string]string{"ssh": "unix://" + sockPath}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	conn, err := r.Dial(context.Background(), Identity{}, proto.Header{Kind: proto.KindTCP, Target: "ssh"})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	msg := []byte("override wins")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(msg) {
+		t.Fatalf("echo mismatch: got %q want %q — the built-in tcp://127.0.0.1:22 ssh route was used instead of the override", got, msg)
+	}
+}
+
 func TestDialUnknownTarget(t *testing.T) {
 	r, err := New(nil, nil)
 	if err != nil {

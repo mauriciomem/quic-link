@@ -90,6 +90,7 @@ Examples:
 		newSSHCmd(a),
 		newDockerEnvCmd(a),
 		newAttachCmd(a),
+		newFwdCmd(a),
 		newVersionCmd(),
 	)
 

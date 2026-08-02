@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mauriciomem/quic-link/internal/identity"
+	"github.com/mauriciomem/quic-link/internal/router"
 )
 
 // errUsage marks an error as a usage/validation failure so main() exits with
@@ -87,6 +89,66 @@ func (p *pinList) Set(v string) error {
 // Type returns the pflag value type name, satisfying the pflag.Value interface
 // (cobra uses pflag, which requires this method in addition to String/Set).
 func (p *pinList) Type() string { return "pin" }
+
+// routeList collects repeatable --route NAME=ADDR flags into a name->address
+// map, following the pinList precedent above: each value is parsed and
+// validated the moment it is set, rather than deferred to a later pass, and
+// a duplicate route name is rejected immediately rather than silently
+// overwriting the earlier value.
+type routeList struct {
+	values map[string]string
+}
+
+// String renders the collected routes as a sorted, comma-separated list of
+// NAME=ADDR pairs; only used for cobra's own help/usage output.
+func (r *routeList) String() string {
+	if len(r.values) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(r.values))
+	for name := range r.values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = name + "=" + r.values[name]
+	}
+	return strings.Join(parts, ",")
+}
+
+// Set parses one "NAME=ADDR" value, validating the name and address exactly
+// as the router and config-file paths do, and rejects a second value for a
+// name already set in this invocation.
+func (r *routeList) Set(v string) error {
+	name, addr, found := strings.Cut(v, "=")
+	if !found {
+		return fmt.Errorf("invalid --route value %q: expected NAME=ADDR", v)
+	}
+	if name == "" {
+		return fmt.Errorf("invalid --route value %q: route name must not be empty", v)
+	}
+	if addr == "" {
+		return fmt.Errorf("invalid --route value %q: route address must not be empty", v)
+	}
+	if err := router.ValidateRouteName(name); err != nil {
+		return fmt.Errorf("invalid --route value %q: %w", v, err)
+	}
+	if _, _, err := router.ParseAddr(addr); err != nil {
+		return fmt.Errorf("invalid --route value %q: %w", v, err)
+	}
+	if r.values == nil {
+		r.values = make(map[string]string)
+	}
+	if existing, ok := r.values[name]; ok {
+		return fmt.Errorf("duplicate --route for %q (already set to %q)", name, existing)
+	}
+	r.values[name] = addr
+	return nil
+}
+
+// Type returns the pflag value type name, satisfying the pflag.Value interface.
+func (r *routeList) Type() string { return "route" }
 
 // clientTLSFromFlags loads the Ed25519 identity key and builds the client-side
 // pinning tls.Config for the expected server pin.  Shared by connect and ping.

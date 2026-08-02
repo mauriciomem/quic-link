@@ -444,9 +444,13 @@ func validateAgent(c *Config) error {
 		}
 	}
 
-	// Validate each route address using the same parser the router uses, so
-	// config validation and runtime behavior are guaranteed consistent.
+	// Validate each route name and address using the same validator/parser
+	// the router and the --route flag use, so a bad name or address is
+	// rejected identically no matter where it was set.
 	for target, addr := range a.Routes {
+		if err := router.ValidateRouteName(target); err != nil {
+			return fmt.Errorf("agent.routes: %v: %w", err, ErrInvalid)
+		}
 		if _, _, err := router.ParseAddr(addr); err != nil {
 			return fmt.Errorf("agent.routes.%s: %v: %w", target, err, ErrInvalid)
 		}
@@ -479,6 +483,9 @@ func validateAgentWarnings(a *Agent) []string {
 	}
 
 	for target, addr := range a.Routes {
+		if err := router.ValidateRouteName(target); err != nil {
+			w = append(w, fmt.Sprintf("agent (inactive for client role): routes: %v", err))
+		}
 		if _, _, err := router.ParseAddr(addr); err != nil {
 			w = append(w, fmt.Sprintf("agent (inactive for client role): routes.%s: %v", target, err))
 		}

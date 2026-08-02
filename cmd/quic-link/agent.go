@@ -18,11 +18,12 @@ import (
 
 func newAgentCmd(a *app) *cobra.Command {
 	var (
-		listen      string
-		serviceAddr string
-		dockerAddr  string
-		keyFile     string
-		authorized  pinList
+		listen     string
+		sshAddr    string
+		dockerAddr string
+		keyFile    string
+		authorized pinList
+		routes     routeList
 	)
 
 	cmd := &cobra.Command{
@@ -44,6 +45,23 @@ future release. Use "agent" in new deployments.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cmd.Flags()
 
+			// --- mutual exclusion: --ssh-addr/--docker-addr vs --route ---
+			// --ssh-addr and --route ssh=ADDR name the exact same route
+			// entry, and so do --docker-addr and --route docker=ADDR. A
+			// silent last-wins precedence between two flags that mean the
+			// same thing would be a trap the user has no way to see coming,
+			// so giving both in one invocation is a usage error.
+			if flags.Changed("ssh-addr") {
+				if existing, ok := routes.values["ssh"]; ok {
+					return usageErrorf("--ssh-addr and --route ssh=%s both set the ssh route; use only one", existing)
+				}
+			}
+			if flags.Changed("docker-addr") {
+				if existing, ok := routes.values["docker"]; ok {
+					return usageErrorf("--docker-addr and --route docker=%s both set the docker route; use only one", existing)
+				}
+			}
+
 			// --- build the effective agent config ----------------------
 			// If the config file has an [agent] block, start from it.
 			// If any agent flag was changed, allocate an Agent struct so
@@ -52,9 +70,9 @@ future release. Use "agent" in new deployments.`,
 			if agentCfg == nil {
 				// Only allocate if at least one agent flag was set; otherwise
 				// leave nil so Validate can report the block is missing.
-				if flags.Changed("listen") || flags.Changed("service-addr") ||
-					flags.Changed("docker-addr") || flags.Changed("key") ||
-					flags.Changed("authorized-client") {
+				if flags.Changed("listen") || flags.Changed("ssh-addr") ||
+					flags.Changed("docker-addr") || flags.Changed("route") ||
+					flags.Changed("key") || flags.Changed("authorized-client") {
 					agentCfg = &config.Agent{}
 				}
 			}
@@ -70,17 +88,25 @@ future release. Use "agent" in new deployments.`,
 					// so there is no accidental merging of stale pins.
 					agentCfg.AuthorizedClients = []string(authorized)
 				}
-				if flags.Changed("service-addr") {
+				if flags.Changed("ssh-addr") {
 					if agentCfg.Routes == nil {
 						agentCfg.Routes = make(map[string]string)
 					}
-					agentCfg.Routes["ssh"] = "tcp://" + serviceAddr
+					agentCfg.Routes["ssh"] = sshAddr
 				}
 				if flags.Changed("docker-addr") {
 					if agentCfg.Routes == nil {
 						agentCfg.Routes = make(map[string]string)
 					}
 					agentCfg.Routes["docker"] = dockerAddr
+				}
+				if flags.Changed("route") {
+					if agentCfg.Routes == nil {
+						agentCfg.Routes = make(map[string]string)
+					}
+					for name, addr := range routes.values {
+						agentCfg.Routes[name] = addr
+					}
 				}
 				if flags.Changed("key") {
 					a.cfg.Identity.KeyFile = keyFile
@@ -130,8 +156,9 @@ future release. Use "agent" in new deployments.`,
 	}
 
 	cmd.Flags().StringVar(&listen, "listen", "", "UDP address to listen on (default :443)")
-	cmd.Flags().StringVar(&serviceAddr, "service-addr", "127.0.0.1:22", "TCP address of the ssh service (host:port)")
+	cmd.Flags().StringVar(&sshAddr, "ssh-addr", "tcp://127.0.0.1:22", "ssh route address (tcp://host:port)")
 	cmd.Flags().StringVar(&dockerAddr, "docker-addr", "unix:///var/run/docker.sock", "docker daemon address (unix:///path or tcp://host:port)")
+	cmd.Flags().Var(&routes, "route", "additional route as NAME=ADDR (repeatable; tcp://host:port or unix:///path)")
 	cmd.Flags().StringVar(&keyFile, "key", defaultKeyPath(), "path to the Ed25519 identity key (PKCS#8 PEM)")
 	cmd.Flags().Var(&authorized, "authorized-client", "authorized client pin (repeatable; at least one required)")
 
