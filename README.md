@@ -45,9 +45,12 @@ quic-link agent \
 `--authorized-client` is repeatable; at least one pin is required (the agent
 refuses to start with an empty set). The built-in `ssh` route already defaults
 to `tcp://127.0.0.1:22`; override it with `--ssh-addr` if sshd listens
-elsewhere. `--docker-addr` overrides the Docker socket (default
-`unix:///var/run/docker.sock`). `--route NAME=ADDR` (repeatable) adds any
-further route, for example `--route pg-app=tcp://127.0.0.1:5432`.
+elsewhere, for example `--ssh-addr tcp://127.0.0.1:2222`. `--docker-addr`
+overrides the Docker socket (default `unix:///var/run/docker.sock`).
+`--route NAME=ADDR` (repeatable) adds any further route, for example
+`--route pg-app=tcp://127.0.0.1:5432`. All three flags take the same address
+form, `tcp://host:port` or `unix:///absolute/path`; a bare `host:port` with no
+scheme is rejected.
 
 **3. On the client, describe the server in a config file**
 
