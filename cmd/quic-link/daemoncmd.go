@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -124,23 +126,54 @@ Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then exit.`,
 	return cmd
 }
 
-// refuseReverseMode reports a usage error when the named server is configured
-// for reverse mode, where the agent dials in rather than being dialed. A
-// listen address with no dial address is exactly that shape. Running it is not
-// implemented yet, and the failure without this check is silent and confusing:
-// the session entry would be built with an empty address and would retry
-// forever, logging a reconnect line that never resolves.
+// bindServerSocket binds the UDP socket a server needs, which differs by
+// direction.
 //
-// Both the scoped and the unscoped daemon paths call this so the two give a
-// user the identical message; it is also the single place to delete once
-// reverse mode is implemented.
-func refuseReverseMode(name string, srv config.Server) error {
-	if srv.Listen == "" || srv.Addr != "" {
-		return nil
+// A server we connect out to gets an ephemeral local port, bound IPv4-only:
+// a dual-stack socket on macOS silently fails to transmit to on-link IPv4
+// neighbours because no address resolution happens for the mapped form. A
+// server that connects to us gets the address the operator configured, bound
+// dual-stack so it is reachable over either family, which is the same choice
+// the agent's own listener makes for the same reason.
+func bindServerSocket(srvName string, srv config.Server, waiting bool) (*net.UDPConn, error) {
+	if !waiting {
+		udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		if err != nil {
+			return nil, fmt.Errorf("UDP socket for server %q: %w", srvName, err)
+		}
+		return udpConn, nil
 	}
-	return usageErrorf("server %q uses reverse mode (listen); "+
-		"reverse mode is not yet supported and will be implemented in a later release",
-		name)
+
+	addr, err := net.ResolveUDPAddr("udp", srv.Listen)
+	if err != nil {
+		return nil, usageErrorf("server %q: cannot understand listen address %q: %v",
+			srvName, srv.Listen, err)
+	}
+	udpConn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return nil, classifyListenBindError(srvName, srv.Listen, err)
+	}
+	return udpConn, nil
+}
+
+// classifyListenBindError turns a failed bind into a message an operator can
+// act on. The classification is by error value, never by matching the text of
+// the message, which varies by platform.
+//
+// A permission failure deliberately never suggests running as root. Doing so
+// would put the long-lived identity key inside a privileged process to solve a
+// problem that choosing a different port also solves.
+func classifyListenBindError(srvName, listen string, err error) error {
+	switch {
+	case errors.Is(err, syscall.EADDRINUSE):
+		return usageErrorf("server %q: listen address %s is already in use; "+
+			"choose a different port or stop whatever is using it", srvName, listen)
+	case errors.Is(err, syscall.EACCES):
+		return usageErrorf("server %q: binding %s needs privileges this process does not have; "+
+			"choose a port of 1024 or above instead", srvName, listen)
+	default:
+		return fmt.Errorf("server %q: bind listen address %s: %w", srvName, listen, err)
+	}
 }
 
 // runDaemonOwner is the shared implementation used by both the daemon command
@@ -162,36 +195,11 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 			return usageErrorf("server %q is disabled; set enabled = true in the config to use it",
 				scope)
 		}
-		if err := refuseReverseMode(scope, srv); err != nil {
-			return err
-		}
 		// Narrow the config to only the requested server. The original cfg is
 		// not mutated — we build a shallow copy with a single-entry Servers map.
 		narrowed := *cfg
 		narrowed.Servers = map[string]config.Server{scope: srv}
 		cfg = &narrowed
-	} else {
-		// Unscoped: this daemon manages every enabled server, so every one of
-		// them must be a mode we can actually run. Checked here, before the
-		// socket path is resolved and before any other I/O, so the refusal
-		// costs nothing and leaves nothing behind. Names are visited in sorted
-		// order so a config with more than one reverse-mode server always
-		// reports the same one rather than a random pick per run.
-		names := make([]string, 0, len(cfg.Servers))
-		for name := range cfg.Servers {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			srv := cfg.Servers[name]
-			if srv.Enabled != nil && !*srv.Enabled {
-				// A disabled server is never managed, so its mode is moot.
-				continue
-			}
-			if err := refuseReverseMode(name, srv); err != nil {
-				return err
-			}
-		}
 	}
 
 	// Resolve the socket path (also creates and verifies the directory).
@@ -263,18 +271,33 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 		if err != nil {
 			return nil, fmt.Errorf("invalid pin for server %q: %w", srvName, err)
 		}
-		tlsConf, err := identity.ClientTLS(key, pin)
+
+		// Both shapes verify the same single expected server pin, because our
+		// logical role does not change with the direction. What changes is that
+		// a socket which accepts connections must require a certificate from
+		// the peer, and one that opens them must not.
+		waiting := srv.Listen != "" && srv.Addr == ""
+
+		var tlsConf *tls.Config
+		if waiting {
+			tlsConf, err = identity.ClientListenTLS(key, pin)
+		} else {
+			tlsConf, err = identity.ClientDialTLS(key, pin)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("TLS config for server %q: %w", srvName, err)
 		}
-		// Bind a udp4 (not dual-stack) socket for outbound QUIC. On macOS a
-		// dual-stack socket fails to transmit IPv4-mapped datagrams to on-link
-		// neighbors because no ARP is performed.
-		udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+
+		udpConn, err := bindServerSocket(srvName, srv, waiting)
 		if err != nil {
-			return nil, fmt.Errorf("UDP socket for server %q: %w", srvName, err)
+			return nil, err
 		}
-		t, err := transport.NewQUICTransport(udpConn, tlsConf, nil)
+		var t transport.Transport
+		if waiting {
+			t, err = transport.NewQUICListenTransport(udpConn, tlsConf, nil)
+		} else {
+			t, err = transport.NewQUICTransport(udpConn, tlsConf, nil)
+		}
 		if err != nil {
 			udpConn.Close()
 			return nil, fmt.Errorf("transport for server %q: %w", srvName, err)

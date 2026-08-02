@@ -35,9 +35,11 @@ const (
 	alertNoAppProtocol = 0x178
 )
 
-// defaultQUICConfig returns the recommended quic.Config for quic-link.
+// DefaultQUICConfig returns the recommended quic.Config for quic-link.
 // DPLPMTUD (RFC 8899) remains enabled (DisablePathMTUDiscovery is false).
-func defaultQUICConfig() *quic.Config {
+// It is exported so a caller that needs to adjust one setting starts from the
+// same baseline rather than assembling its own.
+func DefaultQUICConfig() *quic.Config {
 	return &quic.Config{
 		// Send a PING every 15 s so idle connections are not dropped by NAT.
 		KeepAlivePeriod: 15 * time.Second,
@@ -60,19 +62,37 @@ type QUICTransport struct {
 
 // NewQUICTransport creates a QUICTransport from a pre-bound *net.UDPConn.
 // tlsConf must not be nil; set NextProtos to []string{ALPN} on both sides.
-// quicConf may be nil to use the defaults returned by defaultQUICConfig.
+// quicConf may be nil to use the defaults returned by DefaultQUICConfig.
 func NewQUICTransport(conn *net.UDPConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
 	if tlsConf == nil {
 		return nil, fmt.Errorf("tlsConf must not be nil")
 	}
 	if quicConf == nil {
-		quicConf = defaultQUICConfig()
+		quicConf = DefaultQUICConfig()
 	}
 	return &QUICTransport{
 		tlsConf:  tlsConf,
 		quicConf: quicConf,
 		inner:    &quic.Transport{Conn: conn},
 	}, nil
+}
+
+// NewQUICListenTransport is NewQUICTransport for a socket that accepts
+// connections from anywhere. It additionally asks a source address we have not
+// seen before to prove it can receive at the address it claims, before any
+// handshake state is kept for it.
+//
+// That costs a legitimate peer one extra round trip when it first connects, and
+// in exchange a flood of forged source addresses is absorbed without allocating
+// per-attempt state for each one. It matters most for a socket that sits on a
+// workstation rather than a server, which is exactly the case this exists for.
+func NewQUICListenTransport(conn *net.UDPConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
+	t, err := NewQUICTransport(conn, tlsConf, quicConf)
+	if err != nil {
+		return nil, err
+	}
+	t.inner.VerifySourceAddress = func(net.Addr) bool { return true }
+	return t, nil
 }
 
 // Listen implements Transport.  The listen address is determined by the

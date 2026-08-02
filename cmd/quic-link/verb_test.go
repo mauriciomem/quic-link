@@ -222,25 +222,9 @@ enabled = false
 	}
 }
 
-// TestConnectReverseServer verifies that a server with listen= (reverse mode)
-// yields a "not yet supported" message and exit 2.
-func TestConnectReverseServer(t *testing.T) {
-	unsetQLEnvForTest(t)
-	pin := mustTestPin(t)
-	path := writeTestConfig(t, `
-schema = 1
-[servers.rev]
-listen = ":7443"
-pin    = "`+pin+`"
-`)
-	err := runVerb([]string{"--config", path, "connect", "rev"})
-	if exitCode(err) != 2 {
-		t.Errorf("expected exit 2 for reverse-mode server, got %d: %v", exitCode(err), err)
-	}
-	if err == nil || !strings.Contains(err.Error(), "not yet supported") {
-		t.Errorf("error should mention 'not yet supported', got: %v", err)
-	}
-}
+// Reverse mode is implemented; connect no longer refuses it. What that path
+// still owes an operator is covered in reverse_guard_test.go, which checks the
+// failures that remain real: an unparseable, taken, or privileged address.
 
 // ---- ping resolution tests --------------------------------------------------
 
