@@ -58,57 +58,109 @@ func SelfSignedCarrier(key ed25519.PrivateKey) (tls.Certificate, error) {
 	}, nil
 }
 
-// ServerTLS builds the agent-side pinning tls.Config: it presents key's carrier
-// certificate, requires the client to present a certificate (RequireAnyClientCert
-// — NOT RequireAndVerifyClientCert, because we do our OWN verification), and
-// accepts the peer only if its pin is in authorized. authorized must be
-// non-empty: there is no unauthenticated listener.
-func ServerTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
-	if len(authorized) == 0 {
-		return nil, errors.New("identity: server requires at least one authorized client pin")
+// transportMode selects the TLS shape, which follows who opens the connection
+// rather than which logical role the endpoint plays. The two axes are
+// independent: a client can listen and an agent can dial.
+type transportMode int
+
+const (
+	// modeDial is for the endpoint that opens the connection. It presents its
+	// certificate and skips chain verification so the pin callback is reached
+	// on the peer's certificate.
+	modeDial transportMode = iota
+	// modeListen is for the endpoint that accepts. It presents its certificate
+	// and REQUIRES one from the peer, because a listener that does not request
+	// a peer certificate never runs its pin callback and so authenticates
+	// nobody.
+	modeListen
+)
+
+// pinningTLS is the single place the TLS knobs are set. Every constructor below
+// funnels through it so the two axes cannot drift apart: mode decides the
+// shape, allowed decides which identities are acceptable.
+func pinningTLS(key ed25519.PrivateKey, mode transportMode, allowed []string) (*tls.Config, error) {
+	if len(allowed) == 0 {
+		return nil, errors.New("identity: at least one expected peer pin is required")
+	}
+	for _, p := range allowed {
+		if p == "" {
+			return nil, errors.New("identity: expected peer pin must not be empty")
+		}
 	}
 	carrier, err := SelfSignedCarrier(key)
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[string]struct{}, len(authorized))
-	for _, p := range authorized {
-		allowed[p] = struct{}{}
+	set := make(map[string]struct{}, len(allowed))
+	for _, p := range allowed {
+		set[p] = struct{}{}
 	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{carrier},
-		// Request a client cert but skip chain verification; the pin check in
-		// VerifyPeerCertificate is our (stricter) replacement.
-		ClientAuth:            tls.RequireAnyClientCert,
-		VerifyPeerCertificate: verifyPin(allowed),
+
+	conf := &tls.Config{
+		Certificates:          []tls.Certificate{carrier},
+		VerifyPeerCertificate: verifyPin(set),
 		MinVersion:            tls.VersionTLS13,
 		NextProtos:            []string{transport.ALPN},
-	}, nil
+	}
+	switch mode {
+	case modeListen:
+		// Request a peer certificate but skip chain verification; the pin check
+		// in VerifyPeerCertificate is our stricter replacement. Without this the
+		// callback is never invoked and any peer completes the handshake.
+		conf.ClientAuth = tls.RequireAnyClientCert
+	case modeDial:
+		// Disables chain verification only, so the callback is reached and can
+		// do an exact key match, which is stricter than chain verification.
+		conf.InsecureSkipVerify = true //nolint:gosec // replaced by the exact-pin check in verifyPin
+	}
+	return conf, nil
 }
 
-// ClientTLS builds the client-side pinning tls.Config: it presents key's carrier
-// certificate and accepts the server only if its pin equals expectedServerPin.
-// InsecureSkipVerify is REQUIRED so the callback is reached — it disables X.509
-// CHAIN verification, which we replace with an exact-key match (stricter, not
-// weaker).
+// ClientDialTLS builds the config for a client that dials its agent: it
+// presents its own certificate and accepts the peer only if the peer's pin
+// equals the configured server pin.
+func ClientDialTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
+	return pinningTLS(key, modeDial, []string{expectedServerPin})
+}
+
+// ClientListenTLS builds the config for a client that waits for its agent to
+// connect to it. The pin set is the same single server pin a dialing client
+// expects; only the shape differs, because this endpoint accepts rather than
+// opens the connection and so must require a certificate from the peer.
+func ClientListenTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
+	return pinningTLS(key, modeListen, []string{expectedServerPin})
+}
+
+// AgentListenTLS builds the config for an agent that waits for clients to
+// connect: it presents its certificate, requires one from the peer, and accepts
+// only pins in authorized, which must be non-empty because there is no
+// unauthenticated listener.
+func AgentListenTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
+	return pinningTLS(key, modeListen, authorized)
+}
+
+// AgentDialTLS builds the config for an agent that connects out to its client.
+// It verifies the peer against the same authorized-client set it would use when
+// listening: the direction of the connection changes the TLS shape, not which
+// identities the agent trusts.
+func AgentDialTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
+	return pinningTLS(key, modeDial, authorized)
+}
+
+// ServerTLS builds the agent-side listening config.
+//
+// Deprecated: use AgentListenTLS. The old name reads as a transport role when
+// what it actually encodes is an agent that listens.
+func ServerTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
+	return AgentListenTLS(key, authorized)
+}
+
+// ClientTLS builds the client-side dialing config.
+//
+// Deprecated: use ClientDialTLS. The old name hides that the shape follows the
+// transport direction, not the logical role.
 func ClientTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
-	if expectedServerPin == "" {
-		return nil, errors.New("identity: client requires an expected server pin")
-	}
-	carrier, err := SelfSignedCarrier(key)
-	if err != nil {
-		return nil, err
-	}
-	allowed := map[string]struct{}{expectedServerPin: {}}
-	return &tls.Config{
-		Certificates: []tls.Certificate{carrier},
-		// Disables chain verification only; VerifyPeerCertificate below does an
-		// exact pin match — stricter than chain verification.
-		InsecureSkipVerify:    true, //nolint:gosec // replaced by the exact-pin check in verifyPin
-		VerifyPeerCertificate: verifyPin(allowed),
-		MinVersion:            tls.VersionTLS13,
-		NextProtos:            []string{transport.ALPN},
-	}, nil
+	return ClientDialTLS(key, expectedServerPin)
 }
 
 // verifyPin returns a tls.Config.VerifyPeerCertificate callback that parses the
