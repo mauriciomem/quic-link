@@ -19,6 +19,12 @@ Ports below 1024 require elevated privileges on both Linux and macOS.
 
   There's no macOS equivalent for this; on macOS use a high port or `sudo`.
 
+The same applies to the client side in reverse mode. A `[servers.<name>]` block with
+`listen` set binds a port on the workstation, and a port below 1024 is refused there
+for the same reason and with the same remedy: choose 1024 or above. quic-link will
+not ask you to run it as root, because that would put the long-lived identity key
+inside a privileged process to solve a problem a different port also solves.
+
 ## UDP receive buffer
 
 The QUIC library warns at startup if it can't raise the UDP receive buffer to

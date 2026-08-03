@@ -43,7 +43,7 @@ it's what you pass to `daemon --server`, `ssh`, `ping`, and friends.
 
 ```toml
 [servers.myserver]
-addr    = "myserver.example.com:443"   # required: the agent's host:port
+addr    = "myserver.example.com:443"   # the agent's host:port, when this machine connects out
 pin     = "<agent-pin>"                # required: from 'quic-link keygen' on the agent
 enabled = true                         # optional, default true
 
@@ -52,8 +52,31 @@ ssh    = 2222                          # letting quic-link pick them automatical
 docker = 2375
 ```
 
+Exactly one of `addr` and `listen` is required, and they are mutually exclusive.
+`addr` means this machine connects to the agent, which is the usual arrangement.
+`listen` means the opposite: this machine waits on that address and the agent
+connects to it, for when the agent has no address you can reach. Reverse mode is
+described in [architecture](architecture.md#reverse-mode); the two ends must
+disagree about direction, so an agent talking to a `listen` server here needs
+`dial` set in its own config.
+
+```toml
+[servers.homelab]
+listen = ":17443"                      # wait here instead; the agent connects to us
+pin    = "<agent-pin>"
+```
+
+Two servers that both use `listen` must have different pins. An incoming connection
+is identified by its pin and nothing else, so two waiting servers sharing one could
+not be told apart; quic-link refuses that config rather than guessing. Servers that
+use `addr` may share a pin freely, since their addresses tell them apart.
+
+A `listen` port below 1024 needs privileges the daemon deliberately does not take.
+Pick 1024 or above; see [platform notes](platform-notes.md).
+
 `enabled = false` keeps the server in the file (so `status` and error messages can
-still refer to it by name) without the daemon trying to connect to it. `local_ports`
+still refer to it by name) without the daemon connecting to it or accepting a
+connection from it. `local_ports`
 is optional; when you leave it out, quic-link derives a pair of local ports for you
 deterministically, so they're stable across restarts. `quic-link status --json`
 always tells you the ports actually in use, so you never have to compute them
@@ -63,7 +86,7 @@ yourself.
 
 ```toml
 [agent]
-listen             = ":443"              # required: UDP address to listen on
+listen             = ":443"              # UDP address to wait on
 authorized_clients = ["<client-pin>"]    # required, non-empty: pins allowed to connect
 
 [agent.routes]                           # optional: add or override named targets
@@ -71,6 +94,20 @@ authorized_clients = ["<client-pin>"]    # required, non-empty: pins allowed to 
 # docker = "unix:///var/run/docker.sock" # built in
 pg-app = "tcp://127.0.0.1:5432"          # any additional target you want reachable
 ```
+
+Exactly one of `listen` and `dial` is required, and they are mutually exclusive.
+`listen` waits for the client to connect, which is the usual arrangement. `dial`
+connects out to a client that is waiting, and pairs with a `listen` server on the
+other end:
+
+```toml
+[agent]
+dial               = "workstation.example.com:17443"
+authorized_clients = ["<client-pin>"]
+```
+
+The pins the agent accepts are the same either way: the direction of the connection
+changes nothing about which identities it trusts.
 
 The agent refuses to start with an empty `authorized_clients` list; there is no
 unauthenticated mode. The `ssh` and `docker` routes always exist and can only be

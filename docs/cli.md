@@ -13,9 +13,9 @@ by hand and can lag behind it.
 | Verb | What it does | Common flags |
 |---|---|---|
 | `keygen` | Generate (or reuse) an Ed25519 identity and print its pin. Run once per host. | `--force` (rotate the key), `--out PATH` |
-| `agent` | Run the server-side endpoint: accept connections, serve routes. | `--listen ADDR`, `--authorized-client PIN` (repeatable, required), `--ssh-addr`, `--docker-addr`, `--route NAME=ADDR` |
-| `daemon` | Run the client-side session owner in the foreground: dials the agent(s), holds sessions, binds local ports. | `--server NAME` (scope to one server; default is all enabled servers) |
-| `status` | Show the daemon's current session state. | `--json` (machine-readable) |
+| `agent` | Run the server-side endpoint: serve routes to an authorized client. | `--listen ADDR` (wait for the client) or `--dial ADDR` (connect out to a waiting client; the two are mutually exclusive), `--authorized-client PIN` (repeatable, required), `--ssh-addr`, `--docker-addr`, `--route NAME=ADDR` |
+| `daemon` | Run the client-side session owner in the foreground: connects to the agent(s), or waits for one configured with `listen` to connect in, holds sessions, binds local ports. | `--server NAME` (scope to one server; default is all enabled servers) |
+| `status` | Show the daemon's current session state, including which direction each server uses. | `--json` (machine-readable) |
 | `ping` | Measure handshake time and round-trip time to an agent. | `--count N`, `--server ADDR --pin PIN` (config-free) |
 | `ssh` | SSH to a server through the tunnel; execs the real `ssh` binary. | `-- ssh-args...`, `--server ADDR --pin PIN` (config-free) |
 | `docker-env` | Print an `export DOCKER_HOST=...` line for a connected server. | none |

@@ -124,7 +124,14 @@ type errFinalExitCode struct {
 }
 
 func (e *errFinalExitCode) Error() string {
-	return fmt.Sprintf("attach refused (exit %d): %s", e.code, e.msg)
+	// The message describes whatever actually failed and is set by the caller.
+	// This deliberately adds no prefix of its own: an earlier version claimed
+	// "attach refused" for every use, which was false for the several callers
+	// where no attach was ever attempted — a disabled server, a server with no
+	// address to dial — and sent readers looking at the agent for a problem
+	// that was in their config. The refusal wording that IS about an attach
+	// belongs to the IPC error type that genuinely represents one.
+	return fmt.Sprintf("%s (exit %d)", e.msg, e.code)
 }
 
 // alreadyReported signals that the agent's message was already written to

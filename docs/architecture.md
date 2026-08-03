@@ -24,16 +24,61 @@ Which role a running process plays is decided entirely by its configuration:
 
 | Role | Activated by | What it does |
 |---|---|---|
-| **Daemon** (client) | A `[servers.*]` block | Dials the agent, holds the session open, and binds local TCP ports (plus a local socket for short-lived commands like `status`). This is the process you run on your own laptop or workstation. |
-| **Agent** (server) | An `[agent]` block | Listens for the daemon's QUIC connection, keeps a table of named local services (`ssh`, `docker`, anything else you add), and dials the real local service for each request. This runs on the remote machine. |
+| **Daemon** (client) | A `[servers.*]` block | Holds the session open and binds local TCP ports (plus a local socket for short-lived commands like `status`). This is the process you run on your own laptop or workstation. |
+| **Agent** (server) | An `[agent]` block | Keeps a table of named local services (`ssh`, `docker`, anything else you add) and connects to the real local service for each request. This runs on the remote machine. |
 
 The same binary handles both roles, so upgrading is always a matched pair: build
 once, deploy the new binary to both ends.
 
+## Reverse mode
+
+Normally the daemon connects to the agent. That needs the agent to have an address
+your workstation can reach, which is not always true: the machine you want to reach
+may be behind NAT, on a home network, or on a connection you cannot forward a port
+through.
+
+Reverse mode turns the connection around. The daemon waits, and the agent connects
+out to it:
+
+```toml
+# On the workstation: wait instead of connecting out.
+[servers.homelab]
+listen = ":17443"
+pin    = "<the agent's pin>"
+```
+
+```toml
+# On the remote machine: connect out instead of waiting.
+[agent]
+dial               = "workstation.example.com:17443"
+authorized_clients = ["<the workstation's pin>"]
+```
+
+Everything else is unchanged. Authentication is still mutual and still pin-based in
+both directions, the agent still decides which named services may be reached, and
+`ssh`, `fwd` and `docker-env` work exactly as before. `status` reports which
+direction each server uses, and shows `listening` while a waiting server has no
+connected agent.
+
+Two things to know:
+
+- **The waiting end needs a reachable port.** That is the whole point of turning it
+  around, so the workstation now needs an address the agent can reach, and a
+  firewall that lets the traffic in.
+- **Pick a port of 1024 or above.** Binding a lower one needs privileges the daemon
+  deliberately does not take; see [platform notes](platform-notes.md).
+
 ## The connection model
 
-- **One QUIC connection per configured server.** The daemon dials as soon as it
-  starts and reconnects automatically if the connection drops.
+- **Either end can be the one that connects.** By default the daemon connects to
+  the agent, which is what you want when the agent has a reachable address. If it
+  does not — an agent behind NAT, or a home machine you cannot forward a port to —
+  you can turn it around: the daemon waits and the agent connects out to it. This
+  changes nothing about who does what. The daemon is still the client and the agent
+  still decides which local services may be reached; only the direction of the
+  initial connection moves. See [Reverse mode](#reverse-mode).
+- **One QUIC connection per configured server**, re-established automatically if it
+  drops. Whichever end connects is the end that reconnects.
 - **Many streams, one connection.** Every SSH login and every Docker API call rides
   its own stream inside that single connection, opened cheaply with no new
   handshake each time.
