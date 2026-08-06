@@ -91,6 +91,8 @@ Examples:
 		newDockerEnvCmd(a),
 		newAttachCmd(a),
 		newFwdCmd(a),
+		newInitCmd(a),
+		newDoctorCmd(a),
 		newVersionCmd(),
 	)
 

@@ -10,6 +10,12 @@ import (
 	"testing"
 )
 
+// Note for anyone tidying this file: verifyOwnedDir is not private to the
+// daemon socket. It is the one place that answers "is this directory really
+// mine, and mine alone", and the naming layer will reuse it for any
+// directory it keeps its own files in. Narrowing it to the socket's needs, or folding it
+// into the socket-path code, would take that answer away from a second caller.
+
 // TestVerifyOwnedDir_AcceptsGoodDir verifies that a normally-created temp
 // directory with 0700 mode and the current uid passes the check.
 func TestVerifyOwnedDir_AcceptsGoodDir(t *testing.T) {

@@ -156,9 +156,10 @@ future release. Use "agent" in new deployments.`,
 
 			effectiveClients := pinList(agentCfg.AuthorizedClients)
 			effectiveRoutes := agentCfg.Routes
+			effectiveVhosts := agentCfg.Vhosts
 
 			return agentRun(cmd.Context(), agentCfg.Listen, agentCfg.Dial,
-				effectiveRoutes, effectiveKey, effectiveClients, a.cfg.Identity)
+				effectiveRoutes, effectiveVhosts, effectiveKey, effectiveClients, a.cfg.Identity)
 		},
 	}
 
@@ -178,7 +179,7 @@ future release. Use "agent" in new deployments.`,
 // routes is the full set of route overrides to hand to the router; it is
 // merged over the router's built-in ssh and docker defaults. idCfg carries the
 // key-age hygiene settings from the identity config block.
-func agentRun(ctx context.Context, listen, dial string, routes map[string]string, keyFile string, authorized pinList, idCfg config.Identity) error {
+func agentRun(ctx context.Context, listen, dial string, routes, vhosts map[string]string, keyFile string, authorized pinList, idCfg config.Identity) error {
 	// Check the age of the local identity key before binding any network
 	// resources. An absent .meta file means the key age is unknown — we
 	// silently skip the check rather than treating the absence as an alarm.
@@ -205,7 +206,7 @@ func agentRun(ctx context.Context, listen, dial string, routes map[string]string
 		return fmt.Errorf("TLS config: %w", err)
 	}
 
-	rtr, err := router.New(routes, router.AllowAll{})
+	rtr, err := router.NewWithVhosts(routes, vhosts, router.AllowAll{})
 	if err != nil {
 		return fmt.Errorf("router: %w", err)
 	}
@@ -265,6 +266,7 @@ func agentRun(ctx context.Context, listen, dial string, routes map[string]string
 	slog.Info("quic-link agent ready",
 		"listen", ln.Addr(),
 		"targets", rtr.Targets(),
+		"vhosts", rtr.Vhosts(),
 		"authorized_clients", len(authorized),
 	)
 	return tunnel.Serve(ctx, ln, rtr, serveOpts)
@@ -303,6 +305,7 @@ func agentDialOut(
 	slog.Info("quic-link agent connecting out",
 		"dial", dial,
 		"targets", rtr.Targets(),
+		"vhosts", rtr.Vhosts(),
 		"authorized_clients", len(authorized),
 	)
 
