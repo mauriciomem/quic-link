@@ -528,7 +528,7 @@ func startScopedDaemon(t *testing.T, cfg *config.Config, pool daemon.SessionPool
 	ctx, c := context.WithCancel(context.Background())
 	ch := make(chan error, 1)
 	go func() {
-		ch <- daemon.Run(ctx, cfg, sock, pool, daemon.WallClock{}, nil)
+		ch <- daemon.Run(ctx, cfg, sock, pool, daemon.WallClock{}, nil, daemon.NamingListeners{})
 	}()
 
 	deadline := time.Now().Add(3 * time.Second)

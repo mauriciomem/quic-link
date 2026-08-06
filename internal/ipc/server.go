@@ -32,6 +32,14 @@ const defaultAttachCap = 256
 // injects a real implementation; tests inject a stub. Returning raw JSON bytes
 // decouples the IPC package from the daemon's snapshot type so internal/ipc
 // does not import internal/daemon.
+// DoctorProvider answers what only the daemon knows. probe is a label the
+// caller has just looked up; the answer says whether that lookup reached the
+// responder, which is the difference between "a name resolved" and "this
+// machine's resolver is pointed here".
+type DoctorProvider interface {
+	DoctorJSON(probe string) ([]byte, error)
+}
+
 type StatusProvider interface {
 	// StatusJSON returns the JSON-encoded status snapshot ready to embed as
 	// a CBOR raw message in the Response.Body field. The returned bytes MUST
@@ -94,6 +102,7 @@ type Server struct {
 	path      string
 	listener  net.Listener
 	status    StatusProvider
+	doctor    DoctorProvider
 	pool      AttachPool
 	uid       int           // expected peer uid; checked at accept
 	connSem   chan struct{} // semaphore bounding concurrent connections
@@ -307,6 +316,22 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, releaseConn func
 func (s *Server) handleRPC(conn net.Conn, req Request) {
 	slog.Debug("ipc: rpc", "role", "daemon", "method", req.Method)
 	switch req.Method {
+	case "doctor":
+		// A separate method with a separate shape. The status response is a
+		// contract other programs read; diagnosis output is not, and mixing
+		// them would freeze something that still needs to change.
+		if s.doctor == nil {
+			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer diagnosis requests"))
+			return
+		}
+		snap, err := s.doctor.DoctorJSON(req.Meta["probe"])
+		if err != nil {
+			slog.Warn("ipc: build doctor snapshot", "role", "daemon", "err", err)
+			_ = writeResponse(conn, errorResponse(1, "internal error building the report"))
+			return
+		}
+		_ = writeResponse(conn, okResponse(snap))
+
 	case "status":
 		snap, err := s.status.StatusJSON()
 		if err != nil {
@@ -413,3 +438,8 @@ func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, r
 		slog.Debug("ipc: attach splice ended", "role", "daemon", "server", req.Server, "target", req.Target, "err", err)
 	}
 }
+
+// SetDoctor supplies the diagnosis provider. It is set separately rather than
+// passed to the constructor because a daemon without one is a working daemon —
+// it simply says so when asked — and every existing caller stays as it was.
+func (s *Server) SetDoctor(d DoctorProvider) { s.doctor = d }

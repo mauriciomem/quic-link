@@ -35,6 +35,33 @@ func (c *Client) dial() (net.Conn, error) {
 
 // StatusJSON sends a status RPC and returns the raw JSON bytes from
 // Response.Body. On schema mismatch it returns ErrSchemaMismatch.
+// DoctorJSON asks the daemon what only it can answer. probe is a label just
+// looked up through the system resolver; the reply says whether that lookup
+// reached the responder.
+func (c *Client) DoctorJSON(probe string) ([]byte, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	req := Request{SocketSchema: SocketSchema, Kind: "rpc", Method: "doctor"}
+	if probe != "" {
+		req.Meta = map[string]string{"probe": probe}
+	}
+	if err := writeRequest(conn, req); err != nil {
+		return nil, err
+	}
+	resp, err := readResponse(conn)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != 0 {
+		return nil, fmt.Errorf("%s", resp.Msg)
+	}
+	return resp.Body, nil
+}
+
 func (c *Client) StatusJSON() ([]byte, error) {
 	conn, err := c.dial()
 	if err != nil {

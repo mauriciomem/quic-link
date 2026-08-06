@@ -49,6 +49,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/edge"
 	"github.com/mauriciomem/quic-link/internal/ipc"
+	"github.com/mauriciomem/quic-link/internal/names"
 	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
@@ -63,6 +64,40 @@ import (
 // the deadline guards against a future splice that takes too long to unwind.
 const shutdownDeadline = 5 * time.Second
 
+// DoctorSnapshot is what only the daemon can answer: which sockets it is
+// actually holding, and whether a check reached its responder.
+//
+// It is deliberately a separate shape from the status snapshot. That one is a
+// frozen contract other programs read; this one is a diagnosis aid that will
+// grow, and growing a frozen thing is how a contract stops being one.
+type DoctorSnapshot struct {
+	Schema    int    `json:"schema"`
+	Suffix    string `json:"suffix"`
+	DNSPort   int    `json:"dns_port,omitempty"`
+	HTTPPort  int    `json:"http_port,omitempty"`
+	HTTPSPort int    `json:"https_port,omitempty"`
+	// Servers this machine answers names for.
+	Servers []string `json:"servers"`
+	// ProbeSeen answers "did a check with this label reach the responder".
+	ProbeSeen bool `json:"probe_seen"`
+}
+
+// NamingListeners carries the daemon-global sockets the naming layer answers
+// on, already bound by the caller so that there is one place in the program
+// where ports are taken.
+//
+// The two DNS fields are different types because the two transports are: a
+// datagram socket is read from directly, while a stream socket is accepted on.
+// Either may be nil, meaning that transport is not served — which is what
+// happens when the port was already taken by something else.
+type NamingListeners struct {
+	Zone   *names.Zone
+	DNSUDP net.PacketConn
+	DNSTCP net.Listener
+	HTTP   net.Listener
+	HTTPS  net.Listener
+}
+
 // Run is the daemon's main entry point. It disables core dumps, starts the IPC
 // server, and blocks until ctx is cancelled (SIGTERM/SIGINT). On return it
 // drains the IPC server with a bounded deadline, closes all sessions, and
@@ -75,6 +110,11 @@ const shutdownDeadline = 5 * time.Second
 // same result: there is exactly one place where ports are bound. A nil map
 // means "no edges" (used in tests that do not need the local-port edge layer).
 //
+// naming carries the sockets the naming layer answers on. Unlike the edge
+// listeners these belong to the daemon as a whole rather than to any one
+// server, so they arrive separately. Its zero value means "no naming layer",
+// which is what a test that does not care about names passes.
+//
 // Dependencies are passed as interfaces so tests can inject fakes without
 // touching the QUIC or filesystem layers.
 func Run(
@@ -84,6 +124,7 @@ func Run(
 	pool SessionPool,
 	clock Clock,
 	prebuiltListeners map[string][2]net.Listener,
+	naming NamingListeners,
 ) error {
 	// Disable core dumps at startup to remove the accidental-core-file
 	// key-leak path. A core dump written while the key is resident in memory
@@ -109,6 +150,9 @@ func Run(
 
 	// Create and start the IPC server.
 	srv := ipc.NewServer(socketPath, snap, attachPool)
+	if naming.Zone != nil {
+		srv.SetDoctor(&doctorProvider{naming: naming})
+	}
 	if err := srv.Listen(); err != nil {
 		return fmt.Errorf("daemon: %w", err)
 	}
@@ -141,6 +185,34 @@ func Run(
 		)
 	}
 
+	// Start answering for names. The responder reads a fixed set of names and
+	// replies with a loopback address; it opens no session and holds no state
+	// beyond that set, which is why it can be started here and stopped first.
+	var resolver *names.Server
+	if naming.DNSUDP != nil || naming.DNSTCP != nil {
+		resolver = names.NewServer(ctx, naming.Zone, naming.DNSUDP, naming.DNSTCP)
+		slog.Info("daemon: answering for names",
+			"role", "daemon",
+			"suffix", naming.Zone.Suffix(),
+			"servers", len(naming.Zone.Servers()),
+		)
+	}
+
+	// The name-routed edges. Unlike the per-server edges these are one listener
+	// each for the whole machine: which server a connection belongs to is
+	// decided from the name inside the request, not from the port it arrived on.
+	var hostEdges []*edge.HostEdge
+	if naming.HTTP != nil {
+		hostEdges = append(hostEdges, edge.NewHostEdge(ctx, naming.HTTP, naming.Zone, attachPool, edge.HTTPPeeker{}))
+		slog.Info("daemon: routing by name",
+			"role", "daemon", "kind", "http", "addr", naming.HTTP.Addr())
+	}
+	if naming.HTTPS != nil {
+		hostEdges = append(hostEdges, edge.NewHostEdge(ctx, naming.HTTPS, naming.Zone, attachPool, edge.SNIPeeker{}))
+		slog.Info("daemon: routing by name",
+			"role", "daemon", "kind", "https", "addr", naming.HTTPS.Addr())
+	}
+
 	ipcDone := make(chan struct{})
 	go func() {
 		defer close(ipcDone)
@@ -169,12 +241,28 @@ func Run(
 	// SIGTERM to hang until the drain deadline fired.
 	srv.Close()
 
+	// Stop answering for names next. The responder is closed early, and
+	// deliberately not alongside the edges: it answers from a fixed set of
+	// names and never opens a session, so unlike an edge it has nothing
+	// in flight that needs the pool to still be alive in order to finish.
+	// It is stopped as soon as shutdown begins simply so it does not keep
+	// handing out an address for a daemon that is going away.
+	if resolver != nil {
+		resolver.Close()
+	}
+
 	// Reset all pooled QUIC connections. This sends CONNECTION_CLOSE to the
 	// agent and unblocks every active splice's io.Copy, allowing in-flight
 	// IPC handlers to exit promptly.
 	pool.Close()
 
 	// Close all edge listeners (unblocks Accept) and join edge splice goroutines.
+	// The name-routed edges belong here rather than with the responder: they do
+	// open streams, so anything of theirs still in flight needs the pool to have
+	// been closed first in order to unwind.
+	for _, e := range hostEdges {
+		e.Close()
+	}
 	for _, e := range edges {
 		e.Close()
 	}
@@ -526,4 +614,37 @@ func sortedConfigServerNames(servers map[string]config.Server) []string {
 		}
 	}
 	return names
+}
+
+// doctorProvider answers what only a running daemon can: the sockets it is
+// actually holding, and whether a check reached its responder.
+type doctorProvider struct{ naming NamingListeners }
+
+func (d *doctorProvider) DoctorJSON(probe string) ([]byte, error) {
+	snap := DoctorSnapshot{
+		Schema:  1,
+		Suffix:  d.naming.Zone.Suffix(),
+		Servers: d.naming.Zone.Servers(),
+	}
+	// Only report a port that is actually bound. A number from configuration
+	// would describe an intention; this describes what is true.
+	if d.naming.DNSUDP != nil {
+		if a, ok := d.naming.DNSUDP.LocalAddr().(*net.UDPAddr); ok {
+			snap.DNSPort = a.Port
+		}
+	}
+	if d.naming.HTTP != nil {
+		if a, ok := d.naming.HTTP.Addr().(*net.TCPAddr); ok {
+			snap.HTTPPort = a.Port
+		}
+	}
+	if d.naming.HTTPS != nil {
+		if a, ok := d.naming.HTTPS.Addr().(*net.TCPAddr); ok {
+			snap.HTTPSPort = a.Port
+		}
+	}
+	if probe != "" {
+		snap.ProbeSeen = d.naming.Zone.SawProbe(probe)
+	}
+	return json.Marshal(snap)
 }

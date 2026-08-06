@@ -18,6 +18,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/edge"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/ipc"
+	"github.com/mauriciomem/quic-link/internal/names"
 	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
@@ -313,30 +314,16 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 	// Iteration is in sorted name order so that when two servers' deterministic
 	// port blocks collide, the same server wins the base block on every restart.
 	// Randomised map iteration would make the winner a coin flip.
-	serverNames := make([]string, 0, len(cfg.Servers))
-	for name := range cfg.Servers {
-		serverNames = append(serverNames, name)
-	}
-	sort.Strings(serverNames)
+	boundPorts, prebuiltListeners := acquireEdgeListeners(cfg, edge.PortAllocator{})
 
-	alloc := edge.PortAllocator{}
-	boundPorts := make(map[string][2]int)
-	prebuiltListeners := make(map[string][2]net.Listener)
-	for _, name := range serverNames {
-		srv := cfg.Servers[name]
-		if srv.Enabled != nil && !*srv.Enabled {
-			continue
-		}
-		sshLn, dkrLn, acquireErr := alloc.AcquirePair(name, srv.LocalPorts)
-		if acquireErr != nil {
-			slog.Error("daemon: cannot acquire port pair for server; skipping edge",
-				"role", "daemon", "server", name, "err", acquireErr)
-			continue
-		}
-		sshPort := sshLn.Addr().(*net.TCPAddr).Port
-		dkrPort := dkrLn.Addr().(*net.TCPAddr).Port
-		boundPorts[name] = [2]int{sshPort, dkrPort}
-		prebuiltListeners[name] = [2]net.Listener{sshLn, dkrLn}
+	// Take the naming sockets. Kept apart from the edge listeners on purpose:
+	// an edge that cannot be bound costs one server its convenience ports,
+	// while a naming socket that cannot be bound costs the whole machine its
+	// names. Those are different failures and deserve different words.
+	naming, namingErr := acquireNamingListeners(cfg)
+	if namingErr != nil {
+		slog.Error("daemon: names are unavailable this session",
+			"role", "daemon", "err", namingErr)
 	}
 
 	pool, err := daemon.NewRealPool(
@@ -356,5 +343,133 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 		return fmt.Errorf("daemon: build pool: %w", err)
 	}
 
-	return daemon.Run(cmd.Context(), cfg, sock, pool, daemon.WallClock{}, prebuiltListeners)
+	return daemon.Run(cmd.Context(), cfg, sock, pool, daemon.WallClock{}, prebuiltListeners, naming)
+}
+
+// pairAllocator acquires the (ssh, docker) listener pair for one server.
+// edge.PortAllocator is the only implementation in the program; the interface
+// exists so a test can make one server's acquisition fail on demand, which the
+// real allocator only does when a hundred consecutive ports are already taken.
+type pairAllocator interface {
+	AcquirePair(server string, overrides map[string]int) (sshLn, dockerLn net.Listener, err error)
+}
+
+// acquireEdgeListeners binds the local listener pair for every enabled server
+// and reports both the bound port numbers and the listeners themselves.
+//
+// This is the single allocation point: the session pool consumes the ports for
+// status reporting and the edges consume the listeners for accepting, so what
+// is reported always reflects what is actually bound.
+//
+// Servers are visited in sorted name order so that when two deterministic port
+// blocks collide, the same server wins the base block on every restart.
+// Randomised map iteration would make the winner a coin flip.
+//
+// A server whose pair cannot be acquired is logged and skipped. It is never
+// fatal: one server whose port block is fully occupied must not stop the daemon
+// from starting or take the other servers down with it. Such a server still
+// gets a session — it simply has no local ports, which status reports as zero.
+func acquireEdgeListeners(cfg *config.Config, alloc pairAllocator) (map[string][2]int, map[string][2]net.Listener) {
+	serverNames := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		serverNames = append(serverNames, name)
+	}
+	sort.Strings(serverNames)
+
+	boundPorts := make(map[string][2]int)
+	prebuiltListeners := make(map[string][2]net.Listener)
+	for _, name := range serverNames {
+		srv := cfg.Servers[name]
+		if srv.Enabled != nil && !*srv.Enabled {
+			continue
+		}
+		sshLn, dkrLn, acquireErr := alloc.AcquirePair(name, srv.LocalPorts)
+		if acquireErr != nil {
+			slog.Error("daemon: cannot acquire port pair for server; skipping edge",
+				"role", "daemon", "server", name, "err", acquireErr)
+			continue
+		}
+		sshPort := sshLn.Addr().(*net.TCPAddr).Port
+		dkrPort := dkrLn.Addr().(*net.TCPAddr).Port
+		boundPorts[name] = [2]int{sshPort, dkrPort}
+		prebuiltListeners[name] = [2]net.Listener{sshLn, dkrLn}
+	}
+	return boundPorts, prebuiltListeners
+}
+
+// acquireNamingListeners takes the sockets the naming layer answers on.
+//
+// Failure is never fatal: the rest of the product works without names, so a
+// port already in use costs this session its name resolution and nothing else.
+// It is reported plainly and named, because the alternative — quietly moving to
+// another port — would leave the system resolver pointing at a port with
+// nothing behind it, resolving nothing and explaining nothing.
+//
+// Both transports are taken together or not at all. Serving one without the
+// other is a half-state nobody would predict, and there is no benefit to it:
+// every answer this responder gives fits in a datagram.
+func acquireNamingListeners(cfg *config.Config) (daemon.NamingListeners, error) {
+	n, err := cfg.Naming()
+	if err != nil {
+		// Validation already refused this before we got here; treat it as
+		// "no names" rather than assuming it cannot happen.
+		return daemon.NamingListeners{}, err
+	}
+
+	servers := make([]string, 0, len(cfg.Servers))
+	for name, srv := range cfg.Servers {
+		if srv.Enabled != nil && !*srv.Enabled {
+			// A disabled server has no session and no ports. Answering for its
+			// name would produce something that resolves and then cannot be
+			// reached, which is worse than not resolving at all.
+			continue
+		}
+		servers = append(servers, name)
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", n.DNSPort)
+	udp, err := net.ListenPacket("udp4", addr)
+	if err != nil {
+		return daemon.NamingListeners{}, namingBindError(n.DNSPort, "udp", err)
+	}
+	tcp, err := net.Listen("tcp4", addr)
+	if err != nil {
+		udp.Close()
+		return daemon.NamingListeners{}, namingBindError(n.DNSPort, "tcp", err)
+	}
+
+	httpLn, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", n.HTTPPort))
+	if err != nil {
+		udp.Close()
+		tcp.Close()
+		return daemon.NamingListeners{}, namingBindError(n.HTTPPort, "tcp", err)
+	}
+
+	httpsLn, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", n.HTTPSPort))
+	if err != nil {
+		udp.Close()
+		tcp.Close()
+		httpLn.Close()
+		return daemon.NamingListeners{}, namingBindError(n.HTTPSPort, "tcp", err)
+	}
+
+	return daemon.NamingListeners{
+		Zone:   names.NewZone(n.Suffix, servers),
+		DNSUDP: udp,
+		DNSTCP: tcp,
+		HTTP:   httpLn,
+		HTTPS:  httpsLn,
+	}, nil
+}
+
+// namingBindError explains a failed naming bind in terms of what the user can
+// do about it, and distinguishes the common case from everything else.
+func namingBindError(port int, proto string, err error) error {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return fmt.Errorf(
+			"%s port %d is already held by another program, so names cannot be answered; "+
+				"free that port, or set names.dns_port to a different one and register it again: %w",
+			proto, port, err)
+	}
+	return fmt.Errorf("cannot listen for name queries on %s port %d: %w", proto, port, err)
 }
