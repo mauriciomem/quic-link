@@ -31,16 +31,13 @@ var ErrInvalid = errors.New("invalid configuration")
 // ---- Types ------------------------------------------------------------------
 
 // Config is the top-level configuration structure. Field names match the TOML
-// keys defined in the schema. Reserved tables (Names, Ports) are parsed but
-// have no behavior in the current release; they are present so strict decoding
-// does not reject a valid future-facing config that includes them.
+// keys defined in the schema.
 type Config struct {
 	Schema   int               `toml:"schema"`
 	Identity Identity          `toml:"identity"`
 	Servers  map[string]Server `toml:"servers"`
 	Agent    *Agent            `toml:"agent"`
 	Names    *Names            `toml:"names"`
-	Ports    *Ports            `toml:"ports"`
 	Log      Log               `toml:"log"`
 }
 
@@ -63,14 +60,14 @@ type Server struct {
 }
 
 // Agent holds agent-role settings. Listen and Dial are mutually exclusive.
-// Vhosts is reserved for a future release; it parses so a config that includes
-// it is not rejected by strict decoding.
+// Vhosts publishes services under hostnames, which is how a client that routes
+// by name — a browser, say — reaches them.
 type Agent struct {
 	Listen            string            `toml:"listen"`
 	Dial              string            `toml:"dial"`
 	AuthorizedClients []string          `toml:"authorized_clients"`
 	Routes            map[string]string `toml:"routes"`
-	Vhosts            map[string]string `toml:"vhosts"` // reserved; no behavior yet
+	Vhosts            map[string]string `toml:"vhosts"` // hostname -> address
 }
 
 // Log controls structured logging behavior.
@@ -79,17 +76,19 @@ type Log struct {
 	Format string `toml:"format"` // default text
 }
 
-// Names is reserved for the naming/DNS layer. Its fields cover the keys
-// specified in the schema so strict decoding accepts a config that sets them.
+// Names is the [names] table as written in the config file. It is the raw
+// shape; Config.Naming turns it into a checked one. Nothing outside that
+// method should read these fields.
 type Names struct {
-	Suffix  string `toml:"suffix"`
-	Block   string `toml:"block"`
-	DNSPort int    `toml:"dns_port"`
-}
+	Suffix    string `toml:"suffix"`
+	DNSPort   int    `toml:"dns_port"`
+	HTTPPort  int    `toml:"http_port"`
+	HTTPSPort int    `toml:"https_port"`
 
-// Ports is reserved for the port-mode setting. Parsed but inert.
-type Ports struct {
-	Mode string `toml:"mode"`
+	// SuffixIsMine is the operator asserting that they control a suffix which
+	// is not reserved for private use. It exists so that pointing the system
+	// resolver at a real domain is a deliberate act rather than a typo.
+	SuffixIsMine bool `toml:"suffix_is_mine"`
 }
 
 // ---- Role -------------------------------------------------------------------
@@ -197,6 +196,18 @@ func loadFile(cfg *Config, path string, explicitPath bool) error {
 		return fmt.Errorf("read config %s: %w", path, ErrInvalid)
 	}
 
+	// Look for keys that used to exist before decoding strictly. Strict
+	// decoding would report them as merely unknown, which is true but unhelpful
+	// for a key that shipped as documented and reserved: the reader needs to
+	// know it was taken away on purpose and what replaced it. A file too
+	// malformed to survey is left to the strict decoder to complain about.
+	var survey map[string]any
+	if toml.Unmarshal(data, &survey) == nil {
+		if err := checkRemovedKeys(path, survey); err != nil {
+			return err
+		}
+	}
+
 	dec := toml.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(cfg); err != nil {
@@ -224,7 +235,7 @@ func loadFile(cfg *Config, path string, explicitPath bool) error {
 // must come from the config file or flags.
 //
 // If QUIC_LINK_AGENT_* is set and cfg.Agent is nil, Agent is allocated so the
-// scalar can be set. The same applies to Ports and Names.
+// scalar can be set. The same applies to Names.
 func mergeEnv(cfg *Config) error {
 	for _, env := range os.Environ() {
 		key, val, ok := strings.Cut(env, "=")
@@ -284,10 +295,7 @@ func applyEnvVar(cfg *Config, key, val string) error {
 		cfg.Log.Format = val
 
 	case "QUIC_LINK_PORTS_MODE":
-		if cfg.Ports == nil {
-			cfg.Ports = &Ports{}
-		}
-		cfg.Ports.Mode = val
+		return removedKeyError("QUIC_LINK_PORTS_MODE", removedPortsTable)
 
 	case "QUIC_LINK_NAMES_SUFFIX":
 		if cfg.Names == nil {
@@ -296,10 +304,7 @@ func applyEnvVar(cfg *Config, key, val string) error {
 		cfg.Names.Suffix = val
 
 	case "QUIC_LINK_NAMES_BLOCK":
-		if cfg.Names == nil {
-			cfg.Names = &Names{}
-		}
-		cfg.Names.Block = val
+		return removedKeyError("QUIC_LINK_NAMES_BLOCK", removedNamesBlock)
 
 	case "QUIC_LINK_NAMES_DNS_PORT":
 		n, err := strconv.Atoi(val)
@@ -310,6 +315,36 @@ func applyEnvVar(cfg *Config, key, val string) error {
 			cfg.Names = &Names{}
 		}
 		cfg.Names.DNSPort = n
+
+	case "QUIC_LINK_NAMES_HTTP_PORT":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+		}
+		if cfg.Names == nil {
+			cfg.Names = &Names{}
+		}
+		cfg.Names.HTTPPort = n
+
+	case "QUIC_LINK_NAMES_HTTPS_PORT":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+		}
+		if cfg.Names == nil {
+			cfg.Names = &Names{}
+		}
+		cfg.Names.HTTPSPort = n
+
+	case "QUIC_LINK_NAMES_SUFFIX_IS_MINE":
+		b, err := strconv.ParseBool(val)
+		if err != nil {
+			return fmt.Errorf("env %s=%q: must be a boolean (true/false/1/0): %w", key, val, ErrInvalid)
+		}
+		if cfg.Names == nil {
+			cfg.Names = &Names{}
+		}
+		cfg.Names.SuffixIsMine = b
 	}
 	return nil
 }
@@ -326,6 +361,12 @@ func applyEnvVar(cfg *Config, key, val string) error {
 func (c *Config) Validate(active Role) (warnings []string, err error) {
 	switch active {
 	case RoleClient:
+		// The naming table is checked first because it is machine-wide: a bad
+		// suffix would be written into the system resolver and affect every
+		// lookup, which matters more than any single server's settings.
+		if _, e := c.Naming(); e != nil {
+			return warnings, e
+		}
 		// Enabled server problems are hard errors; disabled server problems
 		// are warnings (a disabled server is not selectable and not on the
 		// active path).
@@ -342,6 +383,11 @@ func (c *Config) Validate(active Role) (warnings []string, err error) {
 		// Agent section problems are hard errors for the agent role.
 		if e := validateAgent(c); e != nil {
 			return warnings, e
+		}
+		// The naming layer is client-side, so a bad [names] table cannot hurt
+		// an agent — but it is still wrong, and a shared config file is common.
+		if _, e := c.Naming(); e != nil {
+			warnings = append(warnings, fmt.Sprintf("names (inactive for agent role): %v", e))
 		}
 		// Server section problems (if any servers are present) are warnings.
 		warnings = append(warnings, validateServersWarnings(c.Servers)...)
@@ -418,6 +464,13 @@ func validateDistinctListenPins(servers map[string]Server) error {
 // validateServer validates one server entry and returns a wrapped ErrInvalid on
 // the first problem found.
 func validateServer(name string, srv Server) error {
+	// The name becomes the first label of a hostname, so it has to be able to
+	// be one. This is checked before anything else because it is the only
+	// problem here that a user cannot see by reading their own file.
+	if err := ValidateServerName(name); err != nil {
+		return fmt.Errorf("servers.%s: %v: %w", name, err, ErrInvalid)
+	}
+
 	bothSet := srv.Addr != "" && srv.Listen != ""
 	neitherSet := srv.Addr == "" && srv.Listen == ""
 	if bothSet {
@@ -502,6 +555,17 @@ func validateAgent(c *Config) error {
 		}
 	}
 
+	// Published hostnames follow a different rule from route names, because
+	// they are hostnames: a browser will be told to ask for one.
+	for host, addr := range a.Vhosts {
+		if err := router.ValidateVhostKey(host); err != nil {
+			return fmt.Errorf("agent.vhosts: %v: %w", err, ErrInvalid)
+		}
+		if _, _, err := router.ParseAddr(addr); err != nil {
+			return fmt.Errorf("agent.vhosts.%s: %v: %w", host, err, ErrInvalid)
+		}
+	}
+
 	return nil
 }
 
@@ -554,4 +618,45 @@ func expandTilde(p string) string {
 		}
 	}
 	return p
+}
+
+// ---- Removed keys -----------------------------------------------------------
+
+// Explanations for configuration that existed in an earlier release. A key
+// listed here is refused with its reason rather than reported as unknown,
+// because "unknown key" reads like a typo and these are not typos: they were
+// documented, and somebody may have written them down.
+const (
+	removedPortsTable = "quic-link does not bind ports the operating system reserves, so there are " +
+		"no port modes to choose between. The naming layer's ports are set individually " +
+		"under [names] as dns_port, http_port and https_port, and each must be above 1023."
+
+	removedNamesBlock = "the naming layer listens on 127.0.0.1 and tells servers apart by port and " +
+		"by the hostname the client sends, so there is no address range to set aside."
+)
+
+// removedKeyError formats the refusal for one removed key.
+func removedKeyError(what, why string) error {
+	return fmt.Errorf("%s is no longer used: %s Remove it: %w", what, why, ErrInvalid)
+}
+
+// checkRemovedKeys reports the first removed key present in a surveyed file.
+func checkRemovedKeys(path string, survey map[string]any) error {
+	if _, ok := survey["ports"]; ok {
+		return fmt.Errorf("config %s: %w", path, removedKeyError("the [ports] table", removedPortsTable))
+	}
+	if servers, ok := survey["servers"].(map[string]any); ok {
+		if _, ok := servers[FlagOnlyServerName]; ok {
+			return fmt.Errorf(
+				"config %s: %q is reserved for a server built from command-line flags and "+
+					"cannot be used in a file; choose a name that can be part of a hostname: %w",
+				path, FlagOnlyServerName, ErrInvalid)
+		}
+	}
+	if names, ok := survey["names"].(map[string]any); ok {
+		if _, ok := names["block"]; ok {
+			return fmt.Errorf("config %s: %w", path, removedKeyError("names.block", removedNamesBlock))
+		}
+	}
+	return nil
 }

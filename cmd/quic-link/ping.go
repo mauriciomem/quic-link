@@ -118,7 +118,7 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 			// Validate checks the effective server this run will use.
 			regKey := serverName
 			if regKey == "" {
-				regKey = "(flags)"
+				regKey = config.FlagOnlyServerName
 			}
 			if a.cfg.Servers == nil {
 				a.cfg.Servers = map[string]config.Server{}

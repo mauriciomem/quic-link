@@ -692,23 +692,49 @@ func TestExplicitMissingFile(t *testing.T) {
 
 // ---- reserved tables parse without error ------------------------------------
 
-// TestReservedTablesParse verifies that [names] and [ports] parse cleanly under
-// strict decoding (they are present in the schema so they must not be rejected
-// as unknown tables).
+// TestReservedTablesParse verifies that [names] parses cleanly under strict
+// decoding, and that the two keys which used to sit beside it no longer do.
+//
+// This test used to assert the opposite. It accepted the exact config below,
+// including [ports] and names.block, on the stated grounds that both were
+// reserved for a future release and a forward-looking file must not be
+// rejected. That future arrived and went a different way: nothing binds a
+// privileged port, so there are no port modes, and nothing allocates addresses,
+// so there is no block to reserve. Both keys are now refused with an
+// explanation.
+//
+// The reversal is written out here rather than made by deleting the old test,
+// because a documented promise being withdrawn should be visible to whoever
+// reads this file next.
 func TestReservedTablesParse(t *testing.T) {
 	unsetAllQLEnv(t)
+
+	// What [names] looks like now: accepted.
 	path := writeConfig(t, `
 schema = 1
 [names]
-suffix   = "internal"
-block    = "127.42.0.0/16"
-dns_port = 5355
-[ports]
-mode = "auto"
+suffix     = "internal"
+dns_port   = 15353
+http_port  = 18080
+https_port = 18443
 `)
-	_, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("Load with reserved tables: %v", err)
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("Load with the current [names] table: %v", err)
+	}
+
+	// What it used to look like: refused, with a reason rather than a shrug.
+	for _, removed := range []string{
+		"[names]\nblock = \"127.42.0.0/16\"\n",
+		"[ports]\nmode = \"auto\"\n",
+	} {
+		old := writeConfig(t, "schema = 1\n"+removed)
+		_, err := config.Load(old)
+		if err == nil {
+			t.Fatalf("a key that was removed must be refused, not accepted: %q", removed)
+		}
+		if !strings.Contains(err.Error(), "no longer used") {
+			t.Fatalf("refusal should explain the key was removed; got: %v", err)
+		}
 	}
 }
 
