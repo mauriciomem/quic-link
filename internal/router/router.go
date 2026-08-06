@@ -31,6 +31,7 @@ type route struct {
 // the sole resolution and authorization boundary on the agent.
 type Router struct {
 	routes map[string]route
+	vhosts *vhosts
 	policy Policy
 	dialer net.Dialer
 }
@@ -39,6 +40,15 @@ type Router struct {
 // (nil => AllowAll). Every address is parsed up front, so a bad address fails
 // at startup, not at dial time.
 func New(overrides map[string]string, policy Policy) (*Router, error) {
+	return NewWithVhosts(overrides, nil, policy)
+}
+
+// NewWithVhosts builds a Router that also answers for hostnames. A stream that
+// names a host is resolved against the vhost table; a stream that names a
+// target is resolved against the route table. They are separate tables because
+// they are separate namespaces: one is a short logical name an operator chose,
+// the other is a hostname a browser was told to ask for.
+func NewWithVhosts(overrides map[string]string, hosts map[string]string, policy Policy) (*Router, error) {
 	if policy == nil {
 		policy = AllowAll{}
 	}
@@ -61,15 +71,27 @@ func New(overrides map[string]string, policy Policy) (*Router, error) {
 		}
 		routes[name] = route{raw: raw, network: network, address: address}
 	}
-	return &Router{routes: routes, policy: policy}, nil
+	// Addresses are parsed here rather than at dial time so a mistake in the
+	// configuration is a startup failure the operator sees, not a failure that
+	// waits for the first person to try the name.
+	vh, err := newVhosts(hosts)
+	if err != nil {
+		return nil, err
+	}
+	return &Router{routes: routes, vhosts: vh, policy: policy}, nil
 }
 
-// Dial resolves h.Target, authorizes (peer, h), and dials. Errors:
-// ErrUnknownTarget (->1), ErrUnauthorized (->2), or a wrapped dial error (->3).
+// Dial resolves the stream's destination, authorizes (peer, h), and dials.
+// Errors: ErrUnknownTarget (->1), ErrUnauthorized (->2), or a wrapped dial
+// error (->3).
+//
+// A stream carries either a target or a host, never both, and which one decides
+// where it goes. Resolution for both lives here because this is the single
+// place allowed to turn something a client said into an address.
 func (r *Router) Dial(ctx context.Context, peer Identity, h proto.Header) (net.Conn, error) {
-	rt, ok := r.routes[h.Target]
+	rt, ok := r.resolve(h)
 	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownTarget, h.Target)
+		return nil, fmt.Errorf("%w: %s", ErrUnknownTarget, describeDestination(h))
 	}
 	if err := r.policy.Authorize(peer, h); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnauthorized, err)
@@ -79,6 +101,39 @@ func (r *Router) Dial(ctx context.Context, peer Identity, h proto.Header) (net.C
 		return nil, fmt.Errorf("dial %s: %w", rt.raw, err)
 	}
 	return conn, nil
+}
+
+// resolve picks the entry a header refers to.
+func (r *Router) resolve(h proto.Header) (route, bool) {
+	if h.Kind == proto.KindHTTP {
+		if r.vhosts == nil {
+			return route{}, false
+		}
+		return r.vhosts.resolve(h.Host)
+	}
+	rt, ok := r.routes[h.Target]
+	return rt, ok
+}
+
+// describeDestination names what a stream asked for, so a refusal says which
+// of the two namespaces was searched and what was looked for in it. A message
+// that always blamed a target would be actively misleading for a stream that
+// named a host and no target at all.
+func describeDestination(h proto.Header) string {
+	if h.Kind == proto.KindHTTP {
+		return fmt.Sprintf("no service is published as %q", h.Host)
+	}
+	return fmt.Sprintf("no target %q", h.Target)
+}
+
+// Vhosts returns every published hostname, in a stable order.
+func (r *Router) Vhosts() []string {
+	if r.vhosts == nil {
+		return nil
+	}
+	names := r.vhosts.names()
+	sort.Strings(names)
+	return names
 }
 
 func (r *Router) Targets() []string {
