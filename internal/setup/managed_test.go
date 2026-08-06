@@ -204,3 +204,83 @@ func TestRemove_RefusesAFileWhoseMarkerWasRemoved(t *testing.T) {
 		t.Fatalf("write error = %v, want the same refusal", err)
 	}
 }
+
+// TestRemove_RefusesASymlink: following it would delete whatever it points at,
+// which is the one thing undo must never do.
+func TestRemove_RefusesASymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "somebody-elses-file")
+	if err := os.WriteFile(target, []byte("important\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "quic-link.conf")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := setup.Remove(link); !errors.Is(err, setup.ErrNotRegular) {
+		t.Fatalf("error = %v, want a refusal", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Error("the symlink was followed and its target was removed")
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Error("the symlink itself was removed")
+	}
+}
+
+// TestRemove_RefusesADirectory: a directory at our path is not a file we wrote,
+// and recursing into it is not something undo is entitled to do.
+func TestRemove_RefusesADirectory(t *testing.T) {
+	dir := t.TempDir()
+	inTheWay := filepath.Join(dir, "quic-link.conf")
+	if err := os.Mkdir(inTheWay, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inTheWay, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setup.Remove(inTheWay); !errors.Is(err, setup.ErrNotRegular) {
+		t.Fatalf("error = %v, want a refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(inTheWay, "child")); err != nil {
+		t.Error("the directory was removed along with what was in it")
+	}
+}
+
+// TestInventory_EveryArtifactHasAnAbsolutePath. The claim this list makes is
+// that it is the whole answer to "what did this put on my machine", and a
+// relative path would make that claim uncheckable.
+func TestInventory_EveryArtifactHasAnAbsolutePath(t *testing.T) {
+	arts := setup.Inventory("internal", 15353, "/home/someone")
+	arts = append(arts, setup.UserPaths("/home/someone",
+		"/home/someone/.config/quic-link/key.pem",
+		"/home/someone/.config/quic-link/config.toml")...)
+	if len(arts) < 4 {
+		t.Fatalf("only %d artifacts; the list is meant to be complete", len(arts))
+	}
+	for _, a := range arts {
+		if !filepath.IsAbs(a.Path) {
+			t.Errorf("%q is not an absolute path, so it cannot be checked by reading", a.Path)
+		}
+		if a.Purpose == "" {
+			t.Errorf("%s has no stated purpose", a.Path)
+		}
+	}
+}
+
+// TestInventory_OnlyTheResolverFileIsOwnedByRoot pins the promise that setup
+// makes: one file, and everything else is yours.
+func TestInventory_OnlyTheResolverFileIsOwnedByRoot(t *testing.T) {
+	arts := setup.Inventory("internal", 15353, "")
+	if len(arts) != 1 {
+		t.Fatalf("setup writes %d files with privileges; the promise is one", len(arts))
+	}
+	if arts[0].Scope != setup.Root {
+		t.Error("the resolver file is the privileged one")
+	}
+	for _, a := range setup.UserPaths("/home/someone", "/k", "/c") {
+		if a.Scope != setup.User {
+			t.Errorf("%s should belong to the user", a.Path)
+		}
+	}
+}

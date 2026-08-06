@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,5 +168,83 @@ func TestDoctor_ReportsAFileThatIsNotOurs(t *testing.T) {
 	// here is that the vocabulary exists and is printed.
 	if !strings.Contains(out, "absent") && !strings.Contains(out, "in place") && !strings.Contains(out, "not ours") {
 		t.Errorf("the report should say the state of each file:\n%s", out)
+	}
+}
+
+// TestUndo_OnACleanHostSaysSoAndSucceeds. Undo is most likely to be run by
+// somebody who is not sure whether they ever ran setup, so having nothing to do
+// must be an ordinary answer rather than an error.
+func TestUndo_OnACleanHostSaysSoAndSucceeds(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("the privileged half is what has anything to remove")
+	}
+	out, err := runSetupVerb(t, okCfg, "init", "--undo")
+	if err != nil {
+		t.Fatalf("nothing to remove is not a failure: %v", err)
+	}
+	if !strings.Contains(out, "Nothing of ours") {
+		t.Errorf("it should say plainly that there was nothing: %q", out)
+	}
+}
+
+// TestDoctor_OnACleanHostDoesNotNag. Declining to set anything up is a
+// supported way to use this, so the report has to read as a description rather
+// than a complaint.
+func TestDoctor_OnACleanHostDoesNotNag(t *testing.T) {
+	out, err := runSetupVerb(t, okCfg, "doctor")
+	if err != nil {
+		t.Fatalf("doctor must not fail on a machine with nothing set up: %v", err)
+	}
+	for _, shouty := range []string{"ERROR", "WARNING", "FAILED", "!!"} {
+		if strings.Contains(out, shouty) {
+			t.Errorf("an unconfigured machine is not an error state, but the report says %q:\n%s", shouty, out)
+		}
+	}
+}
+
+// TestDoctorJSON_HasTheShapeOtherThingsWillReadFor.
+//
+// A byte-for-byte comparison is impossible here: the report contains absolute
+// paths, this machine's state, and a name that is different every run. What can
+// be pinned is the shape — the keys something else would look for, and the fact
+// that the version travels with it so it can change without breaking a reader.
+func TestDoctorJSON_HasTheShapeOtherThingsWillReadFor(t *testing.T) {
+	out, err := runSetupVerb(t, okCfg, "doctor", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+		t.Fatalf("not parseable: %v\n%s", err, out)
+	}
+
+	for _, key := range []string{"schema", "version", "suffix", "resolver", "artifacts", "resolution"} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("missing %q", key)
+		}
+	}
+	if s, _ := got["schema"].(float64); s != 1 {
+		t.Errorf("schema = %v, want 1 so a reader can tell when this changes", got["schema"])
+	}
+
+	arts, ok := got["artifacts"].([]any)
+	if !ok || len(arts) == 0 {
+		t.Fatalf("artifacts should be a list of objects, got %T", got["artifacts"])
+	}
+	first, _ := arts[0].(map[string]any)
+	for _, key := range []string{"path", "scope", "present"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("an artifact is missing %q", key)
+		}
+	}
+
+	// The check reports both halves separately: an address came back, and the
+	// responder was actually asked. Collapsing them into one would hide the
+	// case that matters, where something else answered.
+	res, _ := got["resolution"].(map[string]any)
+	for _, key := range []string{"name", "answered", "reached_responder"} {
+		if _, ok := res[key]; !ok {
+			t.Errorf("the check result is missing %q", key)
+		}
 	}
 }
