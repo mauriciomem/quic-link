@@ -329,6 +329,14 @@ func unknownTargetMessage(target string) string {
 	return fmt.Sprintf("no target %q", target)
 }
 
+// destinationOf names what a stream asked for, whichever way it asked.
+func destinationOf(h proto.Header) string {
+	if h.Kind == proto.KindHTTP {
+		return h.Host
+	}
+	return h.Target
+}
+
 // replyDialError maps a router.Dial failure to the protocol response and
 // returns an error for logging. Expected refusals (unknown target,
 // unauthorized) return nil so they do not log loudly; a genuine dial failure is
@@ -336,16 +344,23 @@ func unknownTargetMessage(target string) string {
 func replyDialError(stream transport.Stream, h proto.Header, err error) error {
 	switch {
 	case errors.Is(err, router.ErrUnknownTarget):
+		// A stream that named a host has no target, so blaming an empty target
+		// would send the operator looking in the wrong table. The tcp wording is
+		// unchanged, because the client recognises it.
+		msg := unknownTargetMessage(h.Target)
+		if h.Kind == proto.KindHTTP {
+			msg = fmt.Sprintf("no service is published as %q", h.Host)
+		}
 		_ = proto.WriteResponse(stream, proto.Response{
 			Status: proto.StatusUnknownTarget,
-			Msg:    unknownTargetMessage(h.Target),
+			Msg:    msg,
 		})
 		_ = stream.Close()
 		return nil
 	case errors.Is(err, router.ErrUnauthorized):
 		_ = proto.WriteResponse(stream, proto.Response{
 			Status: proto.StatusUnauthorized,
-			Msg:    fmt.Sprintf("not authorized for %q", h.Target),
+			Msg:    fmt.Sprintf("not authorized for %q", destinationOf(h)),
 		})
 		_ = stream.Close()
 		return nil

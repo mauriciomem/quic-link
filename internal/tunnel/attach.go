@@ -81,6 +81,35 @@ func ResetConn(c io.Closer) {
 //
 // reqid is stamped into the header's Meta for cross-host log correlation.
 func DoAttach(ctx context.Context, conn StreamConn, local io.ReadWriteCloser, target, reqid string, relayAck func(proto.Response) error) error {
+	return attachWithHeader(ctx, conn, local, proto.Header{
+		Kind:   proto.KindTCP,
+		Target: target,
+		Meta:   map[string]string{"reqid": reqid},
+	}, target, nil, relayAck)
+}
+
+// DoAttachHTTP is DoAttach for a connection whose destination is a hostname
+// rather than a named target.
+//
+// prefix is the part of the client's request already read in order to find that
+// hostname. It is written out first, unchanged, so the service at the other end
+// receives exactly the bytes the client sent and cannot tell that anything read
+// them on the way. Passing it through untouched is the whole contract: a
+// version of this that tidied the request up would be describing the client's
+// intent rather than carrying it.
+func DoAttachHTTP(ctx context.Context, conn StreamConn, local io.ReadWriteCloser, host, reqid string, prefix []byte, relayAck func(proto.Response) error) error {
+	return attachWithHeader(ctx, conn, local, proto.Header{
+		Kind: proto.KindHTTP,
+		Host: host,
+		Meta: map[string]string{"reqid": reqid},
+	}, host, prefix, relayAck)
+}
+
+// attachWithHeader carries out an attach for an already-built header. Both
+// entry points share it so the half-close and reset behaviour, which is subtle
+// and easy to get subtly wrong, exists once.
+func attachWithHeader(ctx context.Context, conn StreamConn, local io.ReadWriteCloser, hdr proto.Header, what string, prefix []byte, relayAck func(proto.Response) error) error {
+	target := what
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {
 		// The pooled conn dropped since Get returned — surface the error so the
@@ -89,11 +118,6 @@ func DoAttach(ctx context.Context, conn StreamConn, local io.ReadWriteCloser, ta
 		return fmt.Errorf("open stream for %q: %w", target, err)
 	}
 
-	hdr := proto.Header{
-		Kind:   proto.KindTCP,
-		Target: target,
-		Meta:   map[string]string{"reqid": reqid},
-	}
 	if err := proto.WriteHeader(stream, hdr); err != nil {
 		stream.Reset(proto.StreamResetCode)
 		resetConn(local)
@@ -125,6 +149,19 @@ func DoAttach(ctx context.Context, conn StreamConn, local io.ReadWriteCloser, ta
 		stream.Reset(proto.StreamResetCode)
 		resetConn(local)
 		return fmt.Errorf("agent refused %q: status %s: %s", target, resp.Status, resp.Msg)
+	}
+
+	// Anything already read from the client on the way to finding out where it
+	// was going goes out first, before the two ends are joined, so the service
+	// receives one unbroken request in the order it was sent. This happens only
+	// after the agent has agreed to the stream: nothing may travel ahead of
+	// that answer.
+	if len(prefix) > 0 {
+		if _, err := stream.Write(prefix); err != nil {
+			stream.Reset(proto.StreamResetCode)
+			resetConn(local)
+			return fmt.Errorf("replay request for %q: %w", target, err)
+		}
 	}
 
 	// pipe closes both local and stream when done. It propagates half-close
