@@ -248,3 +248,49 @@ func TestDoctorJSON_HasTheShapeOtherThingsWillReadFor(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctor_ABadSuffixDoesNotBlindTheReport.
+//
+// Found on a real machine: a suffix the validator refuses made this verb report
+// almost nothing — no resolver, no files, no daemon — which is exactly backwards,
+// because a setting being wrong is one of the situations it exists for. It now
+// says what is wrong and then carries on.
+func TestDoctor_ABadSuffixDoesNotBlindTheReport(t *testing.T) {
+	const bad = "schema = 1\n[names]\nsuffix = \"qlcheck\"\n"
+
+	out, err := runSetupVerb(t, bad, "doctor")
+	if err != nil {
+		t.Fatalf("doctor must not fail on bad settings: %v", err)
+	}
+	if !strings.Contains(out, "not a name reserved for private use") {
+		t.Error("it should say what is wrong with the suffix")
+	}
+	// Everything that does not depend on the suffix must still be reported.
+	for _, want := range []string{"this machine", "Daemon", "Files quic-link has put"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("a bad suffix hid the %q section:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "this machine      \n") {
+		t.Error("the resolver was not detected, though detection does not need a suffix")
+	}
+	if !strings.Contains(out, "fix your settings") {
+		t.Error("the next step should be the setting that blocks everything else")
+	}
+
+	// And the machine-readable form carries it too.
+	jsonOut, err := runSetupVerb(t, bad, "doctor", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOut)), &got); err != nil {
+		t.Fatalf("not parseable: %v", err)
+	}
+	if _, ok := got["config_error"]; !ok {
+		t.Error("the report should name the problem in a field a reader can find")
+	}
+	if _, ok := got["resolver"]; !ok {
+		t.Error("resolver detection should still be reported")
+	}
+}

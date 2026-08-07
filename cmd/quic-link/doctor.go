@@ -26,14 +26,18 @@ import (
 // every one of them is optional, because the moment a person most wants this
 // verb is when one of them is missing.
 type report struct {
-	Schema     int             `json:"schema"`
-	Version    string          `json:"version"`
-	Suffix     string          `json:"suffix"`
-	Resolver   resolverReport  `json:"resolver"`
-	Artifacts  []artifactJSON  `json:"artifacts"`
-	Daemon     *daemonReport   `json:"daemon,omitempty"`
-	Resolution resolutionCheck `json:"resolution"`
-	NextStep   string          `json:"next_step,omitempty"`
+	Schema  int    `json:"schema"`
+	Version string `json:"version"`
+	Suffix  string `json:"suffix"`
+	// ConfigError is set when the settings cannot be used. The rest of the
+	// report is still filled in: this verb exists for the times something is
+	// wrong, so one bad value must not take the rest of the answer away.
+	ConfigError string          `json:"config_error,omitempty"`
+	Resolver    resolverReport  `json:"resolver"`
+	Artifacts   []artifactJSON  `json:"artifacts"`
+	Daemon      *daemonReport   `json:"daemon,omitempty"`
+	Resolution  resolutionCheck `json:"resolution"`
+	NextStep    string          `json:"next_step,omitempty"`
 }
 
 type resolverReport struct {
@@ -99,13 +103,16 @@ func newDoctorCmd(a *app) *cobra.Command {
 func diagnose(cmd *cobra.Command, a *app) report {
 	r := report{Schema: 1, Version: buildinfo.Version()}
 
+	// A bad setting is reported and then stepped over. Returning here would
+	// mean that the one situation this verb is for — something is wrong — is
+	// the situation in which it says the least.
 	n, nerr := a.cfg.Naming()
 	if nerr != nil {
 		r.Suffix = "(unusable)"
-		r.NextStep = "fix your settings: " + nerr.Error()
-		return r
+		r.ConfigError = nerr.Error()
+	} else {
+		r.Suffix = n.Suffix
 	}
-	r.Suffix = n.Suffix
 
 	res := setup.DetectResolver(cmd.Context())
 	r.Resolver = resolverReport{
@@ -115,7 +122,12 @@ func diagnose(cmd *cobra.Command, a *app) report {
 	}
 
 	home, _ := os.UserHomeDir()
-	arts := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort, home))
+	var arts []setup.Artifact
+	if nerr == nil {
+		// Which system file we would write depends on the suffix, so with an
+		// unusable one there is no particular file to look for.
+		arts = setup.Survey(setup.Inventory(n.Suffix, n.DNSPort, home))
+	}
 	if home != "" {
 		arts = append(arts, setup.Survey(setup.UserPaths(home,
 			expandTilde(a.cfg.Identity.KeyFile),
@@ -131,16 +143,21 @@ func diagnose(cmd *cobra.Command, a *app) report {
 	// The check is a fresh name every time. A fixed one would be cached after
 	// the first run and every later run would report a responder that was never
 	// asked, which is exactly backwards.
-	var nonce [6]byte
-	_, _ = rand.Read(nonce[:])
-	probe := hex.EncodeToString(nonce[:])
-	canary := probe + "." + names.ProbeLabel + "." + n.Suffix
-	r.Resolution = resolutionCheck{Name: canary}
+	var probe string
+	if nerr == nil {
+		var nonce [6]byte
+		_, _ = rand.Read(nonce[:])
+		probe = hex.EncodeToString(nonce[:])
+		canary := probe + "." + names.ProbeLabel + "." + n.Suffix
+		r.Resolution = resolutionCheck{Name: canary}
 
-	addrs, lerr := lookupThroughSystem(canary)
-	if lerr == nil && len(addrs) > 0 {
-		r.Resolution.Answered = true
-		r.Resolution.Address = addrs[0]
+		addrs, lerr := lookupThroughSystem(canary)
+		if lerr == nil && len(addrs) > 0 {
+			r.Resolution.Answered = true
+			r.Resolution.Address = addrs[0]
+		}
+	} else {
+		r.Resolution.Note = "not attempted: there is no usable suffix to ask about"
 	}
 
 	if d, ok := askDaemon(a, probe); ok {
@@ -189,6 +206,10 @@ func askDaemon(a *app, probe string) (daemon.DoctorSnapshot, bool) {
 // fundamental. Listing everything that is wrong at once leaves a person to work
 // out the order themselves, and the order is always the same.
 func nextStep(r report, res setup.Resolver) string {
+	// Nothing else can be acted on until the settings can be read.
+	if r.ConfigError != "" {
+		return "fix your settings: " + r.ConfigError
+	}
 	for _, a := range r.Artifacts {
 		if a.Scope == "user" && a.Purpose == "this machine's identity" && !a.Present {
 			return "make this machine an identity: quic-link keygen"
@@ -216,6 +237,9 @@ func writeReport(w io.Writer, r report) {
 	fmt.Fprintf(w, "quic-link %s\n\n", r.Version)
 	fmt.Fprintf(w, "Names\n")
 	fmt.Fprintf(w, "  suffix            %s\n", r.Suffix)
+	if r.ConfigError != "" {
+		fmt.Fprintf(w, "                    %s\n", wrap(r.ConfigError, 60, "                    "))
+	}
 	fmt.Fprintf(w, "  this machine      %s\n", r.Resolver.Kind)
 	if r.Resolver.Reason != "" {
 		fmt.Fprintf(w, "                    %s\n", wrap(r.Resolver.Reason, 60, "                    "))
@@ -255,8 +279,14 @@ func writeReport(w io.Writer, r report) {
 	}
 
 	fmt.Fprintf(w, "\nTest lookup\n")
-	fmt.Fprintf(w, "  asked for         %s\n", r.Resolution.Name)
+	if r.Resolution.Name == "" {
+		fmt.Fprintf(w, "  not attempted     %s\n", r.Resolution.Note)
+	} else {
+		fmt.Fprintf(w, "  asked for         %s\n", r.Resolution.Name)
+	}
 	switch {
+	case r.Resolution.Name == "":
+		// nothing to report
 	case r.Resolution.ReachedUs:
 		fmt.Fprintf(w, "  result            answered by this machine's responder\n")
 	case r.Resolution.Answered:
@@ -264,7 +294,7 @@ func writeReport(w io.Writer, r report) {
 	default:
 		fmt.Fprintf(w, "  result            no answer\n")
 	}
-	if r.Resolution.Note != "" {
+	if r.Resolution.Note != "" && r.Resolution.Name != "" {
 		fmt.Fprintf(w, "                    %s\n", wrap(r.Resolution.Note, 60, "                    "))
 	}
 
