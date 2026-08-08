@@ -126,31 +126,56 @@ type controlVhostPublisher struct {
 }
 
 func (p controlVhostPublisher) AddVhost(host string, port int) error {
-	err := p.rtr.AddVhost(host, port)
-	switch {
-	case err == nil:
+	return publishError(p.rtr.AddVhost(host, port))
+}
+
+// publishError translates a route-table failure into the vocabulary a
+// control-plane caller is answered in.
+//
+// Both sides name the same condition — one for the caller, one for whoever
+// reads the route table's own errors — so a message carrying both says it
+// twice. Only the explanation crosses over, and it is taken from the error's
+// own structure rather than from its words: unwrapping asks the error which
+// condition it is, where reading the text has to guess from a sentence that
+// contains, among other things, a name the caller chose.
+func publishError(err error) error {
+	if err == nil {
 		return nil
+	}
+	switch {
 	case errors.Is(err, router.ErrVhostExists):
-		return fmt.Errorf("%w: %s", control.ErrNameTaken, detailOf(err, router.ErrVhostExists))
+		return fmt.Errorf("%w%s", control.ErrNameTaken, explanationOf(err, router.ErrVhostExists))
 	case errors.Is(err, router.ErrVhostRejected):
-		return fmt.Errorf("%w: %s", control.ErrNameRejected, detailOf(err, router.ErrVhostRejected))
+		return fmt.Errorf("%w%s", control.ErrNameRejected, explanationOf(err, router.ErrVhostRejected))
 	default:
+		// Not a condition this side knows how to describe. Passed on whole, so
+		// the layer that decides what an unrecognized failure means sees the
+		// real one rather than a guess made here.
 		return err
 	}
 }
 
-// detailOf returns the part of err that says something the sentinel does not.
+// explanationOf returns everything the error says beyond naming its condition,
+// ready to append — or nothing at all if it said nothing more.
 //
-// Both sides of this boundary name the same condition — one for the caller, one
-// for whoever reads the route table's own errors — so joining them whole
-// produces a message that says it twice. Only the explanation is carried
-// across.
-func detailOf(err error, sentinel error) string {
-	msg, prefix := err.Error(), sentinel.Error()+": "
-	if i := strings.Index(msg, prefix); i >= 0 {
-		return msg[i+len(prefix):]
+// It works by removing the condition from the front of what the error wraps,
+// which is where the wrapping put it. That is the one place the condition can
+// be, so nothing here depends on the condition not also appearing further along
+// in a name somebody chose.
+func explanationOf(err error, condition error) string {
+	// Unwrap to the layer that named the condition, so anything wrapped around
+	// it afterwards is not mistaken for the explanation.
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if !errors.Is(e, condition) {
+			break
+		}
+		rest := strings.TrimPrefix(e.Error(), condition.Error())
+		rest = strings.TrimPrefix(rest, ":")
+		if rest = strings.TrimSpace(rest); rest != "" {
+			return ": " + rest
+		}
 	}
-	return msg
+	return ""
 }
 
 // SameIdentityAsPeer reports whether the peer is using our own identity. It is
