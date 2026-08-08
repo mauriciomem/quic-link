@@ -2,7 +2,10 @@ package control
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"path"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -106,6 +109,44 @@ func (s server) authorize(
 	return handler(ctx, req)
 }
 
+// contain turns a panic inside an RPC into an error for the caller.
+//
+// Without it, one unexpected value reaching one handler ends the whole process:
+// nothing above this point recovers, so the agent stops serving every other
+// session too, and a client's request is the thing that decides when. An agent
+// is a long-running program that strangers talk to, and the blast radius of a
+// mistake in one call has to be that call.
+//
+// The panic is re-reported as an internal error, deliberately without detail.
+// Whatever went wrong is this program's fault, not something the caller can
+// act on, and the value a panic carries is as likely to describe this agent's
+// internals as anything else. The full detail goes to the log, where the
+// operator can see it and the caller cannot.
+//
+// It is the outermost interceptor, so it also covers a panic in the
+// authorization check that runs before dispatch.
+func (s server) contain(
+	ctx context.Context,
+	req interface{},
+	info *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (resp interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("a control-plane call failed unexpectedly and was contained",
+				"role", "agent",
+				"peer", s.peer.Short(),
+				"method", path.Base(info.FullMethod),
+				"cause", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+			resp = nil
+			err = status.Error(codes.Internal, "the agent could not complete that call")
+		}
+	}()
+	return handler(ctx, req)
+}
+
 // connEndWatcher signals done when the single gRPC connection ends, so Serve
 // can return the moment the control stream dies (control-stream closure is
 // session death).
@@ -154,7 +195,13 @@ func Serve(ctx context.Context, stream transport.Stream, peer PeerIdentity, poli
 	}
 
 	watcher := &connEndWatcher{done: make(chan struct{})}
-	gs := grpc.NewServer(grpc.StatsHandler(watcher), grpc.UnaryInterceptor(srv.authorize))
+	// Containment is outermost so that it also covers the authorization check,
+	// which runs before any handler and is as capable of being handed
+	// something unexpected as they are.
+	gs := grpc.NewServer(
+		grpc.StatsHandler(watcher),
+		grpc.ChainUnaryInterceptor(srv.contain, srv.authorize),
+	)
 	controlpb.RegisterControlServer(gs, srv)
 
 	ln := NewSingleConnListener(NewConn(stream))

@@ -35,6 +35,11 @@ type ServeOpts struct {
 	// changes, so forgetting to set this cannot be what makes an agent
 	// remotely modifiable.
 	ControlPolicy control.Policy
+	// ControlNames overrides where a publish request is sent, for tests that
+	// need to observe or provoke the capability itself rather than the route
+	// table behind it. Left unset — as production leaves it — the route table
+	// is used, subject to the operator's decision below.
+	ControlNames control.VhostPublisher
 	// AllowRemoteRouteMutation is the operator's decision about whether an
 	// authenticated client may publish a name on this agent while it runs.
 	//
@@ -252,6 +257,9 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 		// were wrong.
 		if opt.AllowRemoteRouteMutation {
 			cp.names = controlVhostPublisher{rtr: rtr}
+			if opt.ControlNames != nil {
+				cp.names = opt.ControlNames
+			}
 		}
 	}
 
