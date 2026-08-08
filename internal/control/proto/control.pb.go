@@ -291,6 +291,124 @@ func (x *RouteInfo) GetProvenance() string {
 	return ""
 }
 
+type AddVhostRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// host is the whole name a browser will ask for, already lowercased by the
+	// caller, e.g. "grafana.server1.internal".
+	Host string `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
+	// port is a port on the agent's own loopback interface, and the only thing
+	// a caller may say about where traffic goes.
+	//
+	// It is a port and not an address on purpose. An address field would let a
+	// caller name any destination the agent can reach — a unix socket carrying
+	// a privileged API, a machine somewhere else on the agent's network — and
+	// turning the agent into a general-purpose forwarder for whatever a caller
+	// names is precisely what the route table exists to prevent. A field that
+	// cannot express a destination has no edge case a validator could miss.
+	Port          uint32 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddVhostRequest) Reset() {
+	*x = AddVhostRequest{}
+	mi := &file_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddVhostRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddVhostRequest) ProtoMessage() {}
+
+func (x *AddVhostRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddVhostRequest.ProtoReflect.Descriptor instead.
+func (*AddVhostRequest) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *AddVhostRequest) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *AddVhostRequest) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+type AddVhostResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// host and port echo what was actually published, after validation, so the
+	// caller reports the name that really exists rather than the one it asked
+	// for.
+	Host          string `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
+	Port          uint32 `protobuf:"varint,2,opt,name=port,proto3" json:"port,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AddVhostResponse) Reset() {
+	*x = AddVhostResponse{}
+	mi := &file_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AddVhostResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AddVhostResponse) ProtoMessage() {}
+
+func (x *AddVhostResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AddVhostResponse.ProtoReflect.Descriptor instead.
+func (*AddVhostResponse) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *AddVhostResponse) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *AddVhostResponse) GetPort() uint32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
 var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
@@ -312,10 +430,17 @@ const file_control_proto_rawDesc = "" +
 	"\abuiltin\x18\x03 \x01(\bR\abuiltin\x12\x1e\n" +
 	"\n" +
 	"provenance\x18\x04 \x01(\tR\n" +
-	"provenance2\x92\x01\n" +
+	"provenance\"9\n" +
+	"\x0fAddVhostRequest\x12\x12\n" +
+	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\":\n" +
+	"\x10AddVhostResponse\x12\x12\n" +
+	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port2\xdb\x01\n" +
 	"\aControl\x12;\n" +
 	"\x04Ping\x12\x18.quiclink.v1.PingRequest\x1a\x19.quiclink.v1.PingResponse\x12J\n" +
-	"\tGetStatus\x12\x1d.quiclink.v1.GetStatusRequest\x1a\x1e.quiclink.v1.GetStatusResponseBCZAgithub.com/mauriciomem/quic-link/internal/control/proto;controlpbb\x06proto3"
+	"\tGetStatus\x12\x1d.quiclink.v1.GetStatusRequest\x1a\x1e.quiclink.v1.GetStatusResponse\x12G\n" +
+	"\bAddVhost\x12\x1c.quiclink.v1.AddVhostRequest\x1a\x1d.quiclink.v1.AddVhostResponseBCZAgithub.com/mauriciomem/quic-link/internal/control/proto;controlpbb\x06proto3"
 
 var (
 	file_control_proto_rawDescOnce sync.Once
@@ -329,22 +454,26 @@ func file_control_proto_rawDescGZIP() []byte {
 	return file_control_proto_rawDescData
 }
 
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_control_proto_goTypes = []any{
 	(*PingRequest)(nil),       // 0: quiclink.v1.PingRequest
 	(*PingResponse)(nil),      // 1: quiclink.v1.PingResponse
 	(*GetStatusRequest)(nil),  // 2: quiclink.v1.GetStatusRequest
 	(*GetStatusResponse)(nil), // 3: quiclink.v1.GetStatusResponse
 	(*RouteInfo)(nil),         // 4: quiclink.v1.RouteInfo
+	(*AddVhostRequest)(nil),   // 5: quiclink.v1.AddVhostRequest
+	(*AddVhostResponse)(nil),  // 6: quiclink.v1.AddVhostResponse
 }
 var file_control_proto_depIdxs = []int32{
 	4, // 0: quiclink.v1.GetStatusResponse.routes:type_name -> quiclink.v1.RouteInfo
 	0, // 1: quiclink.v1.Control.Ping:input_type -> quiclink.v1.PingRequest
 	2, // 2: quiclink.v1.Control.GetStatus:input_type -> quiclink.v1.GetStatusRequest
-	1, // 3: quiclink.v1.Control.Ping:output_type -> quiclink.v1.PingResponse
-	3, // 4: quiclink.v1.Control.GetStatus:output_type -> quiclink.v1.GetStatusResponse
-	3, // [3:5] is the sub-list for method output_type
-	1, // [1:3] is the sub-list for method input_type
+	5, // 3: quiclink.v1.Control.AddVhost:input_type -> quiclink.v1.AddVhostRequest
+	1, // 4: quiclink.v1.Control.Ping:output_type -> quiclink.v1.PingResponse
+	3, // 5: quiclink.v1.Control.GetStatus:output_type -> quiclink.v1.GetStatusResponse
+	6, // 6: quiclink.v1.Control.AddVhost:output_type -> quiclink.v1.AddVhostResponse
+	4, // [4:7] is the sub-list for method output_type
+	1, // [1:4] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -361,7 +490,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

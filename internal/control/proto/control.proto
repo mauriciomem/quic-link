@@ -10,6 +10,17 @@ option go_package = "github.com/mauriciomem/quic-link/internal/control/proto;con
 service Control {
   rpc Ping(PingRequest) returns (PingResponse);
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  // AddVhost publishes a hostname on this agent while it is running. The
+  // agent may refuse: an operator has to allow remote changes before any
+  // caller may make one, and a refusal for that reason is a permission
+  // error rather than a transport failure. An agent that was built or wired
+  // without the ability to change its own names at all reports the method as
+  // unimplemented, which is the same answer a caller gets from an agent too
+  // old to have it — from the caller's side those are one fact.
+  //
+  // Anything added this way lasts only as long as the process: the name
+  // table is rebuilt from configuration at every start.
+  rpc AddVhost(AddVhostRequest) returns (AddVhostResponse);
 }
 
 message PingRequest {
@@ -44,4 +55,28 @@ message RouteInfo {
   // running. A peer too old to send it leaves it empty, which a reader must
   // tolerate rather than treat as a fourth kind.
   string provenance = 4;
+}
+
+message AddVhostRequest {
+  // host is the whole name a browser will ask for, already lowercased by the
+  // caller, e.g. "grafana.server1.internal".
+  string host = 1;
+  // port is a port on the agent's own loopback interface, and the only thing
+  // a caller may say about where traffic goes.
+  //
+  // It is a port and not an address on purpose. An address field would let a
+  // caller name any destination the agent can reach — a unix socket carrying
+  // a privileged API, a machine somewhere else on the agent's network — and
+  // turning the agent into a general-purpose forwarder for whatever a caller
+  // names is precisely what the route table exists to prevent. A field that
+  // cannot express a destination has no edge case a validator could miss.
+  uint32 port = 2;
+}
+
+message AddVhostResponse {
+  // host and port echo what was actually published, after validation, so the
+  // caller reports the name that really exists rather than the one it asked
+  // for.
+  string host = 1;
+  uint32 port = 2;
 }
