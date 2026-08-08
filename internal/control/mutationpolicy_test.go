@@ -1,8 +1,13 @@
 package control
 
 import (
+	"context"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
+
+	"google.golang.org/grpc"
 
 	controlpb "github.com/mauriciomem/quic-link/internal/control/proto"
 )
@@ -70,32 +75,140 @@ func TestMutationPolicy_ChangingNeedsConsentAndSaysSo(t *testing.T) {
 	}
 }
 
-// TestEveryServedMethodIsClassified reads the methods this agent actually
-// serves out of the generated service description and requires each one to have
-// been thought about.
+// methodsSomebodyThoughtAbout is the list of served methods a person has
+// actually classified, maintained by hand.
 //
-// Without it, classification is a thing somebody has to remember, and the way
-// forgetting shows up is silent: the call is refused, correctly, but the
-// attempt is never written down — so an operator cannot find out it happened.
-// This turns remembering into a build failure.
+// It exists to be a SECOND opinion, independent of the rule the code uses. The
+// rule treats anything it does not recognize as a change, which is the right
+// default — but it means the code cannot tell "somebody decided this is a
+// change" apart from "nobody has looked at this yet". Both answers are refusal.
+// Only a list a human has to edit can tell them apart, which is why this is
+// duplication on purpose rather than something to derive.
+var methodsSomebodyThoughtAbout = map[string]bool{
+	"Ping":      true,
+	"GetStatus": true,
+	"AddVhost":  true,
+}
+
+// TestEveryServedMethodIsClassified requires that every method this agent
+// actually serves has been thought about.
+//
+// The methods are read out of the generated service description rather than
+// listed here, so adding an RPC and forgetting to decide what it is becomes a
+// failing test rather than a silence. The failure is not that the method is
+// dangerous — an unclassified method is already refused — it is that nobody
+// recorded a decision, and refusal-by-default is the same answer whether the
+// decision was made or missed.
 func TestEveryServedMethodIsClassified(t *testing.T) {
 	if len(controlpb.Control_ServiceDesc.Methods) == 0 {
 		t.Fatal("no methods found in the service description; this test is not checking anything")
 	}
 	for _, m := range controlpb.Control_ServiceDesc.Methods {
-		readOnly := readOnlyMethods[m.MethodName]
-		changes := changesTheAgent(m.MethodName)
-		if readOnly == changes {
-			t.Errorf("method %q is classified as both readable and changing, or as neither; "+
-				"every served method must be one or the other", m.MethodName)
+		if !methodsSomebodyThoughtAbout[m.MethodName] {
+			t.Errorf("method %q is served but nobody has classified it. It is refused by "+
+				"default, which is safe, but add it to the list in this test so the decision "+
+				"is on the record — and to readOnlyMethods if it only reports.", m.MethodName)
+			continue
 		}
-		if changes {
-			// A changing method must be refused by default. If a new one is
-			// added and this fails, the method is not the problem — the
-			// missing decision about it is.
+		// A method somebody decided is a change must actually be refused
+		// without consent. This is what catches a method added to the
+		// read-only list by mistake.
+		if !readOnlyMethods[m.MethodName] {
 			if err := (MutationPolicy{}).Authorize(PeerIdentity{}, m.MethodName); err == nil {
 				t.Errorf("method %q changes this agent but is permitted with no consent", m.MethodName)
 			}
 		}
 	}
+
+	// The hand-maintained list must not outlive the methods in it, or it stops
+	// describing this agent and starts describing an older one.
+	served := make(map[string]bool, len(controlpb.Control_ServiceDesc.Methods))
+	for _, m := range controlpb.Control_ServiceDesc.Methods {
+		served[m.MethodName] = true
+	}
+	for name := range methodsSomebodyThoughtAbout {
+		if !served[name] {
+			t.Errorf("method %q is classified here but is no longer served; remove it so this "+
+				"list stays a true statement about this agent", name)
+		}
+	}
 }
+
+// TestNoStreamingMethodEscapesTheCheckPoint guards a gap that does not exist
+// yet and would be easy to open.
+//
+// Authorization and panic containment are installed for calls that send one
+// request and get one reply. A streaming method would not pass through either:
+// it needs its own interceptors, and adding the method without them would put a
+// call outside the check-point that every call is supposed to go through — the
+// one property that is unconditional here regardless of what the policy
+// currently permits.
+//
+// So this asserts there are no streaming methods. When the first one is wanted,
+// this test fails and says what has to happen first.
+func TestNoStreamingMethodEscapesTheCheckPoint(t *testing.T) {
+	if n := len(controlpb.Control_ServiceDesc.Streams); n != 0 {
+		t.Errorf("%d streaming method(s) are served, but only single-request calls pass "+
+			"through the authorization check-point and the panic containment. Install stream "+
+			"equivalents of both before serving a streaming method.", n)
+	}
+}
+
+// TestAuditUsesTheSameClassificationAsThePolicy is what makes "one decision, not
+// two" true rather than merely intended.
+//
+// Refusing a call and recording that it was attempted are separate pieces of
+// code. If each decided for itself which calls matter, they would eventually
+// disagree, and the way that disagreement shows up is the worst of both: a
+// change refused correctly and recorded nowhere, so an operator cannot find out
+// anyone tried.
+//
+// It drives the real check-point with a method nothing has classified, and
+// requires both a refusal and a record. A test naming a method that a shared
+// rule and a separate list would agree about cannot tell the two arrangements
+// apart — which is exactly how a second list went unnoticed once already.
+func TestAuditUsesTheSameClassificationAsThePolicy(t *testing.T) {
+	const unclassified = "SomeMethodNobodyHasClassifiedYet"
+
+	records := make(chan slog.Record, 8)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(recordCollector{out: records}))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := server{peer: PeerIdentity{Pin: "abcdefghijklmnop"}, policy: MutationPolicy{}}
+	_, err := srv.authorize(context.Background(), struct{}{},
+		&grpc.UnaryServerInfo{FullMethod: "/quiclink.v1.Control/" + unclassified},
+		func(context.Context, any) (any, error) {
+			t.Error("an unclassified method reached its handler")
+			return nil, nil
+		})
+	if err == nil {
+		t.Fatal("an unclassified method was permitted with no consent")
+	}
+
+	select {
+	case r := <-records:
+		if r.Message != "route mutation denied" {
+			t.Errorf("the recorded line is %q, want the refusal of a change", r.Message)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("a refused change to an unclassified method was recorded nowhere. The refusal " +
+			"and the record must reach the same conclusion from the same place, or a call can " +
+			"be refused with nothing to show anyone tried.")
+	}
+}
+
+// recordCollector captures whole log records so a test can check which line was
+// written rather than searching rendered text for a word.
+type recordCollector struct{ out chan slog.Record }
+
+func (recordCollector) Enabled(context.Context, slog.Level) bool { return true }
+func (c recordCollector) Handle(_ context.Context, r slog.Record) error {
+	select {
+	case c.out <- r.Clone():
+	default:
+	}
+	return nil
+}
+func (c recordCollector) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c recordCollector) WithGroup(string) slog.Handler      { return c }

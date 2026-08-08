@@ -163,18 +163,32 @@ func publishError(err error) error {
 // be, so nothing here depends on the condition not also appearing further along
 // in a name somebody chose.
 func explanationOf(err error, condition error) string {
-	// Unwrap to the layer that named the condition, so anything wrapped around
-	// it afterwards is not mistaken for the explanation.
+	// Descends to the layer that actually named the condition. Anything wrapped
+	// around that layer afterwards is not the explanation — it is somebody
+	// else's sentence, and carrying it would put the condition in the message
+	// twice.
+	//
+	// The test is whether a layer's own message begins with the condition,
+	// which is where wrapping puts it. Asking whether the condition is
+	// somewhere in the chain would be true at every layer, including the
+	// outermost, and would stop the descent before it started.
 	for e := err; e != nil; e = errors.Unwrap(e) {
-		if !errors.Is(e, condition) {
-			break
+		msg := e.Error()
+		if !strings.HasPrefix(msg, condition.Error()) {
+			continue
 		}
-		rest := strings.TrimPrefix(e.Error(), condition.Error())
+		rest := strings.TrimPrefix(msg, condition.Error())
 		rest = strings.TrimPrefix(rest, ":")
 		if rest = strings.TrimSpace(rest); rest != "" {
 			return ": " + rest
 		}
+		// This layer is the condition and nothing more, so there is no
+		// explanation to carry.
+		return ""
 	}
+	// Nothing in the chain stated the condition in its own words, so there is
+	// nothing that can be separated from it. Saying only the condition is
+	// better than repeating a sentence that does not name it.
 	return ""
 }
 

@@ -1,10 +1,6 @@
 package main
 
-import (
-	"testing"
-
-	"github.com/spf13/cobra"
-)
+import "testing"
 
 // TestExposeCmd_EveryWrongInvocationIsAUsageError covers the exit code a script
 // sees, which is part of what this program promises and not merely a detail of
@@ -45,5 +41,3 @@ func TestExposeCmd_EveryWrongInvocationIsAUsageError(t *testing.T) {
 		}
 	}
 }
-
-var _ = cobra.RangeArgs

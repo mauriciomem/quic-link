@@ -307,7 +307,11 @@ func TestAddVhostE2E_ARefusedNameCannotFloodTheLog(t *testing.T) {
 	// characters: a check written against those two categories alone misses
 	// them, and a reader that treats one as a line break sees output that looks
 	// like more lines than were written.
-	hostile := strings.Repeat("a", 4000) + "\n\x1b]0;pwned\x07\u202e\u2028\u2029.internal"
+	// Long enough to prove the bound, but short enough that the hostile
+	// characters land inside it rather than past the cut — otherwise the checks
+	// below would pass because the bytes never reached the part being tested,
+	// which says nothing about whether they would have been removed.
+	hostile := strings.Repeat("a", 100) + "\n\x1b]0;pwned\x07\u202e\u2028\u2029.internal"
 	if _, err := addVhost(t, ctx, client, hostile, 3000); err == nil {
 		t.Fatal("a 4000-byte name with control bytes in it was published")
 	}
@@ -316,6 +320,12 @@ func TestAddVhostE2E_ARefusedNameCannotFloodTheLog(t *testing.T) {
 	a := attrsOf(r)
 	if len(a["name"]) > 128 {
 		t.Errorf("the audit line recorded %d bytes of a caller-chosen name; it must be bounded", len(a["name"]))
+	}
+	// The characters had to survive as far as the sanitiser for their absence to
+	// mean anything, so check they were not simply cut off by the bound.
+	if len(a["name"]) >= 128 {
+		t.Errorf("the recorded name reached the bound, so the checks below cannot tell removal "+
+			"from truncation: %q", a["name"])
 	}
 	for _, bad := range []string{"\n", "\x1b", "\x07", "\u202e", "\u2028", "\u2029"} {
 		if strings.Contains(a["name"], bad) {

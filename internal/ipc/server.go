@@ -468,6 +468,11 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// read above it is bounded not only in time but in what it may say:
 		// the name and port are checked for shape here, before a request is
 		// made of the agent, so a local mistake is answered locally.
+		//
+		// Like the read above, this handler holds its connection slot for the
+		// whole relay rather than releasing it early: the call to the agent is
+		// bounded by the same timeout, so the hold is a bounded, deliberate
+		// trade-off rather than something to guard against.
 		if s.expose == nil {
 			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer publish requests"))
 			return
@@ -510,7 +515,7 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 				"role", "daemon", "server", req.Server, "body_bytes", len(ebody))
 			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
 				"server %q sent a reply too large to relay over the local socket (%d bytes as JSON); "+
-					"this is a local limit, not a problem with the name", req.Server, len(ebody))))
+					"this is a local IPC limit, not a problem with the name", req.Server, len(ebody))))
 			return
 		}
 		_ = writeResponse(conn, okResponse(ebody))

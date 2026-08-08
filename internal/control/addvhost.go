@@ -81,6 +81,9 @@ func auditName(s string) string {
 	for _, r := range s {
 		switch {
 		case r == utf8.RuneError:
+			// Also drops a legitimately-typed replacement character, which is
+			// deliberate: it is not worth distinguishing one from a byte that
+			// failed to decode when neither belongs in a hostname.
 			continue
 		case unicode.IsControl(r):
 			continue

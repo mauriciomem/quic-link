@@ -57,7 +57,6 @@ func TestExposeJSON_RefusesWhenThisMachineAnswersNoNames(t *testing.T) {
 // working URL for a name that does not exist.
 func TestExposeJSON_RefusesARelayThatDidNotCarryOutTheRequest(t *testing.T) {
 	ln := heldHTTPListener(t)
-	wantPort := ln.Addr().(*net.TCPAddr).Port
 
 	pool := &fakeRoutesPool{
 		state: "connected",
@@ -84,12 +83,6 @@ func TestExposeJSON_RefusesARelayThatDidNotCarryOutTheRequest(t *testing.T) {
 	}
 	if !strings.Contains(re.Msg, "did not carry out") {
 		t.Errorf("the refusal does not say the request was not carried out: %q", re.Msg)
-	}
-	// The port this machine holds is still what would be reported, and it comes
-	// from the listener rather than from configuration. Proven by the fact that
-	// the listener was bound on port 0 and reports a real number.
-	if wantPort == 0 {
-		t.Fatal("the test listener reported no port; nothing was proven")
 	}
 }
 

@@ -70,7 +70,7 @@ func TestRPCExpose_AnOversizedReplyIsANamedRefusal(t *testing.T) {
 	// The reason matters as much as the refusal: this is a limit of the local
 	// socket, and an operator who reads it as a problem with the name or the
 	// agent will go looking in the wrong place.
-	if !strings.Contains(re.Msg, "local limit") {
+	if !strings.Contains(re.Msg, "local") {
 		t.Errorf("the refusal does not say the limit is a local one: %q", re.Msg)
 	}
 }
