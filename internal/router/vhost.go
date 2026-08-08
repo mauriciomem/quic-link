@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // vhostLabel is one part of a hostname key. It is deliberately not the same
@@ -50,8 +51,36 @@ func ValidateVhostKey(key string) error {
 	return nil
 }
 
+// describe names a provenance the way a refusal message should say it out
+// loud, so a caller told "no" learns which kind of entry is in the way and
+// therefore what to do about it.
+func (p Provenance) describe() string {
+	switch p {
+	case ProvenanceBuiltin:
+		return "a compiled-in default"
+	case ProvenanceConfig:
+		return "set in the agent's configuration"
+	case ProvenanceRuntime:
+		return "published while the agent was running"
+	default:
+		return "of an unrecognized origin"
+	}
+}
+
 // vhosts resolves a hostname to a local address.
+//
+// mu guards both maps. They are read on every request that arrives by name,
+// which is the busiest path here, and written only when someone publishes a
+// name while the process runs — so readers share the lock and a writer
+// briefly excludes them. Reading a Go map while another goroutine writes it
+// is not a subtle problem: it stops the process outright, mid-request, and
+// cannot be recovered from.
+//
+// The pointer to this value is set once when the table is built and never
+// replaced; entries are changed inside it. Anything that swapped the pointer
+// instead would put the swap itself outside this lock.
 type vhosts struct {
+	mu       sync.RWMutex
 	exact    map[string]route
 	wildcard map[string]route // keyed on what follows the star
 }
@@ -82,6 +111,33 @@ func newVhosts(entries map[string]string) (*vhosts, error) {
 	return v, nil
 }
 
+// add publishes one already-validated entry.
+//
+// It refuses to displace anything already there. Repeating a request that has
+// already been carried out is not a refusal though: if the name is present,
+// was published this same way, and points at the same place, the caller asked
+// for a state that already holds, so it is told yes and nothing changes. That
+// makes publishing a name safe to retry, which matters because there is no way
+// to unpublish one yet — without it, a repeated command would be a dead end
+// with an agent restart as the only way out.
+//
+// Anything else is refused and says which kind of entry is in the way: a
+// caller must not be able to take over a name the operator configured, or one
+// another caller published, by asking for it a second time.
+func (v *vhosts) add(key string, r route) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if existing, ok := v.exact[key]; ok {
+		if existing.prov == ProvenanceRuntime && existing.raw == r.raw {
+			return nil
+		}
+		return fmt.Errorf("%w: %q is %s and points at %s",
+			ErrVhostExists, key, existing.prov.describe(), existing.raw)
+	}
+	v.exact[key] = r
+	return nil
+}
+
 // resolve finds the entry for a hostname: an exact name first, then the most
 // specific star pattern that covers it.
 //
@@ -91,6 +147,8 @@ func newVhosts(entries map[string]string) (*vhosts, error) {
 // Asking each pattern in turn whether it matched would give a different answer
 // on different runs whenever two patterns both applied.
 func (v *vhosts) resolve(host string) (route, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
 	if r, ok := v.exact[host]; ok {
 		return r, true
 	}
@@ -110,8 +168,14 @@ func (v *vhosts) resolve(host string) (route, bool) {
 	}
 }
 
-// names returns every configured hostname, for logging and diagnosis.
+// names returns every published hostname, for logging and diagnosis.
+//
+// It reads under the same lock as a lookup does. It is called far less often,
+// but a reader that skipped the lock would be exactly as unsafe as a busy one:
+// what matters is that a write may be happening, not how often this runs.
 func (v *vhosts) names() []string {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
 	out := make([]string, 0, len(v.exact)+len(v.wildcard))
 	for k := range v.exact {
 		out = append(out, k)

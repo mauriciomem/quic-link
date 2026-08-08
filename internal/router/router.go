@@ -20,6 +20,15 @@ const (
 var (
 	ErrUnknownTarget = errors.New("router: unknown target")
 	ErrUnauthorized  = errors.New("router: unauthorized")
+	// ErrVhostExists reports that a name is already published and was not
+	// replaced. Callers distinguish it from a rejected request because the
+	// remedies differ: one means choose another name, the other means fix
+	// what was asked for.
+	ErrVhostExists = errors.New("router: a service is already published under that name")
+	// ErrVhostRejected reports that the request itself was not acceptable —
+	// a name that is not a hostname, a wildcard, or a port outside the
+	// usable range.
+	ErrVhostRejected = errors.New("router: the name or port was refused")
 )
 
 // Provenance records where a route table entry came from. It answers "who
@@ -182,6 +191,61 @@ func (r *Router) Vhosts() []string {
 	names := r.vhosts.names()
 	sort.Strings(names)
 	return names
+}
+
+// AddVhost publishes a hostname pointing at a port on this machine's loopback
+// interface, for as long as this process runs. The name table is rebuilt from
+// configuration at every start, so nothing added here survives a restart.
+//
+// The caller supplies a port and never an address. The address is composed
+// here, so no caller can name a destination of its own choosing: a route table
+// that could be pointed anywhere on request would not be deciding where
+// traffic may go, it would be taking suggestions.
+//
+// Everything is checked before anything is stored. The table has never been
+// able to contain an entry that was not usable, and every reader depends on
+// that; letting one in would mean a name that resolves at lookup time and only
+// then turns out to go nowhere.
+func (r *Router) AddVhost(host string, port int) error {
+	// A star would claim every name nobody has claimed yet under whatever it
+	// covers, and there is no way to withdraw a published name yet, so it
+	// could not be taken back without restarting the agent. Publishing one
+	// name is what this is for.
+	if strings.HasPrefix(host, "*") {
+		return fmt.Errorf("%w: %q covers more than one name; publish a single name",
+			ErrVhostRejected, host)
+	}
+	if err := ValidateVhostKey(host); err != nil {
+		return fmt.Errorf("%w: %v", ErrVhostRejected, err)
+	}
+	// Ports are checked here rather than left to the address parser, which
+	// only looks at the shape of what it is given: a number far outside the
+	// usable range reads as a valid address and fails much later, when
+	// somebody tries the name and the dial is refused for a reason that no
+	// longer points at the request that caused it.
+	//
+	// Zero is refused rather than read as "pick one for me". Nothing here
+	// picks ports, so accepting it would only let a mistyped port look like a
+	// deliberate request for something this cannot do.
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("%w: port %d is outside the usable range 1-65535", ErrVhostRejected, port)
+	}
+	raw := fmt.Sprintf("tcp://127.0.0.1:%d", port)
+	network, address, err := parseAddr(raw)
+	if err != nil {
+		// Unreachable while the port is range-checked above, which is the
+		// point: the parser stays the single place that decides what an
+		// address means, so this cannot drift into accepting something the
+		// rest of the table would reject.
+		return fmt.Errorf("%w: %v", ErrVhostRejected, err)
+	}
+	if r.vhosts == nil {
+		return fmt.Errorf("%w: this agent does not serve names", ErrVhostRejected)
+	}
+	return r.vhosts.add(host, route{
+		raw: raw, network: network, address: address,
+		prov: ProvenanceRuntime,
+	})
 }
 
 // Targets returns every configured route name, in a stable order.
