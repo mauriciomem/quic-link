@@ -540,7 +540,11 @@ func replyDialError(stream transport.Stream, h proto.Header, err error) error {
 			Msg:    err.Error(),
 		})
 		_ = stream.Close()
-		return fmt.Errorf("dial target %q: %w", h.Target, err)
+		// Named by whichever way the stream asked. A request that arrived by
+		// name carries no target, so blaming the target field would describe an
+		// empty one and send whoever read it looking through the wrong table
+		// for something that was never there.
+		return fmt.Errorf("dial %q: %w", destinationOf(h), err)
 	}
 }
 
