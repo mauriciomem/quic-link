@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mauriciomem/quic-link/internal/backoff"
+	"github.com/mauriciomem/quic-link/internal/buildinfo"
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/router"
@@ -180,6 +181,15 @@ future release. Use "agent" in new deployments.`,
 // merged over the router's built-in ssh and docker defaults. idCfg carries the
 // key-age hygiene settings from the identity config block.
 func agentRun(ctx context.Context, listen, dial string, routes, vhosts map[string]string, keyFile string, authorized pinList, idCfg config.Identity) error {
+	// Captured here, at the top of the function that does the agent's real
+	// work, rather than in main() or an init(): this is the closest thing
+	// the tree has to a tracked "agent process start time" today, and
+	// adding a new package-level global just to shave a few milliseconds
+	// off the timestamp (config parsing, flag validation) would be
+	// speculative precision nobody asked for. GetStatus reports this
+	// verbatim as StartedUnixMs.
+	startedAt := time.Now()
+
 	// Check the age of the local identity key before binding any network
 	// resources. An absent .meta file means the key age is unknown — we
 	// silently skip the check rather than treating the absence as an alarm.
@@ -217,7 +227,12 @@ func agentRun(ctx context.Context, listen, dial string, routes, vhosts map[strin
 	if err != nil {
 		return fmt.Errorf("own pin: %w", err)
 	}
-	serveOpts := tunnel.ServeOpts{WarnKeyAgeDays: idCfg.WarnKeyAgeDays, OwnPin: ownPin}
+	serveOpts := tunnel.ServeOpts{
+		WarnKeyAgeDays: idCfg.WarnKeyAgeDays,
+		OwnPin:         ownPin,
+		Version:        buildinfo.Version(),
+		StartedAt:      startedAt,
+	}
 
 	if dial != "" {
 		return agentDialOut(ctx, dial, tlsConf, rtr, authorized, serveOpts)

@@ -28,6 +28,41 @@ type ServeOpts struct {
 	// refused: the two ends would be sharing one keypair, so neither could tell
 	// which role the other was playing. Leave empty to skip the check.
 	OwnPin string
+	// ControlPolicy decides whether an authenticated peer may invoke a given
+	// control-plane RPC (Ping, GetStatus, and whatever is added later). Nil
+	// defaults to allow-all, matching the router's own default posture for
+	// data-plane authorization; it exists so a future per-key policy is a
+	// value swap here, not new plumbing through the control stream.
+	ControlPolicy control.Policy
+	// Version is reported to a client's GetStatus call as this agent's own
+	// build version. Empty means unknown, not a build defect — an agent
+	// built without version stamping still serves GetStatus, it just has
+	// nothing informative to say for this field.
+	Version string
+	// StartedAt is reported to a client's GetStatus call as StartedUnixMs.
+	// The zero value means unknown; GetStatus leaves the field at zero
+	// rather than reporting a clearly-wrong timestamp for it.
+	StartedAt time.Time
+}
+
+// controlRouteSource adapts *router.Router to control.RouteSource,
+// converting router.RouteDetail into control.RouteDetail. This is the one
+// conversion boundary allowed to know about both types: internal/control
+// must not import internal/router (a control-plane RPC and a data-plane
+// dial target are two different assets guarded by two different
+// boundaries), so the adapter lives here, in the one package that already
+// imports both.
+type controlRouteSource struct {
+	rtr *router.Router
+}
+
+func (s controlRouteSource) RouteDetails() []control.RouteDetail {
+	details := s.rtr.RouteDetails()
+	out := make([]control.RouteDetail, len(details))
+	for i, d := range details {
+		out[i] = control.RouteDetail{Name: d.Name, Address: d.Address, Builtin: d.Builtin}
+	}
+	return out
 }
 
 // SameIdentityAsPeer reports whether the peer is using our own identity. It is
@@ -169,7 +204,7 @@ func serveStream(
 	}
 
 	if h.Kind == proto.KindControl {
-		return serveControl(ctx, conn, stream, peer, h, cs, openTimer, sessionStart, opt)
+		return serveControl(ctx, conn, stream, peer, h, rtr, cs, openTimer, sessionStart, opt)
 	}
 
 	// Extract the correlation id stamped by the client. It may be absent for
@@ -218,12 +253,15 @@ func serveStream(
 // gRPC until the stream closes — at which point the whole session is torn down
 // (control-stream closure is session death). sessionStart is the time the
 // outer session was accepted, used to compute session duration on disconnect.
+// rtr supplies the route table for a GetStatus call, wrapped in an adapter
+// so internal/control never has to import internal/router itself.
 func serveControl(
 	ctx context.Context,
 	conn transport.Conn,
 	stream transport.Stream,
 	peer router.Identity,
 	h proto.Header,
+	rtr *router.Router,
 	cs *controlState,
 	openTimer *time.Timer,
 	sessionStart time.Time,
@@ -277,7 +315,12 @@ func serveControl(
 
 	slog.Info("control stream opened", "role", "agent", "peer", peer.Short())
 	// Serve gRPC until the control stream dies; then the session is dead.
-	_ = control.Serve(ctx, stream)
+	controlOpts := control.ServeOpts{
+		Routes:    controlRouteSource{rtr: rtr},
+		Version:   opt.Version,
+		StartedAt: opt.StartedAt,
+	}
+	_ = control.Serve(ctx, stream, control.PeerIdentity{Pin: peer.Pin}, opt.ControlPolicy, controlOpts)
 	slog.Info("client disconnected",
 		"role", "agent",
 		"peer", peer.Short(),

@@ -203,8 +203,10 @@ func TestPingAuthRejected(t *testing.T) {
 // ---- test helpers ------------------------------------------------------------
 
 // mustStartServe starts a QUIC serve tunnel backed by rtr and returns the
-// server's UDP addr string (host:port). Cleanup is registered with t.
-func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, rtr *router.Router) string {
+// server's UDP addr string (host:port). opts is optional and forwarded to
+// tunnel.Serve unchanged; omit it for the same behaviour as before opts
+// existed. Cleanup is registered with t.
+func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, rtr *router.Router, opts ...tunnel.ServeOpts) string {
 	t.Helper()
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
@@ -224,7 +226,7 @@ func mustStartServe(t *testing.T, ctx context.Context, tlsConf *tls.Config, rtr 
 	}
 	t.Cleanup(func() { ln.Close() })
 
-	go tunnel.Serve(ctx, ln, rtr) //nolint:errcheck
+	go tunnel.Serve(ctx, ln, rtr, opts...) //nolint:errcheck
 	return ln.Addr().String()
 }
 
