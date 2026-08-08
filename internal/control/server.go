@@ -101,7 +101,7 @@ func (s server) authorize(
 		// change that was attempted and not permitted has to be written down
 		// here or nowhere. It is the attempts nobody expected that an
 		// operator most needs to be able to find afterwards.
-		if mutatingMethods[method] {
+		if changesTheAgent(method) {
 			s.auditMutation(method, auditedName(req), verdictDenied, "not permitted")
 		}
 		return nil, status.Error(codes.PermissionDenied, err.Error())

@@ -303,7 +303,11 @@ func TestAddVhostE2E_ARefusedNameCannotFloodTheLog(t *testing.T) {
 	sink := installRecordSink(t)
 	client, _ := addVhostRig(t, ctx, tunnel.ServeOpts{AllowRemoteRouteMutation: true})
 
-	hostile := strings.Repeat("a", 4000) + "\n\x1b]0;pwned\x07\u202e.internal"
+	// The separators are here because they are neither control nor format
+	// characters: a check written against those two categories alone misses
+	// them, and a reader that treats one as a line break sees output that looks
+	// like more lines than were written.
+	hostile := strings.Repeat("a", 4000) + "\n\x1b]0;pwned\x07\u202e\u2028\u2029.internal"
 	if _, err := addVhost(t, ctx, client, hostile, 3000); err == nil {
 		t.Fatal("a 4000-byte name with control bytes in it was published")
 	}
@@ -313,7 +317,7 @@ func TestAddVhostE2E_ARefusedNameCannotFloodTheLog(t *testing.T) {
 	if len(a["name"]) > 128 {
 		t.Errorf("the audit line recorded %d bytes of a caller-chosen name; it must be bounded", len(a["name"]))
 	}
-	for _, bad := range []string{"\n", "\x1b", "\x07", "\u202e"} {
+	for _, bad := range []string{"\n", "\x1b", "\x07", "\u202e", "\u2028", "\u2029"} {
 		if strings.Contains(a["name"], bad) {
 			t.Errorf("the audit line kept %q from a caller-chosen name", bad)
 		}

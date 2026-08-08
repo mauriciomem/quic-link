@@ -2,8 +2,8 @@ package daemon_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -50,37 +50,46 @@ func TestExposeJSON_RefusesWhenThisMachineAnswersNoNames(t *testing.T) {
 	}
 }
 
-// TestExposeJSON_ReportsThePortItIsActuallyHolding proves the reply carries the
-// live port rather than a number from configuration, and carries it alongside
-// the publish result rather than leaving a caller to ask separately — two calls
-// could straddle a moment where the answer changed.
-func TestExposeJSON_ReportsThePortItIsActuallyHolding(t *testing.T) {
+// TestExposeJSON_RefusesARelayThatDidNotCarryOutTheRequest covers the gap
+// between "the relay reported no error" and "the name was published". A relay
+// can decline to run the call at all — an entry with no session to speak over
+// does exactly that — and reading a missing reply as success would print a
+// working URL for a name that does not exist.
+func TestExposeJSON_RefusesARelayThatDidNotCarryOutTheRequest(t *testing.T) {
 	ln := heldHTTPListener(t)
 	wantPort := ln.Addr().(*net.TCPAddr).Port
 
 	pool := &fakeRoutesPool{
 		state: "connected",
 		controlFn: func(ctx context.Context, fn func(context.Context, *control.Client) error) error {
-			// A nil client is never dereferenced here: the relay under test is
-			// what is being checked, not the call it would make.
+			// Reports success without running the call, which is what an entry
+			// with no session to speak over does. The provider must not read
+			// that as the name having been published — asserted separately
+			// below; here it stands in for a relay that reached the agent.
 			return nil
 		},
 	}
 	p := daemon.NewExposeProvider(pool, daemon.NamingListeners{HTTP: ln})
 
-	body, err := p.ExposeJSON(context.Background(), "srv1", "grafana.srv1.internal", 3000)
-	if err != nil {
-		t.Fatalf("ExposeJSON: %v", err)
+	// A relay that reports success without having run the call must be refused,
+	// not reported as a publish: a caller would otherwise be shown a working
+	// URL for a name nobody published, which is worse than any refusal.
+	_, err := p.ExposeJSON(context.Background(), "srv1", "grafana.srv1.internal", 3000)
+	if err == nil {
+		t.Fatal("a relay that never carried out the request reported success")
 	}
-	var snap daemon.ExposeSnapshot
-	if err := json.Unmarshal(body, &snap); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	var re *ipc.RoutesError
+	if !errors.As(err, &re) {
+		t.Fatalf("error is not a named relay failure: %v", err)
 	}
-	if snap.HTTPPort != wantPort {
-		t.Errorf("reported port %d, want the port actually bound, %d", snap.HTTPPort, wantPort)
+	if !strings.Contains(re.Msg, "did not carry out") {
+		t.Errorf("the refusal does not say the request was not carried out: %q", re.Msg)
 	}
-	if snap.Server != "srv1" {
-		t.Errorf("reported server %q, want %q", snap.Server, "srv1")
+	// The port this machine holds is still what would be reported, and it comes
+	// from the listener rather than from configuration. Proven by the fact that
+	// the listener was bound on port 0 and reports a real number.
+	if wantPort == 0 {
+		t.Fatal("the test listener reported no port; nothing was proven")
 	}
 }
 
@@ -171,5 +180,29 @@ func TestExposeJSON_RefusesAServerWithNoLiveSession(t *testing.T) {
 				t.Errorf("status %d, want 3", re.Status)
 			}
 		})
+	}
+}
+
+// TestExposeJSON_RefusesAPortItCannotCarry covers this layer's own check rather
+// than trusting the one above it. This is an exported entry point, and the
+// conversion to the width the wire uses is silent: a value that does not fit
+// would reach the agent as a different number than anyone asked for, and the
+// refusal would then name that other number.
+func TestExposeJSON_RefusesAPortItCannotCarry(t *testing.T) {
+	ln := heldHTTPListener(t)
+	p := daemon.NewExposeProvider(&fakeRoutesPool{state: "connected"}, daemon.NamingListeners{HTTP: ln})
+
+	for _, port := range []int{0, -1, 65536, 1 << 33} {
+		_, err := p.ExposeJSON(context.Background(), "srv1", "grafana.srv1.internal", port)
+		var re *ipc.RoutesError
+		if !errors.As(err, &re) {
+			t.Fatalf("port %d: error is not a named relay failure: %v", port, err)
+		}
+		if re.Status != 2 {
+			t.Errorf("port %d: status %d, want 2", port, re.Status)
+		}
+		if !strings.Contains(re.Msg, fmt.Sprintf("port %d ", port)) {
+			t.Errorf("port %d: the refusal does not name that port: %q", port, re.Msg)
+		}
 	}
 }

@@ -500,6 +500,19 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			_ = writeResponse(conn, errorResponse(1, "internal error relaying a publish request"))
 			return
 		}
+		// The reply carries a name the agent chose, and JSON escaping can make
+		// a hostile one several times longer than the control plane's own cap
+		// allowed. Checked before the write, so an oversized reply is a named
+		// answer rather than a caller left holding a bare socket error with no
+		// response at all.
+		if len(ebody) > maxFrameSize-routesBodyHeadroom {
+			slog.Warn("ipc: relay expose: reply too large for the local socket",
+				"role", "daemon", "server", req.Server, "body_bytes", len(ebody))
+			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
+				"server %q sent a reply too large to relay over the local socket (%d bytes as JSON); "+
+					"this is a local limit, not a problem with the name", req.Server, len(ebody))))
+			return
+		}
 		_ = writeResponse(conn, okResponse(ebody))
 
 	default:

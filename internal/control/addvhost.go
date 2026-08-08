@@ -39,14 +39,20 @@ type VhostPublisher interface {
 	AddVhost(host string, port int) error
 }
 
-// mutatingMethods names the control-plane methods that change what this agent
-// does, as opposed to reporting on it.
+// changesTheAgent reports whether a method changes what this agent does, as
+// opposed to reporting on it.
 //
-// It is one list consulted by both the authorization posture and the audit
-// trail. Two lists would eventually disagree about which calls matter, and the
-// disagreement would show up as a change that was permitted but never recorded.
-var mutatingMethods = map[string]bool{
-	"AddVhost": true,
+// There is deliberately only one list, and it names the calls that are safe
+// without permission — so anything else is treated as a change. Two lists, one
+// naming what to refuse and one naming what to write down, would eventually
+// disagree, and the way that disagreement shows up is the worst of both: a
+// change refused with no record of anyone having tried.
+//
+// It also decides the answer for a method nobody has classified yet, and
+// decides it the safe way: a call this build does not recognize is treated as
+// a change, so it is refused and recorded rather than waved through.
+func changesTheAgent(method string) bool {
+	return !readOnlyMethods[method]
 }
 
 // maxAuditedNameLen bounds how much of a caller's requested name is written to
@@ -81,6 +87,12 @@ func auditName(s string) string {
 		case unicode.Is(unicode.Cf, r):
 			// Format characters, which includes the ones that flip the
 			// direction text is read in.
+			continue
+		case unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
+			// Line and paragraph separators. They are neither control nor
+			// format characters, so the two cases above miss them, and a
+			// reader that treats them as line breaks would see a log line
+			// that appears to be two.
 			continue
 		}
 		out = append(out, r)

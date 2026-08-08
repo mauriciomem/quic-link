@@ -1,8 +1,8 @@
 package config_test
 
-// naming_test.go enforces what names_baseline_test.go recorded as missing at
-// step 2.0: the [names] table and every server name are now checked, and the
-// two keys that shipped as reserved are refused with a reason.
+// naming_test.go enforces what names_baseline_test.go recorded as missing
+// before this: the [names] table and every server name are now checked, and
+// the two keys that shipped as reserved are refused with a reason.
 //
 // The most important case in this file is a suffix of ".". It is one line of
 // configuration, and accepting it would point the whole machine's DNS at

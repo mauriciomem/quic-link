@@ -92,6 +92,11 @@ func sanitizeAgentString(s string) string {
 			// sequence or JSON syntax, but the whole point of one (like a
 			// bidi override) is to make already-honest bytes render in a
 			// different, misleading order.
+		case unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
+			// Line and paragraph separators, which are neither control nor
+			// format characters and so are missed by both cases above. A
+			// consumer that treats one as a line break reads output as having
+			// more lines than were written.
 		default:
 			b.WriteRune(r)
 		}

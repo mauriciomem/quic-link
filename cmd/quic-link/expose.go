@@ -27,7 +27,7 @@ func newExposeCmd(a *app) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "expose [SERVER] PORT --name NAME",
 		Short: "Publish a server's local port under a hostname, for as long as its agent runs",
-		Args:  cobra.RangeArgs(1, 2),
+		Args:  wrapArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runExpose(cmd, a, args, name)
 		},

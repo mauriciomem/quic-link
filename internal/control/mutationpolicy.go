@@ -27,7 +27,7 @@ var readOnlyMethods = map[string]bool{
 
 // Authorize implements Policy.
 func (p MutationPolicy) Authorize(_ PeerIdentity, method string) error {
-	if readOnlyMethods[method] {
+	if !changesTheAgent(method) {
 		return nil
 	}
 	if p.AllowMutation {

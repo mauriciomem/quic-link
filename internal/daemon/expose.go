@@ -80,6 +80,14 @@ func (p *exposeProvider) ExposeJSON(ctx context.Context, server, host string, po
 		return nil, &ipc.RoutesError{Status: 3, Msg: msg}
 	}
 
+	// Checked here as well as by the caller, because this is an exported entry
+	// point and the narrowing below is silent: a value that does not fit would
+	// arrive at the agent as a different number than anyone asked for.
+	if port < 1 || port > 65535 {
+		return nil, &ipc.RoutesError{Status: 2, Msg: fmt.Sprintf(
+			"port %d is outside the usable range 1-65535", port)}
+	}
+
 	var resp *controlpb.AddVhostResponse
 	callErr := p.pool.ControlCall(ctx, server, func(cctx context.Context, c *control.Client) error {
 		r, aerr := c.AddVhost(cctx, &controlpb.AddVhostRequest{Host: host, Port: uint32(port)})
@@ -91,6 +99,14 @@ func (p *exposeProvider) ExposeJSON(ctx context.Context, server, host string, po
 	})
 	if callErr != nil {
 		return nil, exposeFailure(server, callErr)
+	}
+	// A relay can report no error and still not have made the call — an entry
+	// that has no session to speak over says so by declining to run it. Reading
+	// a missing reply as success would print a working URL for a name nobody
+	// published, which is the one outcome worse than a refusal.
+	if resp == nil {
+		return nil, &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
+			"server %q did not carry out the request; try again", server)}
 	}
 
 	snap := ExposeSnapshot{Schema: 1, Server: server, Host: resp.GetHost(), HTTPPort: httpPort}
