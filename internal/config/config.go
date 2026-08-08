@@ -68,6 +68,21 @@ type Agent struct {
 	AuthorizedClients []string          `toml:"authorized_clients"`
 	Routes            map[string]string `toml:"routes"`
 	Vhosts            map[string]string `toml:"vhosts"` // hostname -> address
+	// AllowRemoteRouteMutation lets an authenticated client publish a name on
+	// this agent while it is running. Off unless the operator says otherwise:
+	// a client is trusted to reach the services this agent already publishes,
+	// which is a smaller thing than being trusted to decide what it publishes.
+	//
+	// It is deliberately settable only here, in a file, and not by a flag or
+	// an environment variable. A setting that can be turned on from the
+	// process environment can be turned on by anything that prepares that
+	// environment — a service unit, a container definition, a wrapper script —
+	// which is a much wider and less reviewable surface than a file somebody
+	// edited on purpose.
+	//
+	// Only the agent role reads it. A configuration shared between roles may
+	// carry it harmlessly.
+	AllowRemoteRouteMutation bool `toml:"allow_remote_route_mutation"`
 }
 
 // Log controls structured logging behavior.

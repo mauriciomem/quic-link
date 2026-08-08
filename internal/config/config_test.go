@@ -1056,3 +1056,132 @@ pin  = "`+pin+`"
 		t.Fatalf("Validate(RoleClient): %v", err)
 	}
 }
+
+// ---- remote route mutation opt-in -------------------------------------------
+
+// agentWithMutationKey builds a valid agent-role config, optionally carrying
+// the opt-in line. The three states — absent, explicitly false, explicitly
+// true — are separate cases because they are separate paths through the
+// decoder: the first leaves the field at its zero value, the other two have
+// the decoder visit and assign it.
+func agentWithMutationKey(t *testing.T, line string) string {
+	t.Helper()
+	return writeConfig(t, `
+schema = 1
+[agent]
+listen = "0.0.0.0:7443"
+authorized_clients = ["`+mustPin(t)+`"]
+`+line+`
+`)
+}
+
+// TestAgentMutationOptIn_AbsentIsOff is the case that matters most, because it
+// is the one nobody writes down: a configuration that says nothing about
+// remote changes must not permit them. The whole safety of the default rests
+// on a zero value, which no line of code asserts on its own.
+func TestAgentMutationOptIn_AbsentIsOff(t *testing.T) {
+	unsetAllQLEnv(t)
+	cfg, err := config.Load(agentWithMutationKey(t, ""))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.AllowRemoteRouteMutation {
+		t.Error("a config that never mentions remote route mutation permits it")
+	}
+}
+
+// TestAgentMutationOptIn_ExplicitOff covers the operator who wrote the answer
+// down. It reaches the same conclusion by a different route through the
+// decoder, which is why it is not the same test as the one above.
+func TestAgentMutationOptIn_ExplicitOff(t *testing.T) {
+	unsetAllQLEnv(t)
+	cfg, err := config.Load(agentWithMutationKey(t, "allow_remote_route_mutation = false"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Agent.AllowRemoteRouteMutation {
+		t.Error("an explicit false was read as true")
+	}
+}
+
+// TestAgentMutationOptIn_ExplicitOn proves the setting can actually be turned
+// on. Without it, the two tests above would pass against a field nothing ever
+// sets, and the default would look safe for the wrong reason.
+func TestAgentMutationOptIn_ExplicitOn(t *testing.T) {
+	unsetAllQLEnv(t)
+	cfg, err := config.Load(agentWithMutationKey(t, "allow_remote_route_mutation = true"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Agent.AllowRemoteRouteMutation {
+		t.Error("an explicit true was not read")
+	}
+}
+
+// TestAgentMutationOptIn_MisspelledKeyIsRefused matters more than it looks.
+// The key is only useful if the exact spelling that turns it on is the only one
+// accepted: a near miss that loaded silently would leave an operator convinced
+// they had switched something on.
+func TestAgentMutationOptIn_MisspelledKeyIsRefused(t *testing.T) {
+	unsetAllQLEnv(t)
+	_, err := config.Load(agentWithMutationKey(t, "allow_remote_route_mutations = true"))
+	if err == nil {
+		t.Fatal("a misspelled opt-in key loaded without complaint")
+	}
+	if !errors.Is(err, config.ErrInvalid) {
+		t.Errorf("error does not wrap ErrInvalid: %v", err)
+	}
+	if !strings.Contains(err.Error(), "allow_remote_route_mutations") {
+		t.Errorf("the error does not name the key that was not understood: %v", err)
+	}
+}
+
+// TestAgentMutationOptIn_WrongTypeIsRefused keeps a value that looks like a
+// yes from being read as one. A string where a true or false belongs is a
+// mistake worth reporting, not something to interpret.
+func TestAgentMutationOptIn_WrongTypeIsRefused(t *testing.T) {
+	unsetAllQLEnv(t)
+	_, err := config.Load(agentWithMutationKey(t, `allow_remote_route_mutation = "yes"`))
+	if err == nil {
+		t.Fatal(`allow_remote_route_mutation = "yes" was accepted`)
+	}
+	if !errors.Is(err, config.ErrInvalid) {
+		t.Errorf("error does not wrap ErrInvalid: %v", err)
+	}
+}
+
+// TestAgentMutationOptIn_ClientRoleSaysNothingAboutIt pins a deliberate
+// silence. One configuration file is commonly shared by both roles, so an
+// agent-only setting appearing in a client-role run is ordinary rather than
+// suspect, and warning about it would teach an operator to ignore warnings.
+// The value still survives loading; it simply goes unread.
+func TestAgentMutationOptIn_ClientRoleSaysNothingAboutIt(t *testing.T) {
+	unsetAllQLEnv(t)
+	pin := mustPin(t)
+	path := writeConfig(t, `
+schema = 1
+[servers.s1]
+addr = "1.2.3.4:7443"
+pin  = "`+pin+`"
+[agent]
+listen = "0.0.0.0:7443"
+authorized_clients = ["`+pin+`"]
+allow_remote_route_mutation = true
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	warnings, err := cfg.Validate(config.RoleClient)
+	if err != nil {
+		t.Fatalf("Validate(RoleClient): %v", err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "allow_remote_route_mutation") {
+			t.Errorf("a client-role run warned about an agent-only setting: %q", w)
+		}
+	}
+	if !cfg.Agent.AllowRemoteRouteMutation {
+		t.Error("the value did not survive loading under the client role")
+	}
+}

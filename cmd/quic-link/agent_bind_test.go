@@ -62,7 +62,7 @@ func TestAgent_BindsAndShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately so the agent shuts down without blocking
 
-	err := agentRun(ctx, listenAddr, "", nil, nil, keyPath, pinList{clientPin}, minimalIdentityCfg())
+	err := agentRun(ctx, config.Agent{Listen: listenAddr}, keyPath, pinList{clientPin}, minimalIdentityCfg())
 
 	// context.Canceled (or the equivalent "server closed" / "use of closed"
 	// from QUIC-go tearing down on cancel) is the expected return value.
@@ -116,7 +116,7 @@ func TestAgent_BindsOnIPv4Loopback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := agentRun(ctx, "127.0.0.1:0", "", nil, nil, keyPath, pinList{clientPin}, minimalIdentityCfg())
+	err := agentRun(ctx, config.Agent{Listen: "127.0.0.1:0"}, keyPath, pinList{clientPin}, minimalIdentityCfg())
 
 	// A bind error would look like: "bind 127.0.0.1:0: ..."
 	// An address-resolution error: "invalid listen address: ..."

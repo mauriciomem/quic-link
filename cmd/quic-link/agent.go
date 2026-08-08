@@ -159,8 +159,11 @@ future release. Use "agent" in new deployments.`,
 			effectiveRoutes := agentCfg.Routes
 			effectiveVhosts := agentCfg.Vhosts
 
-			return agentRun(cmd.Context(), agentCfg.Listen, agentCfg.Dial,
-				effectiveRoutes, effectiveVhosts, effectiveKey, effectiveClients, a.cfg.Identity)
+			effectiveAgent := *agentCfg
+			effectiveAgent.Routes = effectiveRoutes
+			effectiveAgent.Vhosts = effectiveVhosts
+			effectiveAgent.AuthorizedClients = nil // carried separately, already resolved
+			return agentRun(cmd.Context(), effectiveAgent, effectiveKey, effectiveClients, a.cfg.Identity)
 		},
 	}
 
@@ -180,7 +183,12 @@ future release. Use "agent" in new deployments.`,
 // routes is the full set of route overrides to hand to the router; it is
 // merged over the router's built-in ssh and docker defaults. idCfg carries the
 // key-age hygiene settings from the identity config block.
-func agentRun(ctx context.Context, listen, dial string, routes, vhosts map[string]string, keyFile string, authorized pinList, idCfg config.Identity) error {
+// agentRun runs the agent. It takes the agent's settings as a value rather
+// than a pointer: the caller's copy is part of the loaded configuration, and
+// nothing below here has any business changing what was loaded.
+func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized pinList, idCfg config.Identity) error {
+	listen, dial := ag.Listen, ag.Dial
+	routes, vhosts := ag.Routes, ag.Vhosts
 	// Captured here, at the top of the function that does the agent's real
 	// work, rather than in main() or an init(): this is the closest thing
 	// the tree has to a tracked "agent process start time" today, and
@@ -227,11 +235,16 @@ func agentRun(ctx context.Context, listen, dial string, routes, vhosts map[strin
 	if err != nil {
 		return fmt.Errorf("own pin: %w", err)
 	}
-	serveOpts := tunnel.ServeOpts{
-		WarnKeyAgeDays: idCfg.WarnKeyAgeDays,
-		OwnPin:         ownPin,
-		Version:        buildinfo.Version(),
-		StartedAt:      startedAt,
+	serveOpts := agentServeOpts(ag, idCfg, ownPin, startedAt)
+
+	if ag.AllowRemoteRouteMutation {
+		// Said out loud at the one moment an operator is certainly reading
+		// this program's output. Every client this agent accepts can publish
+		// names on it while it runs, and an operator who did not intend that
+		// is the only person who can tell.
+		slog.Warn("this agent accepts remote changes to what it publishes; "+
+			"every authenticated client may publish names on it until it restarts",
+			"role", "agent")
 	}
 
 	if dial != "" {
@@ -285,6 +298,23 @@ func agentRun(ctx context.Context, listen, dial string, routes, vhosts map[strin
 		"authorized_clients", len(authorized),
 	)
 	return tunnel.Serve(ctx, ln, rtr, serveOpts)
+}
+
+// agentServeOpts turns the agent's settings into what the serving layer needs.
+//
+// It is a plain function of its inputs so that what an agent will actually do
+// can be checked from a configuration file alone, without binding a socket or
+// starting anything. Carrying a setting from a file to the code that acts on it
+// is exactly the step that is easy to leave half-done, and this is where it
+// becomes visible.
+func agentServeOpts(ag config.Agent, idCfg config.Identity, ownPin string, startedAt time.Time) tunnel.ServeOpts {
+	return tunnel.ServeOpts{
+		WarnKeyAgeDays:           idCfg.WarnKeyAgeDays,
+		OwnPin:                   ownPin,
+		Version:                  buildinfo.Version(),
+		StartedAt:                startedAt,
+		AllowRemoteRouteMutation: ag.AllowRemoteRouteMutation,
+	}
 }
 
 // agentDialOut runs the agent against a client that waits rather than connects.

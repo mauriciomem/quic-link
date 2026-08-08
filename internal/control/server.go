@@ -36,6 +36,7 @@ type server struct {
 	peer      PeerIdentity
 	policy    Policy
 	routes    RouteSource
+	names     VhostPublisher
 	version   string
 	startedAt time.Time
 }
@@ -50,6 +51,15 @@ type ServeOpts struct {
 	// GetStatus reports an empty route list rather than failing — an agent
 	// with nothing to report is a valid configuration, not an error.
 	Routes RouteSource
+	// Names supplies the ability to publish a name while the agent runs. Nil
+	// means the agent cannot, and says so.
+	//
+	// The asymmetry with Routes above is deliberate. Being asked to report
+	// something one has none of has an honest answer: nothing. Being asked to
+	// change something and quietly not changing it has no honest answer at
+	// all, so its absence is reported as a refusal rather than treated as
+	// success.
+	Names VhostPublisher
 	// Version is reported to a GetStatus caller as the agent's own build
 	// version. Empty means unknown, not a build defect.
 	Version string
@@ -84,6 +94,13 @@ func (s server) authorize(
 ) (interface{}, error) {
 	method := path.Base(info.FullMethod)
 	if err := s.policy.Authorize(s.peer, method); err != nil {
+		// A refused call stops here and never reaches its handler, so a
+		// change that was attempted and not permitted has to be written down
+		// here or nowhere. It is the attempts nobody expected that an
+		// operator most needs to be able to find afterwards.
+		if mutatingMethods[method] {
+			s.auditMutation(method, auditedName(req), verdictDenied, "not permitted")
+		}
 		return nil, status.Error(codes.PermissionDenied, err.Error())
 	}
 	return handler(ctx, req)
@@ -131,6 +148,7 @@ func Serve(ctx context.Context, stream transport.Stream, peer PeerIdentity, poli
 		peer:      peer,
 		policy:    policy,
 		routes:    opt.Routes,
+		names:     opt.Names,
 		version:   opt.Version,
 		startedAt: opt.StartedAt,
 	}

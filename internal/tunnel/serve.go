@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,11 +30,20 @@ type ServeOpts struct {
 	// which role the other was playing. Leave empty to skip the check.
 	OwnPin string
 	// ControlPolicy decides whether an authenticated peer may invoke a given
-	// control-plane RPC (Ping, GetStatus, and whatever is added later). Nil
-	// defaults to allow-all, matching the router's own default posture for
-	// data-plane authorization; it exists so a future per-key policy is a
-	// value swap here, not new plumbing through the control stream.
+	// control-plane RPC. Nil does NOT mean allow-all here: an agent serving
+	// real traffic falls back to a policy that permits reporting and refuses
+	// changes, so forgetting to set this cannot be what makes an agent
+	// remotely modifiable.
 	ControlPolicy control.Policy
+	// AllowRemoteRouteMutation is the operator's decision about whether an
+	// authenticated client may publish a name on this agent while it runs.
+	//
+	// When false, which is the default, the ability is withheld two ways: the
+	// policy refuses the call, and the capability is not built at all. Two
+	// gates because they fail differently — a refusal is recorded and tells
+	// the caller why, while an absent capability cannot be reached even if the
+	// refusal is one day wrong.
+	AllowRemoteRouteMutation bool
 	// Version is reported to a client's GetStatus call as this agent's own
 	// build version. Empty means unknown, not a build defect — an agent
 	// built without version stamping still serves GetStatus, it just has
@@ -69,6 +79,9 @@ type controlPlane struct {
 	// means this session reports no routes, which is a valid configuration
 	// rather than a failure.
 	routes control.RouteSource
+	// names publishes a hostname while the agent runs. A nil value means this
+	// agent cannot, and is what the operator's default produces.
+	names control.VhostPublisher
 }
 
 // controlRouteSource adapts *router.Router to control.RouteSource,
@@ -94,6 +107,45 @@ func (s controlRouteSource) RouteDetails() []control.RouteDetail {
 		}
 	}
 	return out
+}
+
+// controlVhostPublisher adapts the route table to control.VhostPublisher. It
+// lives here for the same reason the read-side adapter does: the control
+// package must not know about the route table's own types, so the translation
+// happens in the one package that already imports both.
+//
+// The route table's reasons are preserved in the message an operator sees, but
+// its error values do not cross the boundary — only this package's own do.
+type controlVhostPublisher struct {
+	rtr *router.Router
+}
+
+func (p controlVhostPublisher) AddVhost(host string, port int) error {
+	err := p.rtr.AddVhost(host, port)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, router.ErrVhostExists):
+		return fmt.Errorf("%w: %s", control.ErrNameTaken, detailOf(err, router.ErrVhostExists))
+	case errors.Is(err, router.ErrVhostRejected):
+		return fmt.Errorf("%w: %s", control.ErrNameRejected, detailOf(err, router.ErrVhostRejected))
+	default:
+		return err
+	}
+}
+
+// detailOf returns the part of err that says something the sentinel does not.
+//
+// Both sides of this boundary name the same condition — one for the caller, one
+// for whoever reads the route table's own errors — so joining them whole
+// produces a message that says it twice. Only the explanation is carried
+// across.
+func detailOf(err error, sentinel error) string {
+	msg, prefix := err.Error(), sentinel.Error()+": "
+	if i := strings.Index(msg, prefix); i >= 0 {
+		return msg[i+len(prefix):]
+	}
+	return msg
 }
 
 // SameIdentityAsPeer reports whether the peer is using our own identity. It is
@@ -194,6 +246,13 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 	var cp controlPlane
 	if rtr != nil {
 		cp.routes = controlRouteSource{rtr: rtr}
+		// Withheld unless the operator asked for it. This is the second of the
+		// two gates: the policy refuses such a call anyway, and this makes
+		// sure there would be nothing behind the refusal to reach even if it
+		// were wrong.
+		if opt.AllowRemoteRouteMutation {
+			cp.names = controlVhostPublisher{rtr: rtr}
+		}
 	}
 
 	cs := &controlState{}
@@ -366,10 +425,21 @@ func serveControl(
 	// Serve gRPC until the control stream dies; then the session is dead.
 	controlOpts := control.ServeOpts{
 		Routes:    cp.routes,
+		Names:     cp.names,
 		Version:   opt.Version,
 		StartedAt: opt.StartedAt,
 	}
-	_ = control.Serve(ctx, stream, control.PeerIdentity{Pin: peer.Pin}, opt.ControlPolicy, controlOpts)
+	// An agent serving real traffic never runs without a decision about what a
+	// client may change. Where no policy was supplied, the safe one applies:
+	// reporting is permitted, changing is not. The default lives here, in the
+	// layer that knows the operator's setting, rather than further down where
+	// callers that have no operator — tests, and anything embedding the control
+	// stream on its own — would inherit a refusal they never asked for.
+	policy := opt.ControlPolicy
+	if policy == nil {
+		policy = control.MutationPolicy{AllowMutation: opt.AllowRemoteRouteMutation}
+	}
+	_ = control.Serve(ctx, stream, control.PeerIdentity{Pin: peer.Pin}, policy, controlOpts)
 	slog.Info("client disconnected",
 		"role", "agent",
 		"peer", peer.Short(),
