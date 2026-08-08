@@ -1,7 +1,9 @@
 package daemon_test
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -264,7 +266,7 @@ func TestListenEntry_ReplacementLogNeverCarriesAFullPin(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	buf := captureLogs(t)
+	buf, replaced := captureLogsAwaitingReplacement(t)
 	r := newReverseRig(t)
 
 	r.connectAgent(t, ctx)
@@ -276,6 +278,23 @@ func TestListenEntry_ReplacementLogNeverCarriesAFullPin(t *testing.T) {
 	r.connectAgent(t, ctx)
 	if got := waitForDistinctConn(t, ctx, r.pool, "rev", incumbent, 15*time.Second); got == nil {
 		t.Fatal("replacement never happened")
+	}
+
+	// waitForDistinctConn only proves that promote has installed the new
+	// connection and unblocked Get — it says nothing about the "session
+	// replaced" log line, which promote writes in a separate statement after
+	// releasing the lock Get reads through. Nothing orders that write
+	// relative to Get returning, so reading buf immediately here would
+	// intermittently observe the buffer before the line lands. Waiting on
+	// replaced instead gives a real happens-before edge: the log write and
+	// the channel close happen in program order in the same call on the
+	// logging goroutine, and Go's memory model guarantees the close of a
+	// channel happens before a receive that returns because of it — so by
+	// the time this select returns, the write is guaranteed visible.
+	select {
+	case <-replaced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement was never logged")
 	}
 
 	out := buf.String()
@@ -394,4 +413,47 @@ func captureLogs(t *testing.T) *syncBuffer {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
+}
+
+// captureLogsAwaitingReplacement behaves like captureLogs, but also returns a
+// channel that closes the instant a log record containing "session replaced"
+// is written. slog hands a fully formatted record to the handler's
+// underlying io.Writer in a single Write call on the goroutine that produced
+// the log statement (log/slog's commonHandler serializes all such calls
+// under its own lock), so the write into buf and the channel close below
+// happen in program order in that one call. A test that receives from the
+// returned channel is therefore guaranteed — by the same rule that makes a
+// channel close visible to whoever it wakes — to see the line already in buf,
+// unlike polling buf.String(), which only proves mutual exclusion between
+// concurrent Write and String calls, never that the write actually happened
+// before the poll checked.
+func captureLogsAwaitingReplacement(t *testing.T) (*syncBuffer, <-chan struct{}) {
+	t.Helper()
+	var buf syncBuffer
+	seen := make(chan struct{})
+	w := &markerWatchingWriter{dst: &buf, marker: "session replaced", seen: seen}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf, seen
+}
+
+// markerWatchingWriter forwards every write to dst unchanged, then closes
+// seen the first time a write contains marker. It relies on its caller (the
+// standard library's slog handlers) never calling Write concurrently with
+// itself; closed is not guarded by a mutex on that basis.
+type markerWatchingWriter struct {
+	dst    io.Writer
+	marker string
+	seen   chan struct{}
+	closed bool
+}
+
+func (w *markerWatchingWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if !w.closed && bytes.Contains(p, []byte(w.marker)) {
+		w.closed = true
+		close(w.seen)
+	}
+	return n, err
 }
