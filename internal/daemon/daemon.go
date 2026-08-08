@@ -152,6 +152,9 @@ func Run(
 
 	// Create and start the IPC server.
 	srv := ipc.NewServer(socketPath, snap, attachPool)
+	// The routes relay is wired unconditionally: it depends only on the
+	// session pool, not on the naming layer (unlike doctor, just below).
+	srv.SetRoutes(NewRoutesProvider(pool))
 	if naming.Zone != nil {
 		srv.SetDoctor(&doctorProvider{naming: naming})
 	}
@@ -472,7 +475,11 @@ type PortsInfo struct {
 	Docker int `json:"docker"`
 }
 
-// RouteInfo describes one agent route (populated only under --routes).
+// RouteInfo describes one agent route, as reported live by the agent over
+// the control-plane routes relay. It is shared, field-for-field, by both
+// ServerSnapshot.Routes (declared here but never populated by BuildSnapshot —
+// see the comment where that field would be filled in, below) and
+// RoutesSnapshot (routes.go), the type the routes relay actually returns.
 type RouteInfo struct {
 	Target  string `json:"target"`
 	Address string `json:"address"`
@@ -521,8 +528,13 @@ func BuildSnapshot(
 				SSH:    ss.SSHPort,
 				Docker: ss.DockerPort,
 			},
-			// Routes are populated only under --routes via the GetStatus relay
-			// (omitted here; the agent does not yet implement GetStatus).
+			// Routes is deliberately left at its zero value here. Populating
+			// it would mean this pure function makes a network call to the
+			// agent, breaking its own contract (see the doc comment above)
+			// and making plain "status --json" pay the latency and failure
+			// modes of a live control-plane RPC for a field most callers
+			// never look at. A live route table is available through its
+			// own relay (RoutesSnapshot, routes.go), fetched only when asked.
 		})
 	}
 

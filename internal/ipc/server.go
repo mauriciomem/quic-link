@@ -47,6 +47,54 @@ type StatusProvider interface {
 	StatusJSON() ([]byte, error)
 }
 
+// RoutesProvider relays a live route-table query to a named server's agent
+// over the control plane and reports the result. The daemon injects a real
+// implementation that walks the session pool and the agent's control
+// stream; tests inject a stub. Returning raw JSON bytes decouples this
+// package from the daemon's own snapshot type, for the same reason
+// StatusProvider does.
+//
+// When no live routes can be produced right now, RoutesJSON should return a
+// *RoutesError naming exactly why not (a disabled server, one still
+// connecting, one waiting for its agent, one that permanently failed
+// authentication, an agent too old to answer this request, or a session
+// that dropped mid-call) rather than one interchangeable failure — each of
+// those is an expected, distinguishable outcome an operator needs to be
+// able to tell apart, not a bug. Any other error is treated as unexpected
+// and masked before it reaches the caller, the same way an unexpected
+// doctor or status error already is.
+type RoutesProvider interface {
+	RoutesJSON(ctx context.Context, server string) ([]byte, error)
+}
+
+// RoutesError is a RoutesProvider's way of saying "I already know exactly
+// why, and exactly what process-exit-style status that reason belongs to."
+// handleRPC relays Status and Msg verbatim when it sees this type, in place
+// of the generic mask it applies to every other provider error.
+type RoutesError struct {
+	Status uint
+	Msg    string
+}
+
+// Error implements the error interface.
+func (e *RoutesError) Error() string { return e.Msg }
+
+// routesRPCTimeout bounds how long the routes relay's own call to the agent
+// may take, applied on top of whatever bound the daemon enforces internally
+// on the control-plane call itself. It is generous headroom over that inner
+// bound (5 seconds in the daemon package, which this package cannot import)
+// so this is defense in depth against a caller-supplied context with no
+// deadline of its own, not the primary timeout.
+const routesRPCTimeout = 10 * time.Second
+
+// routesBodyHeadroom reserves space for the CBOR envelope wrapped around the
+// JSON route-table body (socket_schema, status, and the byte-string encoding
+// of body itself) before the frame-size check on the body runs. It only
+// needs to be larger than that envelope actually is — the body dominates the
+// frame's total size — so a generous fixed margin is simpler than encoding
+// the envelope twice just to measure it.
+const routesBodyHeadroom = 512
+
 // AttachPool looks up a pool entry for a named server and provides a live
 // connection for the attach splice. The server implementation (in
 // internal/daemon) satisfies both methods via its poolAttachAdapter.
@@ -103,6 +151,7 @@ type Server struct {
 	listener  net.Listener
 	status    StatusProvider
 	doctor    DoctorProvider
+	routes    RoutesProvider
 	pool      AttachPool
 	uid       int           // expected peer uid; checked at accept
 	connSem   chan struct{} // semaphore bounding concurrent connections
@@ -303,7 +352,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, releaseConn func
 
 	switch req.Kind {
 	case "rpc":
-		s.handleRPC(conn, req)
+		s.handleRPC(ctx, conn, req)
 	case "attach":
 		s.handleAttach(ctx, conn, req, releaseConn)
 	default:
@@ -313,7 +362,12 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, releaseConn func
 }
 
 // handleRPC dispatches method-specific logic and writes a single Response.
-func (s *Server) handleRPC(conn net.Conn, req Request) {
+// ctx is the server's own lifetime context (cancelled on shutdown); it bounds
+// the "routes" case's relay call so a wedged agent cannot hold a handler open
+// indefinitely. An unrecognized req.Method falls through to the default case
+// below and degrades cleanly — no schema change is needed to add a method
+// here, and none is needed to reject one this daemon does not know.
+func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 	slog.Debug("ipc: rpc", "role", "daemon", "method", req.Method)
 	switch req.Method {
 	case "doctor":
@@ -340,6 +394,61 @@ func (s *Server) handleRPC(conn net.Conn, req Request) {
 			return
 		}
 		_ = writeResponse(conn, okResponse(snap))
+
+	case "routes":
+		// A live relay to a remote agent, not a local read — the server name
+		// travels in req.Server, the same field handleAttach already uses to
+		// carry the target server, rather than a new field on Request just
+		// for this one method.
+		//
+		// This handler does not release its connSem slot early the way
+		// handleAttach does for a long splice: the relay's own call to the
+		// agent is bounded by routesRPCTimeout (10s), so holding the slot
+		// for that long is a deliberate, bounded trade-off, not an
+		// oversight — there is no unbounded hold to guard against here.
+		if s.routes == nil {
+			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer route relay requests"))
+			return
+		}
+		if req.Server == "" {
+			_ = writeResponse(conn, errorResponse(1, "routes: server name is required"))
+			return
+		}
+		rctx, cancel := context.WithTimeout(ctx, routesRPCTimeout)
+		body, err := s.routes.RoutesJSON(rctx, req.Server)
+		cancel()
+		if err != nil {
+			var re *RoutesError
+			if errors.As(err, &re) {
+				// The provider already knows exactly why and exactly what
+				// status that belongs to — relay both verbatim rather than
+				// replacing a distinguishable reason with a generic one.
+				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				return
+			}
+			slog.Warn("ipc: relay routes", "role", "daemon", "server", req.Server, "err", err)
+			_ = writeResponse(conn, errorResponse(1, "internal error relaying routes"))
+			return
+		}
+		// The provider replies with JSON, which costs materially more bytes
+		// per field than the protobuf wire format the control-plane call
+		// itself was capped at (repeated key names, quoting). A route table
+		// that fit under that cap can still, once re-encoded as JSON,
+		// exceed this socket's own frame cap — checked explicitly here,
+		// before attempting the write, so that case gets a named error
+		// response instead of writeFrame silently refusing the write later
+		// and leaving the caller with a bare socket error and no response
+		// frame at all.
+		if len(body) > maxFrameSize-routesBodyHeadroom {
+			slog.Warn("ipc: relay routes: route table too large for the local socket frame",
+				"role", "daemon", "server", req.Server, "body_bytes", len(body))
+			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
+				"server %q's route table is too large to relay over the local socket (%d bytes as JSON); this is a local IPC limit, not a problem with the agent",
+				req.Server, len(body))))
+			return
+		}
+		_ = writeResponse(conn, okResponse(body))
+
 	default:
 		_ = writeResponse(conn, errorResponse(1, fmt.Sprintf("unknown method %q", req.Method)))
 	}
@@ -443,3 +552,9 @@ func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, r
 // passed to the constructor because a daemon without one is a working daemon —
 // it simply says so when asked — and every existing caller stays as it was.
 func (s *Server) SetDoctor(d DoctorProvider) { s.doctor = d }
+
+// SetRoutes supplies the route-relay provider. Like SetDoctor, it is set
+// separately rather than passed to the constructor because a daemon without
+// one is a working daemon for every other RPC — it simply refuses the
+// "routes" method with a clear message until this is called.
+func (s *Server) SetRoutes(r RoutesProvider) { s.routes = r }

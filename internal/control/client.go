@@ -21,6 +21,18 @@ type Client struct {
 	cc *grpc.ClientConn
 }
 
+// maxControlRecvMsgSize caps how large a single control-plane RPC reply this
+// client will accept, in place of gRPC's built-in 4 MiB default. A route
+// table is a handful of short name/address pairs — nowhere near this size
+// even with hundreds of routes — so the practical risk this guards against is
+// not a legitimate agent's honest reply, but a compromised, still
+// correctly-pinned agent using the full stock 4 MiB as amplification against
+// the daemon's own memory for a single reply. 64 KiB matches the order of
+// magnitude already chosen for the unrelated IPC frame cap between the daemon
+// and the CLI, so the relay's two independent legs share one easy-to-remember
+// bound instead of two arbitrary ones.
+const maxControlRecvMsgSize = 64 * 1024
+
 // Close releases the gRPC client resources.
 func (c *Client) Close() error { return c.cc.Close() }
 
@@ -60,6 +72,7 @@ func NewClient(stream transport.Stream) (*Client, error) {
 		"passthrough:///control",
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxControlRecvMsgSize)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("control: new grpc client: %w", err)

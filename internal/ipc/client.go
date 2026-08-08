@@ -101,6 +101,47 @@ func (c *Client) StatusJSON() ([]byte, error) {
 	return []byte(resp.Body), nil
 }
 
+// RoutesJSON sends a routes RPC naming server and returns the raw JSON bytes
+// from Response.Body on success (the daemon's RoutesSnapshot shape). On a
+// non-zero status it returns a *RoutesError carrying the daemon's own status
+// and message verbatim — the same type the routes provider constructs
+// server-side — so a caller (and, eventually, exitCodeForError) can act on
+// the specific, already-distinguished reason rather than a generic wrapped
+// string. Daemon-absence and schema mismatch are reported the same way
+// StatusJSON reports them, since both are conditions about the socket itself
+// rather than about the routes relay.
+func (c *Client) RoutesJSON(server string) ([]byte, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	req := Request{
+		SocketSchema: SocketSchema,
+		Kind:         "rpc",
+		Method:       "routes",
+		Server:       server,
+	}
+	if err := writeRequest(conn, req); err != nil {
+		return nil, fmt.Errorf("ipc: write routes request: %w", err)
+	}
+
+	resp, err := readResponse(conn)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: read routes response: %w", err)
+	}
+
+	if resp.SocketSchema != SocketSchema {
+		return nil, fmt.Errorf("%w: daemon speaks schema %d, client expects %d",
+			ErrSchemaMismatch, resp.SocketSchema, SocketSchema)
+	}
+	if resp.Status != 0 {
+		return nil, &RoutesError{Status: resp.Status, Msg: resp.Msg}
+	}
+	return []byte(resp.Body), nil
+}
+
 // Probe sends a status RPC and returns nil on any valid response from a
 // conforming daemon (schema match, any status). It is used by the
 // single-instance check to determine whether a live owner is answering the
