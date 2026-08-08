@@ -45,6 +45,32 @@ type ServeOpts struct {
 	StartedAt time.Time
 }
 
+// dataRouter is the whole of what a data-plane stream needs from the route
+// table: turn a header into a connection. It is deliberately the smallest
+// surface that does that job, so a handler on this path cannot reach a
+// route-table mutator even by accident — those methods are not in the type
+// it holds, so a call to one is a compile error rather than something a
+// reviewer has to notice.
+type dataRouter interface {
+	Dial(ctx context.Context, peer router.Identity, h proto.Header) (net.Conn, error)
+}
+
+// controlPlane carries the capabilities the per-session control stream is
+// given. It is built once per connection, in the one function that
+// legitimately holds the concrete route table, so the per-stream handlers
+// never hold it themselves.
+//
+// Every field is an interface declared by the control package, which cannot
+// import the route table's own package. That is what makes this bundle
+// unable to grow a way to reach a mutator later: the widest any of these
+// can become is still a control-plane interface.
+type controlPlane struct {
+	// routes answers an administrative read of the route table. A nil value
+	// means this session reports no routes, which is a valid configuration
+	// rather than a failure.
+	routes control.RouteSource
+}
+
 // controlRouteSource adapts *router.Router to control.RouteSource,
 // converting router.RouteDetail into control.RouteDetail. This is the one
 // conversion boundary allowed to know about both types: internal/control
@@ -159,6 +185,17 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 	sessionStart := time.Now()
 	slog.Info("session established", "role", "agent", "peer", peer.Short())
 
+	// Built once per connection, from the one handle that legitimately holds
+	// the concrete route table. A session with no route table is a valid
+	// configuration, and it has to produce a bundle that reports nothing
+	// rather than one that looks present and then dereferences nothing: an
+	// adapter wrapping an absent table is not itself absent, so the check
+	// has to happen here, where the difference is still visible.
+	var cp controlPlane
+	if rtr != nil {
+		cp.routes = controlRouteSource{rtr: rtr}
+	}
+
 	cs := &controlState{}
 	openTimer := time.AfterFunc(controlOpenDeadline, func() {
 		if !cs.isOpen() {
@@ -181,7 +218,7 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 			return
 		}
 		go func() {
-			if err := serveStream(ctx, conn, stream, peer, rtr, cs, openTimer, sessionStart, opt); err != nil {
+			if err := serveStream(ctx, conn, stream, peer, rtr, cp, cs, openTimer, sessionStart, opt); err != nil {
 				slog.Warn("stream handler error", "err", err)
 			}
 		}()
@@ -192,12 +229,18 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 // serveControl, otherwise a data stream resolved and authorized via rtr, then
 // on status 0 spliced to the dialed connection. pipe() owns the lifetime of
 // both stream and svc once splicing begins.
+//
+// rtr is narrowed to dialing alone, and the control-plane capabilities arrive
+// prebuilt in cp. Neither is the concrete route table, so nothing on this
+// path can change what the agent forwards traffic to — administration and
+// forwarding are separated by the types, not by convention.
 func serveStream(
 	ctx context.Context,
 	conn transport.Conn,
 	stream transport.Stream,
 	peer router.Identity,
-	rtr *router.Router,
+	rtr dataRouter,
+	cp controlPlane,
 	cs *controlState,
 	openTimer *time.Timer,
 	sessionStart time.Time,
@@ -209,7 +252,7 @@ func serveStream(
 	}
 
 	if h.Kind == proto.KindControl {
-		return serveControl(ctx, conn, stream, peer, h, rtr, cs, openTimer, sessionStart, opt)
+		return serveControl(ctx, conn, stream, peer, h, cp, cs, openTimer, sessionStart, opt)
 	}
 
 	// Extract the correlation id stamped by the client. It may be absent for
@@ -258,15 +301,16 @@ func serveStream(
 // gRPC until the stream closes — at which point the whole session is torn down
 // (control-stream closure is session death). sessionStart is the time the
 // outer session was accepted, used to compute session duration on disconnect.
-// rtr supplies the route table for a GetStatus call, wrapped in an adapter
-// so internal/control never has to import internal/router itself.
+// cp supplies the control-plane capabilities, already wrapped in adapters by
+// the caller so the control package never has to know about the route table's
+// own types.
 func serveControl(
 	ctx context.Context,
 	conn transport.Conn,
 	stream transport.Stream,
 	peer router.Identity,
 	h proto.Header,
-	rtr *router.Router,
+	cp controlPlane,
 	cs *controlState,
 	openTimer *time.Timer,
 	sessionStart time.Time,
@@ -321,7 +365,7 @@ func serveControl(
 	slog.Info("control stream opened", "role", "agent", "peer", peer.Short())
 	// Serve gRPC until the control stream dies; then the session is dead.
 	controlOpts := control.ServeOpts{
-		Routes:    controlRouteSource{rtr: rtr},
+		Routes:    cp.routes,
 		Version:   opt.Version,
 		StartedAt: opt.StartedAt,
 	}
