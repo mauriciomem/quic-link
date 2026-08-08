@@ -375,27 +375,55 @@ func (e *listenEntry) Get(ctx context.Context) (Conn, error) {
 	}
 }
 
-// State returns the current snapshot. A server with no live peer reports
-// "listening" whether or not it has ever had one; the difference between never
-// having seen a peer and waiting for one to come back is carried by the log
-// text and by how long it has been in this state, not by another enum value.
+// listenStateLabel projects a listenEntry's internal state to the external
+// enum value reported by both State() and the not-available message
+// ControlCall produces when no client is currently held, so the two cannot
+// silently drift apart. A server with no live peer reports "listening"
+// whether or not it has ever had one; the difference between never having
+// seen a peer and waiting for one to come back is carried by the log text
+// and by how long it has been in this state, not by another enum value.
+func listenStateLabel(st internalConnState) string {
+	if st == stateConnected {
+		return "connected"
+	}
+	return "listening"
+}
+
+// State returns the current snapshot.
 func (e *listenEntry) State() SessionState {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	stateStr := "listening"
-	if e.intState == stateConnected {
-		stateStr = "connected"
-	}
-
 	return SessionState{
 		Name:       e.name,
-		State:      stateStr,
+		State:      listenStateLabel(e.intState),
 		Transport:  transportListen,
 		Since:      e.since,
 		SSHPort:    e.sshPort,
 		DockerPort: e.dockerPort,
 	}
+}
+
+// ControlCall copies the current control client under e.mu, releases the
+// lock, and only then invokes fn — the identical shape dialEntry.ControlCall
+// uses, so the two directions behave identically to any caller reaching them
+// through the SessionEntry interface. The control client lives on this side
+// of the connection in both directions (this end is always the gRPC client,
+// whichever end opened the transport), so there is nothing direction-specific
+// left to do here beyond which field and which state label are read.
+func (e *listenEntry) ControlCall(ctx context.Context, fn func(ctx context.Context, c *control.Client) error) error {
+	e.mu.Lock()
+	cclient := e.controlClient
+	st := e.intState
+	e.mu.Unlock()
+
+	if cclient == nil {
+		return fmt.Errorf("server %q: no control client available (session=%s)", e.name, listenStateLabel(st))
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, DefaultControlCallTimeout)
+	defer cancel()
+	return fn(callCtx, cclient)
 }
 
 // Close stops the accept loop, drops any live connection, and releases the

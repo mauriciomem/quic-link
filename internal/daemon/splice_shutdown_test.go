@@ -17,12 +17,14 @@ package daemon_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 )
@@ -127,6 +129,12 @@ func (p *fakeSplicePool) State() []daemon.SessionState { return p.states }
 
 func (p *fakeSplicePool) EntryState(_ string) (string, error) {
 	return "connected", nil
+}
+
+// ControlCall is not exercised by this file's shutdown-ordering tests; it
+// satisfies the interface with a clear refusal.
+func (p *fakeSplicePool) ControlCall(context.Context, string, func(context.Context, *control.Client) error) error {
+	return fmt.Errorf("fakeSplicePool: ControlCall not implemented")
 }
 
 // Close closes all issued connections, which in a real QUIC transport would

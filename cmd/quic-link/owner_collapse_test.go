@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 )
@@ -513,6 +514,12 @@ func (f *fakePoolForScope) EntryState(server string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unknown server %q", server)
+}
+
+// ControlCall is not exercised by this file's scoping tests; it satisfies
+// the interface with a clear refusal.
+func (f *fakePoolForScope) ControlCall(context.Context, string, func(context.Context, *control.Client) error) error {
+	return fmt.Errorf("fakePoolForScope: ControlCall not implemented")
 }
 
 func (f *fakePoolForScope) Close() {}

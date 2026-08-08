@@ -71,6 +71,14 @@ const (
 	transportRebindAfter = 10
 )
 
+// DefaultControlCallTimeout bounds a single administrative call made through
+// SessionEntry.ControlCall. It reuses the liveness probe's own timeout value
+// rather than inventing a new number: a peer slow enough to miss this
+// deadline is exactly the peer an administrative query like this one exists
+// to diagnose, so the call must not wait any longer for a reply than the
+// entry's own liveness detector would.
+const DefaultControlCallTimeout = DefaultProbeTimeout
+
 // LivenessPolicy controls the application-level keepalive probe that the daemon
 // runs on each connected session. Inject a fast fake in tests to avoid sleeping
 // for the real 10s/5s intervals.
@@ -236,6 +244,19 @@ func (p *realPool) EntryState(server string) (string, error) {
 	return entry.State().State, nil
 }
 
+// ControlCall looks up the named server's entry and delegates to its own
+// ControlCall. No type switch is needed here or anywhere above this method —
+// that is the point of every entry kind satisfying the same SessionEntry
+// interface. The not-found error mirrors Get's own shape rather than
+// inventing a second string for the identical fact.
+func (p *realPool) ControlCall(ctx context.Context, server string, fn func(ctx context.Context, c *control.Client) error) error {
+	entry, ok := p.entries[server]
+	if !ok {
+		return fmt.Errorf("pool: unknown server %q", server)
+	}
+	return entry.ControlCall(ctx, fn)
+}
+
 // Close tears down all pool entries.
 func (p *realPool) Close() {
 	for _, entry := range p.entries {
@@ -304,6 +325,14 @@ func (e *disabledEntry) State() SessionState {
 }
 
 func (e *disabledEntry) Close(_ error) {}
+
+// ControlCall always reports that no control client is available: a
+// disabled server never dials or listens, so it never has one.
+func (e *disabledEntry) ControlCall(_ context.Context, _ func(context.Context, *control.Client) error) error {
+	return fmt.Errorf("server %q is disabled; no control client available", e.name)
+}
+
+var _ SessionEntry = (*disabledEntry)(nil)
 
 // ---- dialEntry --------------------------------------------------------------
 
@@ -827,36 +856,67 @@ func (e *dialEntry) Get(ctx context.Context) (Conn, error) {
 	}
 }
 
+// dialStateLabel projects a dialEntry's internal state to the external enum
+// value reported by both State() and the not-available message ControlCall
+// produces when no client is currently held. Keeping both call sites behind
+// this one function means they cannot silently drift apart.
+//
+// stateReconnecting and stateConnecting both project to "connecting": from a
+// caller's perspective both simply mean "not healthy yet, may recover".
+// auth_failed is the one permanent state; it never recovers on its own. Do
+// NOT add a "reconnecting" case here — it would be a sixth enum value,
+// breaking the five-value open enum defined in the status contract.
+func dialStateLabel(st internalConnState) string {
+	switch st {
+	case stateConnected:
+		return "connected"
+	case stateAuthFailed:
+		// A permanent authentication rejection: the peer's pin does not
+		// match ours, and the loop has stopped. Consumers must not treat
+		// this as "connecting" and wait for recovery.
+		return "auth_failed"
+	default:
+		return "connecting"
+	}
+}
+
 // State returns the current connection state snapshot.
 func (e *dialEntry) State() SessionState {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	stateStr := "connecting"
-	switch e.intState {
-	case stateConnected:
-		stateStr = "connected"
-	case stateAuthFailed:
-		// A permanent authentication rejection: the peer's pin does not match
-		// ours, and the loop has stopped. "auth_failed" signals a permanent
-		// configuration error, not a transient reconnect condition. Consumers
-		// must not treat this as "connecting" and wait for recovery.
-		stateStr = "auth_failed"
-		// stateReconnecting and stateConnecting both project to "connecting":
-		// from the consumer's perspective both mean "not healthy, may recover".
-		// Do NOT add a "reconnecting" case here — it would be a sixth enum value,
-		// breaking the five-value open enum defined in the status contract.
-	}
-
 	return SessionState{
 		Name:       e.name,
-		State:      stateStr,
+		State:      dialStateLabel(e.intState),
 		Transport:  transportDial,
 		Since:      e.since,
 		SSHPort:    e.sshPort,
 		DockerPort: e.dockerPort,
 	}
 }
+
+// ControlCall copies the current control client under e.mu, releases the
+// lock, and only then invokes fn — see SessionEntry.ControlCall for the full
+// contract. This mirrors the exact idiom runLivenessProbe already uses:
+// dialAndOpen hands the probe a plain client value captured once, never a
+// reference back into the entry, so a later reconnect nilling e.controlClient
+// cannot race anything the caller holds.
+func (e *dialEntry) ControlCall(ctx context.Context, fn func(ctx context.Context, c *control.Client) error) error {
+	e.mu.Lock()
+	cclient := e.controlClient
+	st := e.intState
+	e.mu.Unlock()
+
+	if cclient == nil {
+		return fmt.Errorf("server %q: no control client available (session=%s)", e.name, dialStateLabel(st))
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, DefaultControlCallTimeout)
+	defer cancel()
+	return fn(callCtx, cclient)
+}
+
+var _ SessionEntry = (*dialEntry)(nil)
 
 // Close cancels the entry's run-loop and closes the live connection.
 func (e *dialEntry) Close(err error) {

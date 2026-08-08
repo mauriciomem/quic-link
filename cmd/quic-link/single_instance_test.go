@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 )
@@ -28,7 +29,14 @@ type fakePoolForCmd struct{}
 func (f *fakePoolForCmd) Get(_ context.Context, _ string) (daemon.Conn, error) { return nil, nil }
 func (f *fakePoolForCmd) State() []daemon.SessionState                         { return nil }
 func (f *fakePoolForCmd) EntryState(_ string) (string, error)                  { return "disabled", nil }
-func (f *fakePoolForCmd) Close()                                               {}
+
+// ControlCall is not exercised by this file's single-instance tests; it
+// satisfies the interface with a clear refusal.
+func (f *fakePoolForCmd) ControlCall(context.Context, string, func(context.Context, *control.Client) error) error {
+	return fmt.Errorf("fakePoolForCmd: ControlCall not implemented")
+}
+
+func (f *fakePoolForCmd) Close() {}
 
 // startTestDaemon starts daemon.Run and waits for the socket to appear.
 func startTestDaemon(t *testing.T, sock string) (cancel context.CancelFunc, done <-chan error) {

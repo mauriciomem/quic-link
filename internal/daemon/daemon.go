@@ -47,6 +47,7 @@ import (
 
 	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/edge"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/names"
@@ -60,8 +61,9 @@ import (
 // are still running after this deadline, Run logs a warning and returns anyway
 // rather than hanging forever. The socket file is always removed on both paths.
 //
-// Attach is a stub in this slice so the drain is instantaneous in practice;
-// the deadline guards against a future splice that takes too long to unwind.
+// A live attach splice can run for as long as its underlying session does, so
+// this deadline is not expected to always be met while one is in flight; it
+// exists so shutdown itself never hangs waiting for one to unwind.
 const shutdownDeadline = 5 * time.Second
 
 // DoctorSnapshot is what only the daemon can answer: which sockets it is
@@ -303,6 +305,13 @@ type SessionPool interface {
 	// importing the pool type directly.
 	EntryState(server string) (string, error)
 
+	// ControlCall relays fn to the named server's current control client, if
+	// one is available right now. It is a straight lookup-then-delegate to
+	// the entry's own ControlCall — see SessionEntry.ControlCall for the
+	// full contract. Returns the same not-found error Get and EntryState
+	// already use when server names nothing in the pool.
+	ControlCall(ctx context.Context, server string, fn func(ctx context.Context, c *control.Client) error) error
+
 	// Close tears down all sessions and cancels in-flight dials.
 	Close()
 }
@@ -328,15 +337,19 @@ type Conn interface {
 // SessionEntry is the per-server handle. A SessionPool holds one per enabled
 // server.
 //
-// The interface is intentionally direction-agnostic. Today only dialEntry is
-// wired (the daemon dials the agent). A future listenEntry — where the agent
-// dials the daemon and the daemon accepts — will satisfy this interface with
-// zero changes to SessionPool, the attach path, or the status snapshot. The
-// distinction between the two directions is carried by SessionState.Transport,
-// which dialEntry reports as "dial" and a future listenEntry would report as
-// "listen". No method here leaks a dial-only assumption: Get blocks for any
-// in-flight negotiation regardless of direction, State snapshots the current
-// state, and Close tears down whatever mechanism the entry uses.
+// The interface is intentionally direction-agnostic. dialEntry (the daemon
+// dials the agent), listenEntry (the agent dials the daemon), and
+// disabledEntry (nothing dials anything) all satisfy it with the same
+// method set, so nothing above this interface — SessionPool, the attach
+// path, the status snapshot, or ControlCall's own callers — needs to know
+// which kind of entry it is talking to. The distinction between the two
+// live directions is carried by SessionState.Transport, which dialEntry
+// reports as "dial" and listenEntry reports as "listen". No method here
+// leaks a dial-only assumption: Get blocks for any in-flight negotiation
+// regardless of direction, State snapshots the current state, Close tears
+// down whatever mechanism the entry uses, and ControlCall relays an
+// administrative call to whichever control client the entry currently
+// holds, if any.
 type SessionEntry interface {
 	// Get returns the live transport connection, blocking for an in-flight
 	// reconnect (or, for a listenEntry, for the incoming agent connection).
@@ -347,6 +360,34 @@ type SessionEntry interface {
 	// Close tears down this entry: cancels the run loop, closes the live
 	// connection with CloseWithError, and unblocks any pending Get callers.
 	Close(err error)
+
+	// ControlCall copies the entry's current control client under a brief
+	// lock, releases the lock, and only then invokes fn with the copy — fn
+	// never runs while any entry-internal lock is held, and the raw client
+	// pointer never crosses this boundary any other way. Both properties
+	// matter for the same underlying reason: a reconnect can replace or
+	// drop the control client at any moment. Holding a lock across fn's own
+	// network call would let one slow or unreachable agent stall every
+	// other operation that lock also guards on this entry — a new Get, a
+	// State snapshot, the entry's own reconnect bookkeeping, and Close
+	// during shutdown. Letting the raw client escape some other way would
+	// let a caller race the exact moment a reconnect nils it out. Copying
+	// under the lock and calling after releasing it avoids both at once.
+	//
+	// fn is called with a context bounded by DefaultControlCallTimeout (or
+	// whatever is left of ctx's own deadline, if that is sooner); it must
+	// use that context for its own call so a wedged agent cannot hang the
+	// caller indefinitely.
+	//
+	// Returns an error describing why no call could be made when the entry
+	// currently holds no control client at all — connecting, listening for
+	// a peer, disabled, or permanently auth-failed — without calling fn.
+	// Otherwise it returns whatever fn itself returns, including an error
+	// from a call that started against a live client but lost it partway
+	// through (a session dropping mid-call is treated the same way the
+	// liveness probe already treats a captured client going stale mid-probe:
+	// an ordinary failure, not a special case).
+	ControlCall(ctx context.Context, fn func(ctx context.Context, c *control.Client) error) error
 }
 
 // ReconnectPolicy controls the backoff timing for a session that has dropped.

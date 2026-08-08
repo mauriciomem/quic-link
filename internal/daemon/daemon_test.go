@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 )
 
@@ -61,6 +63,13 @@ func (p *fakePool) EntryState(server string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// ControlCall is not exercised by this file's tests (they cover the status
+// snapshot, not the control relay); it satisfies the interface with a clear
+// refusal rather than silently succeeding against fabricated state.
+func (p *fakePool) ControlCall(context.Context, string, func(context.Context, *control.Client) error) error {
+	return fmt.Errorf("fakePool: ControlCall not implemented")
 }
 
 func (p *fakePool) Close() {}
