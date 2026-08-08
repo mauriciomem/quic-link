@@ -217,10 +217,18 @@ func (x *GetStatusResponse) GetRoutes() []*RouteInfo {
 }
 
 type RouteInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Target        string                 `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
-	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
-	Builtin       bool                   `protobuf:"varint,3,opt,name=builtin,proto3" json:"builtin,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Target  string                 `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	Address string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	// builtin reports only whether this entry is still a compiled-in default.
+	// It is kept because callers already read it; provenance below is the
+	// authoritative answer and can say more.
+	Builtin bool `protobuf:"varint,3,opt,name=builtin,proto3" json:"builtin,omitempty"`
+	// provenance says where the entry came from: a compiled-in default, the
+	// operator's configuration, or something added while the agent was
+	// running. A peer too old to send it leaves it empty, which a reader must
+	// tolerate rather than treat as a fourth kind.
+	Provenance    string `protobuf:"bytes,4,opt,name=provenance,proto3" json:"provenance,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -276,6 +284,13 @@ func (x *RouteInfo) GetBuiltin() bool {
 	return false
 }
 
+func (x *RouteInfo) GetProvenance() string {
+	if x != nil {
+		return x.Provenance
+	}
+	return ""
+}
+
 var File_control_proto protoreflect.FileDescriptor
 
 const file_control_proto_rawDesc = "" +
@@ -290,11 +305,14 @@ const file_control_proto_rawDesc = "" +
 	"\x11GetStatusResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12&\n" +
 	"\x0fstarted_unix_ms\x18\x02 \x01(\x03R\rstartedUnixMs\x12.\n" +
-	"\x06routes\x18\x03 \x03(\v2\x16.quiclink.v1.RouteInfoR\x06routes\"W\n" +
+	"\x06routes\x18\x03 \x03(\v2\x16.quiclink.v1.RouteInfoR\x06routes\"w\n" +
 	"\tRouteInfo\x12\x16\n" +
 	"\x06target\x18\x01 \x01(\tR\x06target\x12\x18\n" +
 	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x18\n" +
-	"\abuiltin\x18\x03 \x01(\bR\abuiltin2\x92\x01\n" +
+	"\abuiltin\x18\x03 \x01(\bR\abuiltin\x12\x1e\n" +
+	"\n" +
+	"provenance\x18\x04 \x01(\tR\n" +
+	"provenance2\x92\x01\n" +
 	"\aControl\x12;\n" +
 	"\x04Ping\x12\x18.quiclink.v1.PingRequest\x1a\x19.quiclink.v1.PingResponse\x12J\n" +
 	"\tGetStatus\x12\x1d.quiclink.v1.GetStatusRequest\x1a\x1e.quiclink.v1.GetStatusResponseBCZAgithub.com/mauriciomem/quic-link/internal/control/proto;controlpbb\x06proto3"

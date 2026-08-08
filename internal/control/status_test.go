@@ -28,7 +28,12 @@ func (s realRouteSource) RouteDetails() []control.RouteDetail {
 	details := s.rtr.RouteDetails()
 	out := make([]control.RouteDetail, len(details))
 	for i, d := range details {
-		out[i] = control.RouteDetail{Name: d.Name, Address: d.Address, Builtin: d.Builtin}
+		out[i] = control.RouteDetail{
+			Name:       d.Name,
+			Address:    d.Address,
+			Builtin:    d.Builtin,
+			Provenance: string(d.Provenance),
+		}
 	}
 	return out
 }
@@ -131,6 +136,13 @@ func TestGetStatus_RouteProvenanceRoundTrips(t *testing.T) {
 	if ssh.GetAddress() != "tcp://10.0.0.1:2222" {
 		t.Errorf("ssh route Address = %q, want %q", ssh.GetAddress(), "tcp://10.0.0.1:2222")
 	}
+	// The wire field, not just the boolean: an operator override reports
+	// config provenance, and this is the only test that proves the value
+	// survives the proto conversion and the round trip rather than being
+	// dropped somewhere between the route table and the client.
+	if got := ssh.GetProvenance(); got != "config" {
+		t.Errorf("ssh route Provenance = %q, want %q", got, "config")
+	}
 
 	docker, ok := byName["docker"]
 	if !ok {
@@ -138,6 +150,9 @@ func TestGetStatus_RouteProvenanceRoundTrips(t *testing.T) {
 	}
 	if !docker.GetBuiltin() {
 		t.Errorf("docker route Builtin = false, want true — nothing overrode it")
+	}
+	if got := docker.GetProvenance(); got != "builtin" {
+		t.Errorf("docker route Provenance = %q, want %q", got, "builtin")
 	}
 
 	cancel()

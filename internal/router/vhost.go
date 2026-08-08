@@ -69,7 +69,10 @@ func newVhosts(entries map[string]string) (*vhosts, error) {
 		if err != nil {
 			return nil, fmt.Errorf("vhost %q: %w", key, err)
 		}
-		r := route{raw: raw, network: network, address: address}
+		// A vhost built here came from the operator's configuration. Saying
+		// so explicitly keeps every entry's provenance a set value rather
+		// than a zero value that means nothing in particular.
+		r := route{raw: raw, network: network, address: address, prov: ProvenanceConfig}
 		if rest, ok := strings.CutPrefix(key, "*."); ok {
 			v.wildcard[rest] = r
 			continue

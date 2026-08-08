@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -202,4 +203,59 @@ func lastN(s string, n int) string {
 
 func hostileRouteInfos(target string) []daemon.RouteInfo {
 	return []daemon.RouteInfo{{Target: target, Address: "tcp://127.0.0.1:1", Builtin: false}}
+}
+
+// TestSanitizeRoutes_ProvenanceIsSanitized covers the newest agent-controlled
+// string on this boundary. Provenance is expected to be one of a small set of
+// words, which is exactly why it is easy to forget it is still free text
+// chosen by the far end: an agent that is correctly pinned but compromised can
+// put anything at all in it, and pinning proves which key answered, not what
+// that key's holder chose to send.
+//
+// The assertion is deliberately not "the output differs from the input" — a
+// sanitiser that mangled every value would pass that. It checks that the
+// specific dangerous bytes are gone and the readable part survives, so the
+// test fails both if sanitisation is dropped and if it starts destroying
+// legitimate values.
+func TestSanitizeRoutes_ProvenanceIsSanitized(t *testing.T) {
+	const hostile = "builtin\x1b]0;pwned\x07\r\nconfig\u202e"
+	in := []daemon.RouteInfo{{
+		Target:     "grafana",
+		Address:    "tcp://127.0.0.1:3000",
+		Builtin:    false,
+		Provenance: hostile,
+	}}
+
+	got := sanitizeRoutes(in)
+	if len(got) != 1 {
+		t.Fatalf("sanitizeRoutes returned %d entries, want 1", len(got))
+	}
+	p := got[0].Provenance
+	for _, bad := range []string{"\x1b", "\x07", "\r", "\n", "\u202e"} {
+		if strings.Contains(p, bad) {
+			t.Errorf("sanitized provenance still contains %q: %q", bad, p)
+		}
+	}
+	if !strings.Contains(p, "builtin") {
+		t.Errorf("sanitized provenance lost its readable content: %q", p)
+	}
+}
+
+// TestPrintRoutesHuman_NeverRendersFromProvenance proves the human rendering
+// decides what to print from the boolean, never from the agent's free-text
+// provenance. A bool cannot carry an escape sequence or a lie about its own
+// meaning; a string can. An agent that claims "builtin" for an entry the
+// boolean says is not builtin must not be able to make this side agree.
+func TestPrintRoutesHuman_NeverRendersFromProvenance(t *testing.T) {
+	routes := []sanitizedRoute{{
+		Target:     "grafana",
+		Address:    "tcp://127.0.0.1:3000",
+		Builtin:    false,
+		Provenance: "builtin",
+	}}
+	var buf bytes.Buffer
+	printRoutesHuman(&buf, "server1", routes)
+	if strings.Contains(buf.String(), "(builtin)") {
+		t.Errorf("human rendering trusted the agent's provenance string over the boolean:\n%s", buf.String())
+	}
 }

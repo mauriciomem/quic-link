@@ -19,6 +19,11 @@ type RouteDetail struct {
 	Name    string
 	Address string
 	Builtin bool
+	// Provenance says where the entry came from. It is a plain string here,
+	// not the router package's own named type, for the same reason the rest
+	// of this type is a mirror rather than a reference: this package must
+	// not import the package that owns the route table.
+	Provenance string
 }
 
 // RouteSource supplies the current route table for a GetStatus reply. The
@@ -47,9 +52,10 @@ func (s server) GetStatus(_ context.Context, _ *controlpb.GetStatusRequest) (*co
 	resp.Routes = make([]*controlpb.RouteInfo, len(details))
 	for i, d := range details {
 		resp.Routes[i] = &controlpb.RouteInfo{
-			Target:  d.Name,
-			Address: d.Address,
-			Builtin: d.Builtin,
+			Target:     d.Name,
+			Address:    d.Address,
+			Builtin:    d.Builtin,
+			Provenance: d.Provenance,
 		}
 	}
 	return resp, nil

@@ -60,7 +60,12 @@ func (s controlRouteSource) RouteDetails() []control.RouteDetail {
 	details := s.rtr.RouteDetails()
 	out := make([]control.RouteDetail, len(details))
 	for i, d := range details {
-		out[i] = control.RouteDetail{Name: d.Name, Address: d.Address, Builtin: d.Builtin}
+		out[i] = control.RouteDetail{
+			Name:       d.Name,
+			Address:    d.Address,
+			Builtin:    d.Builtin,
+			Provenance: string(d.Provenance),
+		}
 	}
 	return out
 }

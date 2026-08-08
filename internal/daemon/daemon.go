@@ -484,6 +484,11 @@ type RouteInfo struct {
 	Target  string `json:"target"`
 	Address string `json:"address"`
 	Builtin bool   `json:"builtin"`
+	// Provenance says where the agent got this entry. It is omitted when
+	// empty rather than published as a blank value, because an agent too
+	// old to report it has said nothing on the subject, and "absent" is the
+	// honest way to render that.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // BuildSnapshot constructs a StatusSnapshot from the pool state, clock, and

@@ -134,7 +134,12 @@ func (p *routesProvider) RoutesJSON(ctx context.Context, server string) ([]byte,
 
 	routes := make([]RouteInfo, len(resp.GetRoutes()))
 	for i, r := range resp.GetRoutes() {
-		routes[i] = RouteInfo{Target: r.GetTarget(), Address: r.GetAddress(), Builtin: r.GetBuiltin()}
+		routes[i] = RouteInfo{
+			Target:     r.GetTarget(),
+			Address:    r.GetAddress(),
+			Builtin:    r.GetBuiltin(),
+			Provenance: r.GetProvenance(),
+		}
 	}
 	snap := RoutesSnapshot{Schema: 1, Server: server, Routes: routes}
 	b, err := json.Marshal(snap)

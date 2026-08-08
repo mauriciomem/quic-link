@@ -115,6 +115,12 @@ type sanitizedRoute struct {
 	Target  string `json:"target"`
 	Address string `json:"address"`
 	Builtin bool   `json:"builtin"`
+	// Provenance is agent-supplied free text like every other string here,
+	// so it goes through the same sanitiser. It is reported but never
+	// allowed to decide how anything renders: a compromised agent could
+	// send any word at all, and the boolean above is the field this side
+	// trusts for that, because a bool cannot carry an escape sequence.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // sanitizeRoutes converts a daemon-relayed route list to the CLI's
@@ -124,9 +130,10 @@ func sanitizeRoutes(in []daemon.RouteInfo) []sanitizedRoute {
 	out := make([]sanitizedRoute, len(in))
 	for i, r := range in {
 		out[i] = sanitizedRoute{
-			Target:  sanitizeAgentString(r.Target),
-			Address: sanitizeAgentString(r.Address),
-			Builtin: r.Builtin,
+			Target:     sanitizeAgentString(r.Target),
+			Address:    sanitizeAgentString(r.Address),
+			Builtin:    r.Builtin,
+			Provenance: sanitizeAgentString(r.Provenance),
 		}
 	}
 	return out

@@ -22,17 +22,39 @@ var (
 	ErrUnauthorized  = errors.New("router: unauthorized")
 )
 
+// Provenance records where a route table entry came from. It answers "who
+// put this here", which is a different question from "what is this name" —
+// an operator override of the compiled-in "ssh" name is still an
+// operator-supplied entry, because the operator, not the compiled-in
+// default, is what put that address there.
+//
+// It is a string rather than a number because it is rendered for people and
+// carried to other programs, where a self-describing word survives being
+// read out of context and a number does not. Treat the set as open: a
+// reader that does not recognize a value must not assume there are only
+// three, the same way every other open set in this tree is handled.
+type Provenance string
+
+const (
+	// ProvenanceBuiltin is a compiled-in default that nothing overrode.
+	ProvenanceBuiltin Provenance = "builtin"
+	// ProvenanceConfig was supplied by the operator, whether through the
+	// configuration file or a command-line flag.
+	ProvenanceConfig Provenance = "config"
+	// ProvenanceRuntime was added while the process was running, over the
+	// control plane, and disappears when the process restarts. Only an
+	// entry with this provenance may be removed by a remote caller.
+	ProvenanceRuntime Provenance = "runtime"
+)
+
 type route struct {
 	raw     string
 	network string
 	address string
-	// builtin is true only for the two compiled-in defaults that New seeds
-	// the route table with, and only if nothing overrode them. It records
-	// provenance ("did the operator configure this"), not whether the name
-	// happens to be one of the two reserved ones — an operator override of
-	// "ssh" clears it, because the operator, not the compiled-in default,
-	// is what put that address there.
-	builtin bool
+	// prov records where this entry came from. Removal safety depends on
+	// it: an entry a remote caller added is the only kind that same caller
+	// may take away again.
+	prov Provenance
 }
 
 // Router resolves logical targets to addresses and authorizes each dial. It is
@@ -67,16 +89,16 @@ func NewWithVhosts(overrides map[string]string, hosts map[string]string, policy 
 	if policy == nil {
 		policy = AllowAll{}
 	}
-	// merged carries every route's address; builtin carries whether that
-	// address is still the compiled-in default. The two are built together
-	// (default seeded true, then every override — even one that repeats the
-	// default's own name — flips its entry to false) so nothing after this
-	// point has to infer provenance from anything but this one map.
+	// merged carries every route's address; prov carries where that address
+	// came from. The two are built together (defaults seeded as compiled-in,
+	// then every override — even one that repeats a default's own name —
+	// marked as operator-supplied) so nothing after this point has to infer
+	// provenance from anything but this one map.
 	merged := map[string]string{"ssh": defaultSSHAddr, "docker": defaultDockerAddr}
-	builtin := map[string]bool{"ssh": true, "docker": true}
+	prov := map[string]Provenance{"ssh": ProvenanceBuiltin, "docker": ProvenanceBuiltin}
 	for name, addr := range overrides {
 		merged[name] = addr
-		builtin[name] = false
+		prov[name] = ProvenanceConfig
 	}
 	routes := make(map[string]route, len(merged))
 	for name, raw := range merged {
@@ -91,7 +113,7 @@ func NewWithVhosts(overrides map[string]string, hosts map[string]string, policy 
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", name, err)
 		}
-		routes[name] = route{raw: raw, network: network, address: address, builtin: builtin[name]}
+		routes[name] = route{raw: raw, network: network, address: address, prov: prov[name]}
 	}
 	// Addresses are parsed here rather than at dial time so a mistake in the
 	// configuration is a startup failure the operator sees, not a failure that
@@ -183,24 +205,38 @@ func (r *Router) Targets() []string {
 type RouteDetail struct {
 	Name    string
 	Address string
+	// Builtin is derived from Provenance and reports only whether this
+	// entry is still a compiled-in default. It is kept because other
+	// programs already read it; Provenance is the authoritative answer,
+	// because it can also distinguish an operator-supplied entry from one
+	// added while the process was running, which Builtin cannot.
 	Builtin bool
+	// Provenance says where the entry came from. Readers should treat the
+	// set of values as open and not assume the three they know are all
+	// there will ever be.
+	Provenance Provenance
 }
 
 // RouteDetails returns every route's name, configured address, and
 // provenance, sorted by name so the result is deterministic regardless of
 // the route table's internal map order.
 //
-// Builtin answers "did the operator configure this entry, or is it a
-// compiled-in default nobody touched" — not "is this name one of the two
-// reserved ones". Overriding the built-in "ssh" name with a custom address
-// makes that entry's Builtin false, because an operator, not the compiled-in
-// default, is what put that address there.
+// Provenance answers where the entry came from, and Builtin is derived from
+// it: overriding the compiled-in "ssh" name with a custom address reports
+// config provenance and a false Builtin, because an operator, not the
+// compiled-in default, is what put that address there. The two fields can
+// never disagree, because one is computed from the other here.
 func (r *Router) RouteDetails() []RouteDetail {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]RouteDetail, 0, len(r.routes))
 	for name, rt := range r.routes {
-		out = append(out, RouteDetail{Name: name, Address: rt.raw, Builtin: rt.builtin})
+		out = append(out, RouteDetail{
+			Name:       name,
+			Address:    rt.raw,
+			Builtin:    rt.prov == ProvenanceBuiltin,
+			Provenance: rt.prov,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out

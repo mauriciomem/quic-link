@@ -9,7 +9,7 @@ option go_package = "github.com/mauriciomem/quic-link/internal/control/proto;con
 // ProtoVersion; changing an existing field's semantics does.
 service Control {
   rpc Ping(PingRequest) returns (PingResponse);
-  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);  // not yet implemented
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
 }
 
 message PingRequest {
@@ -35,5 +35,13 @@ message GetStatusResponse {
 message RouteInfo {
   string target = 1;
   string address = 2;
+  // builtin reports only whether this entry is still a compiled-in default.
+  // It is kept because callers already read it; provenance below is the
+  // authoritative answer and can say more.
   bool builtin = 3;
+  // provenance says where the entry came from: a compiled-in default, the
+  // operator's configuration, or something added while the agent was
+  // running. A peer too old to send it leaves it empty, which a reader must
+  // tolerate rather than treat as a fourth kind.
+  string provenance = 4;
 }

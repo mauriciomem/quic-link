@@ -149,22 +149,76 @@ func TestRouteDetails_Provenance(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	want := map[string]bool{
-		"ssh":    false,
-		"docker": true,
-		"custom": false,
+	want := map[string]Provenance{
+		// Overriding a compiled-in name is still an operator's doing, so it
+		// reports config provenance rather than builtin.
+		"ssh":    ProvenanceConfig,
+		"docker": ProvenanceBuiltin,
+		"custom": ProvenanceConfig,
 	}
 	details := r.RouteDetails()
 	if len(details) != len(want) {
 		t.Fatalf("RouteDetails() returned %d entries, want %d", len(details), len(want))
 	}
 	for _, d := range details {
-		wantBuiltin, ok := want[d.Name]
+		wantProv, ok := want[d.Name]
 		if !ok {
 			t.Fatalf("RouteDetails() returned unexpected entry %q", d.Name)
 		}
-		if d.Builtin != wantBuiltin {
+		if d.Provenance != wantProv {
+			t.Errorf("RouteDetails()[%q].Provenance = %q, want %q", d.Name, d.Provenance, wantProv)
+		}
+		if wantBuiltin := wantProv == ProvenanceBuiltin; d.Builtin != wantBuiltin {
 			t.Errorf("RouteDetails()[%q].Builtin = %v, want %v", d.Name, d.Builtin, wantBuiltin)
+		}
+	}
+}
+
+// TestRouteDetail_BuiltinIsDerivedFromProvenance is the load-bearing test for
+// the two-field shape. Builtin is kept only because other programs already
+// read it, and it is computed from Provenance rather than stored a second
+// time — so the one thing that must never happen is the two fields
+// disagreeing. Asserting the derivation over every entry, in a table that
+// covers all three provenances, is what makes that a checked property rather
+// than a promise in a comment.
+//
+// It deliberately does not hard-code which names are builtin: it asserts the
+// relationship between the two fields, so it keeps protecting the invariant
+// even if the set of compiled-in defaults changes.
+func TestRouteDetail_BuiltinIsDerivedFromProvenance(t *testing.T) {
+	r, err := New(map[string]string{
+		"ssh":    "tcp://10.0.0.1:2222",
+		"custom": "tcp://127.0.0.1:9000",
+	}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// A runtime entry is written directly, because no mutator exists yet at
+	// this point in the tree: the invariant has to hold for the third state
+	// before the code that creates it arrives, or the first mutation ships
+	// against an unproven shape.
+	r.mu.Lock()
+	r.routes["dynamic"] = route{
+		raw: "tcp://127.0.0.1:7000", network: "tcp", address: "127.0.0.1:7000",
+		prov: ProvenanceRuntime,
+	}
+	r.mu.Unlock()
+
+	seen := map[Provenance]bool{}
+	for _, d := range r.RouteDetails() {
+		seen[d.Provenance] = true
+		if want := d.Provenance == ProvenanceBuiltin; d.Builtin != want {
+			t.Errorf("entry %q: Builtin = %v but Provenance = %q; the two must never disagree",
+				d.Name, d.Builtin, d.Provenance)
+		}
+		if d.Provenance == "" {
+			t.Errorf("entry %q reports an empty provenance; every entry must say where it came from", d.Name)
+		}
+	}
+	for _, p := range []Provenance{ProvenanceBuiltin, ProvenanceConfig, ProvenanceRuntime} {
+		if !seen[p] {
+			t.Errorf("no entry with provenance %q was exercised; the invariant is unproven for that state", p)
 		}
 	}
 }
@@ -227,7 +281,10 @@ func TestRouteDetails_ConcurrentWriter(t *testing.T) {
 			}
 			r.mu.Lock()
 			name := fmt.Sprintf("dynamic%d", i)
-			r.routes[name] = route{raw: "tcp://127.0.0.1:1", network: "tcp", address: "127.0.0.1:1"}
+			r.routes[name] = route{
+				raw: "tcp://127.0.0.1:1", network: "tcp", address: "127.0.0.1:1",
+				prov: ProvenanceRuntime,
+			}
 			i++
 			r.mu.Unlock()
 		}
