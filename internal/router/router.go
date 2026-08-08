@@ -7,6 +7,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/mauriciomem/quic-link/internal/proto"
 )
@@ -25,11 +26,25 @@ type route struct {
 	raw     string
 	network string
 	address string
+	// builtin is true only for the two compiled-in defaults that New seeds
+	// the route table with, and only if nothing overrode them. It records
+	// provenance ("did the operator configure this"), not whether the name
+	// happens to be one of the two reserved ones — an operator override of
+	// "ssh" clears it, because the operator, not the compiled-in default,
+	// is what put that address there.
+	builtin bool
 }
 
 // Router resolves logical targets to addresses and authorizes each dial. It is
 // the sole resolution and authorization boundary on the agent.
 type Router struct {
+	// mu guards routes, including the read inside resolve() that Dial calls
+	// on every stream. There is no mutator yet — routes is built once in
+	// New/NewWithVhosts and never written again after that, so today's
+	// concurrent reads are race-free without it. The lock is added ahead of
+	// need so a future route-table mutation lands on already-locked readers
+	// instead of requiring every reader to be revisited a second time.
+	mu     sync.RWMutex
 	routes map[string]route
 	vhosts *vhosts
 	policy Policy
@@ -52,9 +67,16 @@ func NewWithVhosts(overrides map[string]string, hosts map[string]string, policy 
 	if policy == nil {
 		policy = AllowAll{}
 	}
+	// merged carries every route's address; builtin carries whether that
+	// address is still the compiled-in default. The two are built together
+	// (default seeded true, then every override — even one that repeats the
+	// default's own name — flips its entry to false) so nothing after this
+	// point has to infer provenance from anything but this one map.
 	merged := map[string]string{"ssh": defaultSSHAddr, "docker": defaultDockerAddr}
+	builtin := map[string]bool{"ssh": true, "docker": true}
 	for name, addr := range overrides {
 		merged[name] = addr
+		builtin[name] = false
 	}
 	routes := make(map[string]route, len(merged))
 	for name, raw := range merged {
@@ -69,7 +91,7 @@ func NewWithVhosts(overrides map[string]string, hosts map[string]string, policy 
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", name, err)
 		}
-		routes[name] = route{raw: raw, network: network, address: address}
+		routes[name] = route{raw: raw, network: network, address: address, builtin: builtin[name]}
 	}
 	// Addresses are parsed here rather than at dial time so a mistake in the
 	// configuration is a startup failure the operator sees, not a failure that
@@ -103,7 +125,9 @@ func (r *Router) Dial(ctx context.Context, peer Identity, h proto.Header) (net.C
 	return conn, nil
 }
 
-// resolve picks the entry a header refers to.
+// resolve picks the entry a header refers to. It is Dial's hottest read —
+// called on every data-plane stream — so it takes its own read lock rather
+// than relying on a caller to hold one.
 func (r *Router) resolve(h proto.Header) (route, bool) {
 	if h.Kind == proto.KindHTTP {
 		if r.vhosts == nil {
@@ -111,7 +135,9 @@ func (r *Router) resolve(h proto.Header) (route, bool) {
 		}
 		return r.vhosts.resolve(h.Host)
 	}
+	r.mu.RLock()
 	rt, ok := r.routes[h.Target]
+	r.mu.RUnlock()
 	return rt, ok
 }
 
@@ -136,13 +162,48 @@ func (r *Router) Vhosts() []string {
 	return names
 }
 
+// Targets returns every configured route name, in a stable order.
 func (r *Router) Targets() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	names := make([]string, 0, len(r.routes))
 	for name := range r.routes {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names
+}
+
+// RouteDetail describes one entry in the route table for an administrative
+// reader (e.g. a status query): its name, the address string it was
+// configured with, and whether that address is still the compiled-in
+// default. It is a router-package-local type on purpose — the conversion to
+// any wire-facing representation belongs at whatever boundary later needs it,
+// not here.
+type RouteDetail struct {
+	Name    string
+	Address string
+	Builtin bool
+}
+
+// RouteDetails returns every route's name, configured address, and
+// provenance, sorted by name so the result is deterministic regardless of
+// the route table's internal map order.
+//
+// Builtin answers "did the operator configure this entry, or is it a
+// compiled-in default nobody touched" — not "is this name one of the two
+// reserved ones". Overriding the built-in "ssh" name with a custom address
+// makes that entry's Builtin false, because an operator, not the compiled-in
+// default, is what put that address there.
+func (r *Router) RouteDetails() []RouteDetail {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]RouteDetail, 0, len(r.routes))
+	for name, rt := range r.routes {
+		out = append(out, RouteDetail{Name: name, Address: rt.raw, Builtin: rt.builtin})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // parseAddr converts a route address to a (network, address) pair for net.Dial.

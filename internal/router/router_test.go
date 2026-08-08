@@ -7,10 +7,13 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/mauriciomem/quic-link/internal/identity"
@@ -64,7 +67,11 @@ func TestNewRejectsBadRouteName(t *testing.T) {
 
 // TestNew_OverrideWinsOverBuiltin proves that an override for a built-in
 // route name ("ssh") actually takes effect: Dial must reach the overridden
-// address, not the tcp://127.0.0.1:22 built-in default.
+// address, not the tcp://127.0.0.1:22 built-in default. It also pins the
+// decided provenance semantics: Builtin tracks whether the operator supplied
+// the entry, not whether its name happens to be one of the two reserved
+// names. An override for "ssh" must therefore report Builtin: false, and the
+// untouched "docker" default must report Builtin: true.
 func TestNew_OverrideWinsOverBuiltin(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "override.sock")
 	ln, err := net.Listen("unix", sockPath)
@@ -103,6 +110,140 @@ func TestNew_OverrideWinsOverBuiltin(t *testing.T) {
 	if string(got) != string(msg) {
 		t.Fatalf("echo mismatch: got %q want %q — the built-in tcp://127.0.0.1:22 ssh route was used instead of the override", got, msg)
 	}
+
+	details := r.RouteDetails()
+	byName := make(map[string]RouteDetail, len(details))
+	for _, d := range details {
+		byName[d.Name] = d
+	}
+	sshDetail, ok := byName["ssh"]
+	if !ok {
+		t.Fatal("RouteDetails() has no entry for \"ssh\"")
+	}
+	if sshDetail.Builtin {
+		t.Errorf(`RouteDetails()["ssh"].Builtin = true, want false — the operator overrode the built-in address, so provenance must say "not a default" regardless of the name being one of the two reserved ones`)
+	}
+	if sshDetail.Address != "unix://"+sockPath {
+		t.Errorf("RouteDetails()[\"ssh\"].Address = %q, want %q", sshDetail.Address, "unix://"+sockPath)
+	}
+	dockerDetail, ok := byName["docker"]
+	if !ok {
+		t.Fatal("RouteDetails() has no entry for \"docker\"")
+	}
+	if !dockerDetail.Builtin {
+		t.Errorf(`RouteDetails()["docker"].Builtin = false, want true — nothing overrode it, so it must still trace back to the compiled-in default`)
+	}
+}
+
+// TestRouteDetails_Provenance covers the full provenance matrix beyond the
+// single override TestNew_OverrideWinsOverBuiltin exercises: an entry that is
+// neither of the two reserved names at all must also report Builtin: false,
+// since Builtin answers "did the operator configure this" rather than "is
+// this name one of the two special ones".
+func TestRouteDetails_Provenance(t *testing.T) {
+	r, err := New(map[string]string{
+		"ssh":    "tcp://10.0.0.1:2222",  // overrides a built-in name
+		"custom": "tcp://127.0.0.1:9000", // a name that was never a default
+	}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	want := map[string]bool{
+		"ssh":    false,
+		"docker": true,
+		"custom": false,
+	}
+	details := r.RouteDetails()
+	if len(details) != len(want) {
+		t.Fatalf("RouteDetails() returned %d entries, want %d", len(details), len(want))
+	}
+	for _, d := range details {
+		wantBuiltin, ok := want[d.Name]
+		if !ok {
+			t.Fatalf("RouteDetails() returned unexpected entry %q", d.Name)
+		}
+		if d.Builtin != wantBuiltin {
+			t.Errorf("RouteDetails()[%q].Builtin = %v, want %v", d.Name, d.Builtin, wantBuiltin)
+		}
+	}
+}
+
+// TestRouteDetails_SortedStable proves RouteDetails returns its entries
+// sorted by name, and that repeated calls against the same Router produce the
+// identical order every time. Six entries (rather than two or three) are used
+// deliberately: a small map can appear to iterate in a stable order by
+// accident, which would let a broken (unsorted) implementation pass a weaker
+// version of this test for the wrong reason.
+func TestRouteDetails_SortedStable(t *testing.T) {
+	r, err := New(map[string]string{
+		"zzz-custom": "tcp://127.0.0.1:9001",
+		"aaa-custom": "tcp://127.0.0.1:9002",
+		"mmm-custom": "tcp://127.0.0.1:9003",
+		"bbb-custom": "tcp://127.0.0.1:9004",
+	}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	want := []string{"aaa-custom", "bbb-custom", "docker", "mmm-custom", "ssh", "zzz-custom"}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		details := r.RouteDetails()
+		got := make([]string, len(details))
+		for i, d := range details {
+			got[i] = d.Name
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("RouteDetails() order (call #%d) = %v, want %v", attempt+1, got, want)
+		}
+	}
+}
+
+// TestRouteDetails_ConcurrentWriter exercises Targets, RouteDetails, and
+// Dial's resolve() under -race against a goroutine that mutates the routes
+// map directly, holding the Router's own mutex. There is no AddRoute today
+// — the route table is built once at construction and never written again,
+// so this writer is not a real code path. It exists only to prove every
+// reader's lock is real, resolve() included: a reader that forgot to take
+// it would race against this writer under -race even though it never races
+// against anything the project actually ships yet.
+func TestRouteDetails_ConcurrentWriter(t *testing.T) {
+	r, err := New(map[string]string{"custom": "tcp://127.0.0.1:9000"}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.mu.Lock()
+			name := fmt.Sprintf("dynamic%d", i)
+			r.routes[name] = route{raw: "tcp://127.0.0.1:1", network: "tcp", address: "127.0.0.1:1"}
+			i++
+			r.mu.Unlock()
+		}
+	}()
+
+	ctx := context.Background()
+	for i := 0; i < 200; i++ {
+		_ = r.Targets()
+		_ = r.RouteDetails()
+		// The dial itself is expected to fail — nothing listens on
+		// 127.0.0.1:9000 — that is fine: only the map read inside
+		// resolve() is under test here, not the outcome of the dial.
+		_, _ = r.Dial(ctx, Identity{}, proto.Header{Kind: proto.KindTCP, Target: "custom"})
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestDialUnknownTarget(t *testing.T) {
