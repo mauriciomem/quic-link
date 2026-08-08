@@ -13,6 +13,33 @@ import (
 // have to look like one.
 var vhostLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
+// ValidateVhostLabel checks one part of a hostname — the piece a caller names a
+// service by, before the server and suffix are appended to it.
+//
+// It shares the rule below rather than restating it, so a label accepted here
+// cannot be one the whole-name check would go on to reject. A star is refused
+// outright: a single label is a single name, and one that could stand for
+// several is not what a caller asking for one service means.
+func ValidateVhostLabel(label string) error {
+	if label == "" {
+		return fmt.Errorf("a service name must not be empty")
+	}
+	if strings.Contains(label, ".") {
+		return fmt.Errorf("service name %q must be a single label, with no dots", label)
+	}
+	if strings.Contains(label, "*") {
+		return fmt.Errorf("service name %q must name one service, not a pattern", label)
+	}
+	if label != strings.ToLower(label) {
+		return fmt.Errorf("service name %q must be lowercase; hostnames are compared without regard to case", label)
+	}
+	if !vhostLabel.MatchString(label) {
+		return fmt.Errorf("service name %q is not usable in a hostname: use letters, digits and dashes, "+
+			"starting and ending with a letter or digit", label)
+	}
+	return nil
+}
+
 // ValidateVhostKey checks a hostname key for the vhost table.
 //
 // A key is either a hostname, or a hostname with its first label replaced by a

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -65,6 +66,18 @@ type StatusProvider interface {
 // doctor or status error already is.
 type RoutesProvider interface {
 	RoutesJSON(ctx context.Context, server string) ([]byte, error)
+}
+
+// ExposeProvider asks a named server's agent to publish a hostname, over the
+// control plane, and reports what happened. Like RoutesProvider it returns raw
+// JSON so this package need not know the daemon's own reply type.
+//
+// The reply carries the port this machine is currently answering names on as
+// well as what the agent published, because both are needed to name a working
+// URL and only the daemon knows either. Asking twice would leave a gap in which
+// the two could stop describing the same moment.
+type ExposeProvider interface {
+	ExposeJSON(ctx context.Context, server, host string, port int) ([]byte, error)
 }
 
 // RoutesError is a RoutesProvider's way of saying "I already know exactly
@@ -152,6 +165,7 @@ type Server struct {
 	status    StatusProvider
 	doctor    DoctorProvider
 	routes    RoutesProvider
+	expose    ExposeProvider
 	pool      AttachPool
 	uid       int           // expected peer uid; checked at accept
 	connSem   chan struct{} // semaphore bounding concurrent connections
@@ -449,6 +463,45 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		}
 		_ = writeResponse(conn, okResponse(body))
 
+	case "expose":
+		// A live relay that changes something on the far side, so unlike the
+		// read above it is bounded not only in time but in what it may say:
+		// the name and port are checked for shape here, before a request is
+		// made of the agent, so a local mistake is answered locally.
+		if s.expose == nil {
+			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer publish requests"))
+			return
+		}
+		if req.Server == "" {
+			_ = writeResponse(conn, errorResponse(1, "expose: server name is required"))
+			return
+		}
+		host := req.Meta["host"]
+		if host == "" {
+			_ = writeResponse(conn, errorResponse(1, "expose: a name to publish is required"))
+			return
+		}
+		port, perr := strconv.Atoi(req.Meta["port"])
+		if perr != nil || port < 1 || port > 65535 {
+			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
+				"expose: %q is not a port between 1 and 65535", req.Meta["port"])))
+			return
+		}
+		ectx, ecancel := context.WithTimeout(ctx, routesRPCTimeout)
+		ebody, eerr := s.expose.ExposeJSON(ectx, req.Server, host, port)
+		ecancel()
+		if eerr != nil {
+			var re *RoutesError
+			if errors.As(eerr, &re) {
+				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				return
+			}
+			slog.Warn("ipc: relay expose", "role", "daemon", "server", req.Server, "err", eerr)
+			_ = writeResponse(conn, errorResponse(1, "internal error relaying a publish request"))
+			return
+		}
+		_ = writeResponse(conn, okResponse(ebody))
+
 	default:
 		_ = writeResponse(conn, errorResponse(1, fmt.Sprintf("unknown method %q", req.Method)))
 	}
@@ -552,6 +605,11 @@ func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, r
 // passed to the constructor because a daemon without one is a working daemon —
 // it simply says so when asked — and every existing caller stays as it was.
 func (s *Server) SetDoctor(d DoctorProvider) { s.doctor = d }
+
+// SetExpose supplies the publish-relay provider. Set separately for the same
+// reason SetRoutes is: a daemon without one answers every other method
+// perfectly well and refuses this one by name.
+func (s *Server) SetExpose(e ExposeProvider) { s.expose = e }
 
 // SetRoutes supplies the route-relay provider. Like SetDoctor, it is set
 // separately rather than passed to the constructor because a daemon without

@@ -155,6 +155,11 @@ func Run(
 	// The routes relay is wired unconditionally: it depends only on the
 	// session pool, not on the naming layer (unlike doctor, just below).
 	srv.SetRoutes(NewRoutesProvider(pool))
+	// The publish relay is wired unconditionally too, even though it needs the
+	// naming layer: whether this machine is answering names is a question it
+	// answers for itself, at the moment it is asked, and refusing with that
+	// reason is more use than refusing because a provider was never installed.
+	srv.SetExpose(NewExposeProvider(pool, naming))
 	if naming.Zone != nil {
 		srv.SetDoctor(&doctorProvider{naming: naming})
 	}

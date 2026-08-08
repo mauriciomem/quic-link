@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -130,6 +131,48 @@ func (c *Client) RoutesJSON(server string) ([]byte, error) {
 	resp, err := readResponse(conn)
 	if err != nil {
 		return nil, fmt.Errorf("ipc: read routes response: %w", err)
+	}
+
+	if resp.SocketSchema != SocketSchema {
+		return nil, fmt.Errorf("%w: daemon speaks schema %d, client expects %d",
+			ErrSchemaMismatch, resp.SocketSchema, SocketSchema)
+	}
+	if resp.Status != 0 {
+		return nil, &RoutesError{Status: resp.Status, Msg: resp.Msg}
+	}
+	return []byte(resp.Body), nil
+}
+
+// ExposeJSON asks the daemon to have a named server's agent publish host at
+// port, and returns the raw JSON bytes of the reply (the daemon's
+// ExposeSnapshot shape). Failures are reported exactly as RoutesJSON reports
+// them, including a *RoutesError carrying the daemon's own already-distinguished
+// reason, because the two relays fail in the same ways and a caller should not
+// have to learn two vocabularies for one set of conditions.
+func (c *Client) ExposeJSON(server, host string, port int) ([]byte, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	req := Request{
+		SocketSchema: SocketSchema,
+		Kind:         "rpc",
+		Method:       "expose",
+		Server:       server,
+		// The name and port travel in the existing free-form field rather than
+		// in new ones of their own: the socket's frame shape is a contract, and
+		// a method's own arguments are not worth changing it for.
+		Meta: map[string]string{"host": host, "port": strconv.Itoa(port)},
+	}
+	if err := writeRequest(conn, req); err != nil {
+		return nil, fmt.Errorf("ipc: write expose request: %w", err)
+	}
+
+	resp, err := readResponse(conn)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: read expose response: %w", err)
 	}
 
 	if resp.SocketSchema != SocketSchema {
