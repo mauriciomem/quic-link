@@ -20,6 +20,13 @@ import (
 // Ensure stdioRW satisfies the interfaces tunnel.Pipe expects at compile time.
 // Pipe needs Read, Write, Close (io.ReadWriteCloser) and CloseWrite (so half-
 // close propagates rather than resetting the connection).
+//
+// This assertion is load-bearing for CloseWrite specifically. Pipe accepts an
+// io.ReadWriteCloser and discovers CloseWrite by asking the value at run time
+// whether it has one, so renaming or dropping CloseWrite would still compile
+// and would quietly turn every half-close into a full close — the exact
+// conversion the splice rules forbid. Read, Write and Close are additionally
+// required by Pipe's own parameter type; CloseWrite is caught here or nowhere.
 var _ interface {
 	Read([]byte) (int, error)
 	Write([]byte) (int, error)

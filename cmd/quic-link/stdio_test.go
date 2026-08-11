@@ -93,14 +93,25 @@ func TestStatusErrorMessage(t *testing.T) {
 	}
 }
 
-// TestStdioRWInterfaces verifies at compile time and at runtime that stdioRW
-// satisfies the interfaces expected by tunnel.Pipe:
+// TestStdioRWInterfaces verifies at compile time that stdioRW satisfies the
+// interfaces expected by tunnel.Pipe:
 //   - io.ReadWriteCloser (Read, Write, Close)
 //   - CloseWrite() error (half-close propagation)
+//
+// These methods are deliberately never CALLED here. Both CloseWrite and Close
+// close this process's os.Stdout, and for a test binary that is the descriptor
+// the testing framework writes its own results to: calling either one silences
+// every result line that would come after it, so a later test could fail while
+// the run reported only a bare package-level failure naming nothing. The
+// interface satisfaction is fully proven by the compiler, so there is nothing
+// a call would add. Assert on behaviour that needs a real stream in the
+// package that owns the splice instead.
 func TestStdioRWInterfaces(t *testing.T) {
 	rw := &stdioRW{}
 
-	// Compile-time checks (will not compile if methods are missing).
+	// Compile-time checks (will not compile if methods are missing). This
+	// duplicates the assertion beside the type itself on purpose, so removing
+	// one of them still leaves the requirement enforced somewhere.
 	type fullIface interface {
 		Read([]byte) (int, error)
 		Write([]byte) (int, error)
@@ -108,8 +119,4 @@ func TestStdioRWInterfaces(t *testing.T) {
 		CloseWrite() error
 	}
 	var _ fullIface = rw
-
-	// Runtime: CloseWrite on a live test process may succeed or fail depending
-	// on whether os.Stdout is already closed. We only require it not to panic.
-	_ = rw.CloseWrite()
 }
