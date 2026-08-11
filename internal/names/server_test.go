@@ -30,7 +30,7 @@ func startServer(t *testing.T) (*names.Server, string) {
 		t.Skipf("could not take tcp/%d to match udp: %v", port, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := names.NewServer(ctx, testZone(), udp, tcp)
+	s := names.NewServer(ctx, testZone(t), udp, tcp)
 	t.Cleanup(func() {
 		cancel()
 		s.Close()
@@ -92,7 +92,7 @@ func TestServer_BothTransportsCarryTheSameAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q := query(t, tc.qname, dnsmessage.TypeA, true)
-			want, drop := names.Respond(q, testZone())
+			want, drop := names.Respond(q, testZone(t))
 			if drop {
 				t.Fatal("the pure function dropped a well-formed query")
 			}
@@ -221,7 +221,7 @@ func TestServer_ClosesCleanlyWithNothingLeftRunning(t *testing.T) {
 		t.Skip("could not pair the ports")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := names.NewServer(ctx, testZone(), udp, tcp)
+	s := names.NewServer(ctx, testZone(t), udp, tcp)
 	cancel()
 	s.Close()
 }
@@ -229,6 +229,6 @@ func TestServer_ClosesCleanlyWithNothingLeftRunning(t *testing.T) {
 // TestServer_NilSocketsAreAllowed: when a port could not be taken the daemon
 // still starts, simply without that transport.
 func TestServer_NilSocketsAreAllowed(t *testing.T) {
-	s := names.NewServer(context.Background(), testZone(), nil, nil)
+	s := names.NewServer(context.Background(), testZone(t), nil, nil)
 	s.Close()
 }

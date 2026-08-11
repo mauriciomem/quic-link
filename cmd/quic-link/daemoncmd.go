@@ -322,6 +322,14 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 	// names. Those are different failures and deserve different words.
 	naming, namingErr := acquireNamingListeners(cfg)
 	if namingErr != nil {
+		// A name that cannot be served is the operator's to correct, so it stops
+		// the daemon instead of degrading it. Every other naming failure is a
+		// busy or forbidden socket, which costs this machine its names and
+		// nothing else: those carry on, because the tunnels and the local ports
+		// still work and saying so is more useful than refusing to run.
+		if errors.Is(namingErr, names.ErrUnservableName) {
+			return usageErrorf("%v", namingErr)
+		}
 		slog.Error("daemon: names are unavailable this session",
 			"role", "daemon", "err", namingErr)
 	}
@@ -427,6 +435,14 @@ func acquireNamingListeners(cfg *config.Config) (daemon.NamingListeners, error) 
 		servers = append(servers, name)
 	}
 
+	// Build the zone before taking any socket. A name this machine could answer
+	// for but never serve stops the daemon here, while there is still nothing
+	// to unwind and nothing has been published to the rest of the system.
+	zone, err := names.NewZone(n.Suffix, servers)
+	if err != nil {
+		return daemon.NamingListeners{}, err
+	}
+
 	addr := fmt.Sprintf("127.0.0.1:%d", n.DNSPort)
 	udp, err := net.ListenPacket("udp4", addr)
 	if err != nil {
@@ -454,7 +470,7 @@ func acquireNamingListeners(cfg *config.Config) (daemon.NamingListeners, error) 
 	}
 
 	return daemon.NamingListeners{
-		Zone:   names.NewZone(n.Suffix, servers),
+		Zone:   zone,
 		DNSUDP: udp,
 		DNSTCP: tcp,
 		HTTP:   httpLn,

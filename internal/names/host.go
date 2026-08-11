@@ -16,6 +16,7 @@ var (
 	ErrMalformed     = errors.New("names: the request is not well formed")
 	ErrHostIsAddress = errors.New("names: the host is an address, not a name")
 	ErrOutsideZone   = errors.New("names: the host is outside this machine's zone")
+	ErrNoSuchServer  = errors.New("names: no server of that name is managed here")
 )
 
 // MaxHeaderBytes is how much of a request we will read while looking for the
@@ -214,6 +215,22 @@ func NormalizeHost(raw string) (string, error) {
 	return h, nil
 }
 
+// ValidLabel reports whether s can be one part of a hostname: one to
+// sixty-three bytes of lowercase letters, digits and dashes, not starting or
+// ending with a dash.
+//
+// It is exported so that everything deciding whether a name may enter the
+// naming plane agrees with the code that finally has to serve it. Configuration
+// validation and the agent's hostname keys ask this rather than restating the
+// rule: three copies of one rule drift apart, and a name accepted by an earlier
+// check but refused by this one resolves and then cannot be served, which is
+// the worst of both answers. A caller wanting its own error message checks this
+// and writes one; what counts as a legal label must not differ between callers.
+//
+// A short token an operator picks for a route is deliberately NOT this rule.
+// That one allows characters a hostname may not, and lives with the router.
+func ValidLabel(s string) bool { return dnsLabelBytes(s) }
+
 // dnsLabelBytes reports whether s can be one part of a hostname.
 func dnsLabelBytes(s string) bool {
 	if len(s) == 0 || len(s) > 63 {
@@ -250,6 +267,16 @@ func (z *Zone) Route(rawHost string) (server, service, host string, err error) {
 	server, service, ok := z.Split(h)
 	if !ok {
 		return "", "", "", ErrOutsideZone
+	}
+	// Ask whether this machine actually looks after that server, which the
+	// answer given over DNS for the same name already asks. Without this a
+	// name shaped like a hostname but naming nothing is carried further in,
+	// and the request fails later against a session that was never going to
+	// exist — reported as a missing session rather than a name nobody serves.
+	// The set of managed servers is fixed when the zone is built, so a name
+	// refused here was never going to be served by this process.
+	if !z.Manages(server) {
+		return "", "", "", ErrNoSuchServer
 	}
 	return server, service, h, nil
 }

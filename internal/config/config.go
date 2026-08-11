@@ -486,23 +486,40 @@ func validateServer(name string, srv Server) error {
 		return fmt.Errorf("servers.%s: %v: %w", name, err, ErrInvalid)
 	}
 
+	return ValidateServerSettings(name, srv)
+}
+
+// ValidateServerSettings checks everything about a server except its name: that
+// exactly one of addr and listen is set, and that the pin is a pin.
+//
+// It is separate from the name check so that a command assembling a server from
+// its own arguments — for one connection, never registered and never resolved —
+// can be held to the same rules about its settings without having to invent a
+// name to satisfy a hostname check it will never need. Before this existed such
+// a command borrowed a placeholder name and an exemption was carved into the
+// hostname rule to let that placeholder through, which left the rule with a
+// hole in it for the sake of a caller that did not want the rule at all.
+//
+// label is used only to say where a problem is. It may be any wording that
+// helps the reader locate it.
+func ValidateServerSettings(label string, srv Server) error {
 	bothSet := srv.Addr != "" && srv.Listen != ""
 	neitherSet := srv.Addr == "" && srv.Listen == ""
 	if bothSet {
 		return fmt.Errorf(
 			"servers.%s: addr and listen are mutually exclusive; set only one: %w",
-			name, ErrInvalid,
+			label, ErrInvalid,
 		)
 	}
 	if neitherSet {
 		return fmt.Errorf(
 			"servers.%s: either addr (forward mode) or listen (reverse mode) is required: %w",
-			name, ErrInvalid,
+			label, ErrInvalid,
 		)
 	}
 	if _, err := identity.ParsePin(srv.Pin); err != nil {
 		return fmt.Errorf("servers.%s: pin is required and must be valid base64(SHA-256): %v: %w",
-			name, err, ErrInvalid,
+			label, err, ErrInvalid,
 		)
 	}
 	return nil
@@ -659,14 +676,6 @@ func removedKeyError(what, why string) error {
 func checkRemovedKeys(path string, survey map[string]any) error {
 	if _, ok := survey["ports"]; ok {
 		return fmt.Errorf("config %s: %w", path, removedKeyError("the [ports] table", removedPortsTable))
-	}
-	if servers, ok := survey["servers"].(map[string]any); ok {
-		if _, ok := servers[FlagOnlyServerName]; ok {
-			return fmt.Errorf(
-				"config %s: %q is reserved for a server built from command-line flags and "+
-					"cannot be used in a file; choose a name that can be part of a hostname: %w",
-				path, FlagOnlyServerName, ErrInvalid)
-		}
 	}
 	if names, ok := survey["names"].(map[string]any); ok {
 		if _, ok := names["block"]; ok {

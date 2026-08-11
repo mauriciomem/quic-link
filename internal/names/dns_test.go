@@ -10,7 +10,10 @@ import (
 	"github.com/mauriciomem/quic-link/internal/names"
 )
 
-func testZone() *names.Zone { return names.NewZone("internal", []string{"server1", "gpu-box"}) }
+func testZone(t *testing.T) *names.Zone {
+	t.Helper()
+	return mustZone(t, "internal", []string{"server1", "gpu-box"})
+}
 
 // query builds a realistic query: one question, recursion desired, and an
 // options record, because that is what a system resolver actually sends.
@@ -85,7 +88,7 @@ func parseReply(t *testing.T, msg []byte) parsed {
 // that kind" lives entirely in that code, and a test that only checked for the
 // absence of an answer would pass for both.
 func TestRespond_BehaviourTable(t *testing.T) {
-	z := testZone()
+	z := testZone(t)
 	cases := []struct {
 		name       string
 		qname      string
@@ -147,7 +150,7 @@ func TestRespond_BehaviourTable(t *testing.T) {
 // TestRespond_AddressAnswerShape pins what an address answer actually contains.
 // The lifetime is asserted exactly: a range would accept any value at all.
 func TestRespond_AddressAnswerShape(t *testing.T) {
-	reply, drop := names.Respond(query(t, "grafana.server1.internal.", dnsmessage.TypeA, true), testZone())
+	reply, drop := names.Respond(query(t, "grafana.server1.internal.", dnsmessage.TypeA, true), testZone(t))
 	if drop {
 		t.Fatal("dropped")
 	}
@@ -181,7 +184,7 @@ func TestRespond_AddressAnswerShape(t *testing.T) {
 // passes.
 func TestRespond_EchoesTheQuestionCaseExactly(t *testing.T) {
 	const asked = "GrAfAnA.Server1.INTERNAL."
-	reply, drop := names.Respond(query(t, asked, dnsmessage.TypeA, false), testZone())
+	reply, drop := names.Respond(query(t, asked, dnsmessage.TypeA, false), testZone(t))
 	if drop {
 		t.Fatal("a mixed-case name must still resolve")
 	}
@@ -209,7 +212,7 @@ func TestRespond_MalformedInputIsDroppedNotAnswered(t *testing.T) {
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
-			reply, drop := names.Respond(in, testZone())
+			reply, drop := names.Respond(in, testZone(t))
 			if !drop && len(reply) == 0 {
 				t.Error("either drop or produce a reply, never an empty one")
 			}
@@ -222,7 +225,7 @@ func TestRespond_MalformedInputIsDroppedNotAnswered(t *testing.T) {
 func TestRespond_IgnoresAReplyArrivingAsAQuery(t *testing.T) {
 	q := query(t, "server1.internal.", dnsmessage.TypeA, false)
 	q[2] |= 0x80 // set the response bit
-	if _, drop := names.Respond(q, testZone()); !drop {
+	if _, drop := names.Respond(q, testZone(t)); !drop {
 		t.Error("a message already marked as a response must be ignored")
 	}
 }
@@ -242,7 +245,7 @@ func TestRespond_MultipleQuestionsAreRefusedAsMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, drop := names.Respond(msg, testZone())
+	reply, drop := names.Respond(msg, testZone(t))
 	if drop {
 		t.Fatal("two questions should be answered with a complaint, not silence")
 	}
@@ -256,7 +259,7 @@ func TestRespond_MultipleQuestionsAreRefusedAsMalformed(t *testing.T) {
 // this mostly theoretical, but the property is cheap to keep and expensive to
 // notice the absence of.
 func TestRespond_CannotAmplify(t *testing.T) {
-	z := testZone()
+	z := testZone(t)
 	for _, n := range []string{
 		"server1.internal.", "nope.internal.", "example.com.",
 		"_dns.resolver.arpa.", "a.very.long.name.that.goes.on.server1.internal.",
@@ -280,7 +283,10 @@ func TestRespond_CannotAmplify(t *testing.T) {
 // FuzzRespond: the parser is fed whatever arrives on a loopback port, so the
 // only thing that must never happen is a panic or an unbounded reply.
 func FuzzRespond(f *testing.F) {
-	z := testZone()
+	z, zerr := names.NewZone("internal", []string{"server1", "gpu-box"})
+	if zerr != nil {
+		f.Fatalf("NewZone: %v", zerr)
+	}
 	seed, err := buildQuery("server1.internal.", dnsmessage.TypeA, true)
 	if err != nil {
 		f.Fatal(err)

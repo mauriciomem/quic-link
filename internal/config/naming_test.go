@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/names"
 )
 
 // loadAndValidate is the path a real client takes: read the file, then check it
@@ -338,29 +339,55 @@ func TestBadNamesIsOnlyAWarningForAnAgent(t *testing.T) {
 	}
 }
 
-// TestFlagOnlyServerNameIsAccepted pins the one name that is exempt from the
-// hostname rule. A verb given --server and --pin with no config file builds a
-// server on the spot and validates it under this key; refusing the key would
-// break every flag-only invocation, which is how somebody uses the tool before
-// they have written a config file at all.
+// TestServerNameHasNoExemptions pins that the hostname rule has no way round
+// it. A placeholder name used to be waved through so that a command building a
+// server from its own arguments could borrow it and still have its settings
+// checked; the settings check now stands on its own, so the hole is closed.
 //
-// This is a regression test with a story: adding the hostname rule broke
-// exactly this path, and it was caught only because the whole package was run.
-func TestFlagOnlyServerNameIsAccepted(t *testing.T) {
-	if err := config.ValidateServerName(config.FlagOnlyServerName); err != nil {
-		t.Fatalf("the flag-only sentinel must stay usable: %v", err)
-	}
-	// The exemption is exact. Anything merely shaped like the sentinel is still
-	// refused, so it can never be reached by accident.
-	for _, near := range []string{"(flag)", "(FLAGS)", "((flags))", "(flags", "flags)"} {
-		if err := config.ValidateServerName(near); err == nil {
-			t.Errorf("%q must not be accepted; only the exact sentinel is exempt", near)
+// This matters beyond tidiness. The name a server is given becomes part of a
+// hostname this machine answers for, and a name that got past this rule was
+// answered in DNS and then refused at the door, which is worse than never
+// answering: the caller was sent somewhere and found nothing there.
+func TestServerNameHasNoExemptions(t *testing.T) {
+	for _, refused := range []string{
+		"(flags)", "(flag)", "(FLAGS)", "((flags))", "(flags", "flags)",
+		"UPPER", "my_server", "my.server", "-lead", "trail-", "", "127.0.0.1",
+	} {
+		if err := config.ValidateServerName(refused); err == nil {
+			t.Errorf("%q cannot be part of a hostname and must be refused", refused)
 		}
 	}
-	// "flags" without the parentheses is a perfectly ordinary hostname label and
-	// is accepted on its own merits — it has nothing to do with the sentinel.
-	if err := config.ValidateServerName("flags"); err != nil {
-		t.Errorf("plain %q is a valid label and must be accepted: %v", "flags", err)
+	// Ordinary labels are still accepted on their own merits. "flags" without
+	// the parentheses was always one of them and has nothing to do with the
+	// placeholder that used to be exempt.
+	for _, accepted := range []string{"flags", "server1", "gpu-box", "a", "0"} {
+		if err := config.ValidateServerName(accepted); err != nil {
+			t.Errorf("%q is a valid label and must be accepted: %v", accepted, err)
+		}
+	}
+}
+
+// TestServerNameAgreesWithWhatCanBeServed pins the two checks together: a name
+// configuration accepts must be one the naming layer can actually serve, and a
+// name it refuses must be one the naming layer would refuse too.
+//
+// They were separate rules with separate wording, and they disagreed about a
+// placeholder: one accepted it, the other served it in DNS, and a third refused
+// it at the door. Asserting them against each other is what stops that
+// returning, since a future edit to either one now has to keep this true.
+func TestServerNameAgreesWithWhatCanBeServed(t *testing.T) {
+	for _, candidate := range []string{
+		"server1", "gpu-box", "a", "0", "flags", "internal", "localhost",
+		"(flags)", "UPPER", "my_server", "my.server", "-lead", "trail-", "127.0.0.1",
+		strings.Repeat("a", 63), strings.Repeat("a", 64),
+	} {
+		configAccepts := config.ValidateServerName(candidate) == nil
+		canBeServed := names.ValidLabel(candidate)
+		if configAccepts != canBeServed {
+			t.Errorf("%q: configuration accepts=%v but the naming layer can serve it=%v; "+
+				"a name must not be accepted by one and refused by the other",
+				candidate, configAccepts, canBeServed)
+		}
 	}
 }
 

@@ -114,22 +114,30 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 			}
 
 			// --- validate the effective config -------------------------
-			// Register the resolved server (with flag overrides applied) so
-			// Validate checks the effective server this run will use.
-			regKey := serverName
-			if regKey == "" {
-				regKey = config.FlagOnlyServerName
-			}
-			if a.cfg.Servers == nil {
-				a.cfg.Servers = map[string]config.Server{}
-			}
-			a.cfg.Servers[regKey] = srv
+			// Check the settings this run will actually use, by the same rules a
+			// configured server is held to.
+			//
+			// When a name was given, register the resolved server under it so the
+			// whole configuration is validated as a set. When one was not, there
+			// is no name to register and none is invented: this server lives for
+			// the length of one command, is never published and is never resolved,
+			// so a hostname rule has nothing to say about it. Its settings are
+			// still checked, which is the part that decides whether the command
+			// can work.
+			if serverName != "" {
+				if a.cfg.Servers == nil {
+					a.cfg.Servers = map[string]config.Server{}
+				}
+				a.cfg.Servers[serverName] = srv
 
-			warnings, err := a.cfg.Validate(config.RoleClient)
-			for _, w := range warnings {
-				slog.Warn(w)
-			}
-			if err != nil {
+				warnings, err := a.cfg.Validate(config.RoleClient)
+				for _, w := range warnings {
+					slog.Warn(w)
+				}
+				if err != nil {
+					return err
+				}
+			} else if err := config.ValidateServerSettings("(from flags)", srv); err != nil {
 				return err
 			}
 

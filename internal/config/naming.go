@@ -2,8 +2,9 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/mauriciomem/quic-link/internal/names"
 )
 
 // Default listening ports for the naming layer. All three are deliberately
@@ -28,10 +29,6 @@ const (
 // any mechanism: a value under it is refused when configuration is read rather
 // than discovered as a permission error at startup.
 const lowestUnprivilegedPort = 1024
-
-// dnsLabel is one component of a hostname: letters, digits and dashes, not
-// starting or ending with a dash, at most 63 characters.
-var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // reservedSuffixes are names set aside by standards bodies for private use, so
 // pointing the system resolver at them cannot take a real namespace away from
@@ -165,7 +162,7 @@ func resolveSuffix(raw string, isMine bool) (string, error) {
 
 	labels := strings.Split(s, ".")
 	for _, l := range labels {
-		if !dnsLabel.MatchString(l) {
+		if !names.ValidLabel(l) {
 			return "", fmt.Errorf(
 				"names.suffix %q is not a hostname: %q is not a valid label "+
 					"(letters, digits and dashes, not starting or ending with a dash): %w",
@@ -222,18 +219,6 @@ func isReservedSuffix(s string) bool {
 	return false
 }
 
-// FlagOnlyServerName is the key a verb uses when it assembles a server purely
-// from command-line flags, so that the settings the command will actually use
-// are checked the same way a configured server would be.
-//
-// It is deliberately not a hostname. Such a server exists for the duration of
-// one command, is never registered anywhere, and never has a name to resolve.
-// The parentheses cannot collide with a real server either, because
-// ValidateServerName refuses them for everything else — the exemption below is
-// safe precisely because the rule it sidesteps is what makes the name
-// unreachable for anybody else.
-const FlagOnlyServerName = "(flags)"
-
 // ValidateServerName checks that a server's name can be used as the leftmost
 // label of a hostname, because that is what it becomes: a server called
 // "server1" is reachable as "server1.<suffix>".
@@ -245,10 +230,7 @@ func ValidateServerName(name string) error {
 	if name == "" {
 		return fmt.Errorf("server name must not be empty")
 	}
-	if name == FlagOnlyServerName {
-		return nil
-	}
-	if dnsLabel.MatchString(name) {
+	if names.ValidLabel(name) {
 		return nil
 	}
 	if strings.ToLower(name) != name {

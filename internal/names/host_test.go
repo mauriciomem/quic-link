@@ -140,7 +140,7 @@ func TestNormalizeHost(t *testing.T) {
 // out as a test because getting it wrong refuses every honest request and the
 // obvious cure reopens the hole.
 func TestRoute_PortIsStrippedBeforeTheZoneIsChecked(t *testing.T) {
-	z := names.NewZone("internal", []string{"server1"})
+	z := mustZone(t, "internal", []string{"server1"})
 
 	server, service, host, err := z.Route("grafana.server1.internal:18080")
 	if err != nil {
@@ -165,7 +165,7 @@ func TestRoute_PortIsStrippedBeforeTheZoneIsChecked(t *testing.T) {
 }
 
 func TestRoute_RefusesTheZoneItselfAndAddresses(t *testing.T) {
-	z := names.NewZone("internal", []string{"server1"})
+	z := mustZone(t, "internal", []string{"server1"})
 	for _, bad := range []string{"internal", "internal.", "127.0.0.1", "127.0.0.1:18080"} {
 		if _, _, _, err := z.Route(bad); err == nil {
 			t.Errorf("Route(%q) must be refused", bad)
@@ -190,4 +190,44 @@ func FuzzHostFromRequest(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestRoute_RefusesAServerItDoesNotManage pins that the door asks the same
+// question the DNS answer already asks. Without this, a name shaped like a
+// hostname but naming no server this machine looks after was carried further in
+// and failed later against a session that was never going to exist, which reads
+// as "the server is down" rather than "there is no such server here".
+func TestRoute_RefusesAServerItDoesNotManage(t *testing.T) {
+	z := mustZone(t, "internal", []string{"server1"})
+
+	if _, _, _, err := z.Route("grafana.server1.internal"); err != nil {
+		t.Fatalf("a managed server must still route: %v", err)
+	}
+
+	for _, host := range []string{
+		"other.internal",
+		"grafana.other.internal",
+		"127.0.0.1.internal",
+	} {
+		_, _, _, err := z.Route(host)
+		if !errors.Is(err, names.ErrNoSuchServer) {
+			t.Errorf("Route(%q) error = %v, want it to say no such server is managed here", host, err)
+		}
+	}
+}
+
+// TestRoute_KeepsOutsideAndUnmanagedApart pins that the two refusals stay
+// distinguishable. One means the request was never this machine's business; the
+// other means it was, and named something that is not here. Collapsing them
+// would make a misconfigured server name and a stray request from the internet
+// look identical in a log.
+func TestRoute_KeepsOutsideAndUnmanagedApart(t *testing.T) {
+	z := mustZone(t, "internal", []string{"server1"})
+
+	if _, _, _, err := z.Route("example.com"); !errors.Is(err, names.ErrOutsideZone) {
+		t.Errorf("a name outside the zone should say so, got %v", err)
+	}
+	if _, _, _, err := z.Route("nope.internal"); !errors.Is(err, names.ErrNoSuchServer) {
+		t.Errorf("a name inside the zone naming nothing should say so, got %v", err)
+	}
 }

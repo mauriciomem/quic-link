@@ -2,16 +2,21 @@ package router
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/mauriciomem/quic-link/internal/names"
 )
 
-// vhostLabel is one part of a hostname key. It is deliberately not the same
-// rule as a route name: a route name is a short token chosen by an operator and
-// may contain characters a hostname may not, while these keys are hostnames and
-// have to look like one.
-var vhostLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+// vhostLabel reports whether one part of a hostname key is a legal label. It is
+// deliberately not the same rule as a route name: a route name is a short token
+// chosen by an operator and may contain characters a hostname may not, while
+// these keys are hostnames and have to look like one.
+//
+// The rule itself is not restated here. It is asked of the code that serves
+// these names, so a key accepted here cannot be one that is refused when a
+// request for it arrives.
+func vhostLabel(s string) bool { return names.ValidLabel(s) }
 
 // ValidateVhostLabel checks one part of a hostname — the piece a caller names a
 // service by, before the server and suffix are appended to it.
@@ -33,7 +38,7 @@ func ValidateVhostLabel(label string) error {
 	if label != strings.ToLower(label) {
 		return fmt.Errorf("service name %q must be lowercase; hostnames are compared without regard to case", label)
 	}
-	if !vhostLabel.MatchString(label) {
+	if !vhostLabel(label) {
 		return fmt.Errorf("service name %q is not usable in a hostname: use letters, digits and dashes, "+
 			"starting and ending with a letter or digit", label)
 	}
@@ -71,7 +76,7 @@ func ValidateVhostKey(key string) error {
 		if strings.Contains(l, "*") {
 			return fmt.Errorf("vhost name %q may only use a star as a whole label, never part of one", key)
 		}
-		if !vhostLabel.MatchString(l) {
+		if !vhostLabel(l) {
 			return fmt.Errorf("vhost name %q is not a hostname: %q is not a valid label", key, l)
 		}
 	}

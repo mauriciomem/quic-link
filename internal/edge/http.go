@@ -10,6 +10,7 @@ import (
 
 	"github.com/mauriciomem/quic-link/internal/names"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
+	"strings"
 )
 
 const (
@@ -123,8 +124,19 @@ func (e *HostEdge) handle(ctx context.Context, conn net.Conn) {
 
 	server, service, host, err := e.zone.Route(rawHost)
 	if err != nil {
-		slog.Debug("edge: refusing a name we do not serve", "role", "daemon",
-			"kind", e.pk.kind(), "err", err)
+		// Say this at a level an operator sees without being asked. The symptom
+		// of a silent refusal is a browser reporting an empty reply while the
+		// log says nothing at all, which leaves nowhere to start; the failure
+		// immediately after this one has always been visible, so being quieter
+		// than it made the two indistinguishable from outside.
+		//
+		// The name came off the wire and is echoed back only after being cut to
+		// a length and stripped of anything that could forge a line or steer a
+		// terminal. This is the check that turns away requests from the open
+		// internet, so it is reached by whatever anyone chooses to send.
+		slog.Warn("edge: refusing a name this machine does not serve",
+			"role", "daemon", "kind", e.pk.kind(),
+			"host", safeHostForLog(rawHost), "err", err)
 		return
 	}
 
@@ -184,4 +196,44 @@ func (e *HostEdge) peek(conn net.Conn) (host string, prefix []byte, err error) {
 			return "", nil, rerr
 		}
 	}
+}
+
+// maxLoggedHostLen bounds how much of a rejected name is ever written to the
+// log. A legitimate hostname cannot exceed 253 bytes, so anything longer is
+// already not a name; the bound exists because this code path is reached by
+// whatever an unknown client chooses to send, and a log line is not a place to
+// repeat an unbounded amount of it.
+const maxLoggedHostLen = 120
+
+// safeHostForLog renders a name that arrived on the wire safe to write to a
+// log, and short enough not to be worth sending for that purpose.
+//
+// It removes every byte below a space and every byte from delete upwards,
+// which is what stops a chosen name from forging a second log line or from
+// carrying an escape sequence into whatever is reading the log. Anything
+// removed is replaced by a single marker rather than dropped silently, so a
+// name that was tampered with does not read as an ordinary one.
+func safeHostForLog(raw string) string {
+	if raw == "" {
+		return "(none)"
+	}
+	truncated := false
+	if len(raw) > maxLoggedHostLen {
+		raw = raw[:maxLoggedHostLen]
+		truncated = true
+	}
+	var b strings.Builder
+	b.Grow(len(raw) + 1)
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c < 0x20 || c >= 0x7f {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteByte(c)
+	}
+	if truncated {
+		b.WriteString("...")
+	}
+	return b.String()
 }

@@ -9,6 +9,8 @@
 package names
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -62,7 +64,14 @@ func (z *Zone) SawProbe(label string) bool {
 // configuration validation guarantees it — but the constructor lowercases
 // anyway so a caller that skips validation cannot produce a zone that silently
 // never matches.
-func NewZone(suffix string, servers []string) *Zone {
+//
+// A name that is still not a legal hostname label after lowercasing is refused
+// outright, and the whole zone with it. Admitting one used to mean this machine
+// answered DNS for a name with the loopback address and then refused the very
+// same name at the door, with nothing said either side of that: a browser was
+// handed somewhere to go and found the door shut. Refusing here is louder and
+// earlier, and it is the only place that sees every name at once.
+func NewZone(suffix string, servers []string) (*Zone, error) {
 	z := &Zone{
 		suffix:  strings.ToLower(strings.TrimSuffix(suffix, ".")),
 		servers: make(map[string]struct{}, len(servers)),
@@ -72,10 +81,24 @@ func NewZone(suffix string, servers []string) *Zone {
 		if s == "" {
 			continue
 		}
-		z.servers[strings.ToLower(s)] = struct{}{}
+		name := strings.ToLower(s)
+		if !ValidLabel(name) {
+			return nil, fmt.Errorf(
+				"%w: server name %q cannot be part of a hostname, so this machine "+
+					"could answer for it but never serve it; use lowercase letters, "+
+					"digits and dashes, not starting or ending with a dash",
+				ErrUnservableName, s)
+		}
+		z.servers[name] = struct{}{}
 	}
-	return z
+	return z, nil
 }
+
+// ErrUnservableName reports a server name that cannot be part of a hostname.
+// It is a distinct error because the remedy is to change the name, and because
+// the alternative — carrying on without that name — would leave a machine
+// answering for something it cannot serve.
+var ErrUnservableName = errors.New("names: unservable server name")
 
 // Suffix returns the zone's suffix, lowercase and without a trailing dot.
 func (z *Zone) Suffix() string { return z.suffix }

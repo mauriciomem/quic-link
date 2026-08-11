@@ -20,6 +20,17 @@ import (
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
+// mustEdgeZone builds a zone the test expects to be buildable, failing the test
+// rather than an assertion further down if it is not.
+func mustEdgeZone(t *testing.T, suffix string, servers []string) *names.Zone {
+	t.Helper()
+	z, err := names.NewZone(suffix, servers)
+	if err != nil {
+		t.Fatalf("NewZone(%q, %v): %v", suffix, servers, err)
+	}
+	return z
+}
+
 // countingSource wraps a ConnSource and records how many times a session was
 // asked for. A refusal that never asks is the proof that nothing was opened.
 type countingSource struct {
@@ -111,7 +122,7 @@ func newHostEdgeRig(t *testing.T) *hostEdgeRig {
 		t.Fatal(err)
 	}
 	ectx, ecancel := context.WithCancel(context.Background())
-	e := edge.NewHostEdge(ectx, edgeLn, names.NewZone("internal", []string{"server1"}), src, edge.HTTPPeeker{})
+	e := edge.NewHostEdge(ectx, edgeLn, mustEdgeZone(t, "internal", []string{"server1"}), src, edge.HTTPPeeker{})
 	t.Cleanup(func() { ecancel(); e.Close() })
 
 	return &hostEdgeRig{addr: edgeLn.Addr().String(), received: received, src: src}
