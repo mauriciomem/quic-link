@@ -118,6 +118,9 @@ mismatched pin.
 - [`docs/architecture.md`](docs/architecture.md): how the tunnel works
 - [`docs/cli.md`](docs/cli.md): every verb, its flags, and the exit codes
 - [`docs/configuration.md`](docs/configuration.md): the config file and its keys
+- [`docs/running-as-a-service.md`](docs/running-as-a-service.md): reference systemd user
+  unit and launchd agent for starting the daemon at login — files you copy and own,
+  because quic-link does not install one
 - [`docs/platform-notes.md`](docs/platform-notes.md): the two gotchas above,
   plus the UDP receive buffer note
 

@@ -251,12 +251,17 @@ func TestRemove_RefusesADirectory(t *testing.T) {
 // that it is the whole answer to "what did this put on my machine", and a
 // relative path would make that claim uncheckable.
 func TestInventory_EveryArtifactHasAnAbsolutePath(t *testing.T) {
-	arts := setup.Inventory("internal", 15353, "/home/someone")
-	arts = append(arts, setup.UserPaths("/home/someone",
+	arts := setup.Inventory("internal", 15353)
+	arts = append(arts, setup.UserPaths(
 		"/home/someone/.config/quic-link/key.pem",
 		"/home/someone/.config/quic-link/config.toml")...)
-	if len(arts) < 4 {
-		t.Fatalf("only %d artifacts; the list is meant to be complete", len(arts))
+	// One system file plus the two files in an account. The count is asserted
+	// exactly, because this list is the whole answer to "what did this put on my
+	// machine", and something appearing in it or vanishing from it silently is
+	// how that answer stops being true. Anything added here must be a file that
+	// something can actually create.
+	if len(arts) != 3 {
+		t.Fatalf("got %d artifacts, want 3: one system file and the two in an account", len(arts))
 	}
 	for _, a := range arts {
 		if !filepath.IsAbs(a.Path) {
@@ -271,14 +276,14 @@ func TestInventory_EveryArtifactHasAnAbsolutePath(t *testing.T) {
 // TestInventory_OnlyTheResolverFileIsOwnedByRoot pins the promise that setup
 // makes: one file, and everything else is yours.
 func TestInventory_OnlyTheResolverFileIsOwnedByRoot(t *testing.T) {
-	arts := setup.Inventory("internal", 15353, "")
+	arts := setup.Inventory("internal", 15353)
 	if len(arts) != 1 {
 		t.Fatalf("setup writes %d files with privileges; the promise is one", len(arts))
 	}
 	if arts[0].Scope != setup.Root {
 		t.Error("the resolver file is the privileged one")
 	}
-	for _, a := range setup.UserPaths("/home/someone", "/k", "/c") {
+	for _, a := range setup.UserPaths("/k", "/c") {
 		if a.Scope != setup.User {
 			t.Errorf("%s should belong to the user", a.Path)
 		}

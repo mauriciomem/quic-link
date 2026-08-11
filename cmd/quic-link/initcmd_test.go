@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // runSetupVerb runs a verb with a config file and returns everything it printed.
@@ -292,5 +294,223 @@ func TestDoctor_ABadSuffixDoesNotBlindTheReport(t *testing.T) {
 	}
 	if _, ok := got["resolver"]; !ok {
 		t.Error("resolver detection should still be reported")
+	}
+}
+
+// TestInit_UnprivilegedHalfWritesNothing pins the claim the help now makes. It
+// used to advertise setting up settings, an identity and a login service, and
+// wrote none of them; the one that could never be written has been removed from
+// the inventory, and the other two belong to commands whose job they are. A
+// future edit that starts writing here has to change this test, which is the
+// point of it.
+func TestInit_UnprivilegedHalfWritesNothing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	before := countFilesUnder(t, home)
+	out, _, err := runInitUnprivileged(t, home)
+	if err != nil {
+		t.Fatalf("the unprivileged half must not fail on a bare machine: %v", err)
+	}
+	if after := countFilesUnder(t, home); after != before {
+		t.Errorf("it created %d file(s); this half installs nothing", after-before)
+	}
+	if !strings.Contains(out, "installs nothing") {
+		t.Errorf("it should say plainly that it installs nothing; got:\n%s", out)
+	}
+	// It must not claim to have set up an identity or a login service.
+	for _, mustNotSay := range []string{"login service", "identity and"} {
+		if strings.Contains(out, mustNotSay) {
+			t.Errorf("output still claims %q:\n%s", mustNotSay, out)
+		}
+	}
+}
+
+// TestInit_PointsAtTheCommandForEachMissingPiece pins that a missing file comes
+// with the command that makes it, rather than being listed and left.
+func TestInit_PointsAtTheCommandForEachMissingPiece(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	out, _, err := runInitUnprivileged(t, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "quic-link keygen") {
+		t.Errorf("a missing identity must name the command that makes one; got:\n%s", out)
+	}
+	if !strings.Contains(out, "sudo quic-link init") {
+		t.Errorf("a missing system file must name the one privileged command; got:\n%s", out)
+	}
+	if !strings.Contains(out, "quic-link doctor") {
+		t.Errorf("it should point at the fuller report rather than repeating it; got:\n%s", out)
+	}
+}
+
+// TestInit_NeverTellsAnyoneToRunItTwice pins a wording rule. Running it twice
+// was never two halves of one job: one run installs the single system file and
+// the other installs nothing, so describing it as a pair invited people to
+// believe an unprivileged run had done something.
+func TestInit_NeverTellsAnyoneToRunItTwice(t *testing.T) {
+	root := newRootCmd()
+	var initCmd *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "init" {
+			initCmd = c
+			break
+		}
+	}
+	if initCmd == nil {
+		t.Fatal("init command not found")
+	}
+	help := initCmd.Long + "\n" + initCmd.Short
+	for _, banned := range []string{"twice", "once each way", "Either order"} {
+		if strings.Contains(help, banned) {
+			t.Errorf("init help still says %q, which describes a two-run setup that does not exist", banned)
+		}
+	}
+}
+
+// TestInit_HasNoNoSudoFlag pins the removal of a flag whose entire effect was
+// suppressing five lines of advice. It changed no file, because the half it
+// named writes nothing.
+func TestInit_HasNoNoSudoFlag(t *testing.T) {
+	root := newRootCmd()
+	for _, c := range root.Commands() {
+		if c.Name() != "init" {
+			continue
+		}
+		if f := c.Flags().Lookup("no-sudo"); f != nil {
+			t.Error("--no-sudo is back; it selected between doing nothing and doing nothing")
+		}
+		return
+	}
+	t.Fatal("init command not found")
+}
+
+func countFilesUnder(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	return n
+}
+
+func runInitUnprivileged(t *testing.T, home string) (stdout, stderr string, err error) {
+	t.Helper()
+	root := newRootCmd()
+	var outBuf, errBuf bytes.Buffer
+	root.SetOut(&outBuf)
+	root.SetErr(&errBuf)
+	root.SetArgs([]string{"init", "--yes"})
+	err = root.Execute()
+	return outBuf.String(), errBuf.String(), err
+}
+
+// TestDoctor_ReportsTheSettingsFileItWasGiven pins a defect that made the report
+// wrong for anybody using an explicit settings path: the path was rebuilt by
+// hand from the home directory, so a file supplied on the command line was
+// ignored and reported absent while it sat there being read.
+func TestDoctor_ReportsTheSettingsFileItWasGiven(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := filepath.Join(dir, "elsewhere.toml")
+	if err := os.WriteFile(cfg, []byte("[names]\nsuffix = \"internal\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root := newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"--config", cfg, "doctor", "--json"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+
+	var rep struct {
+		Artifacts []struct {
+			Path    string `json:"path"`
+			Purpose string `json:"purpose"`
+			Present bool   `json:"present"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("parse doctor --json: %v\n%s", err, out.String())
+	}
+
+	var found bool
+	for _, a := range rep.Artifacts {
+		if a.Purpose != "your settings" {
+			continue
+		}
+		found = true
+		if a.Path != cfg {
+			t.Errorf("settings path = %q, want the file given on the command line %q", a.Path, cfg)
+		}
+		if !a.Present {
+			t.Errorf("%q exists and is being read, so it must not be reported absent", cfg)
+		}
+	}
+	if !found {
+		t.Fatal("no settings artifact reported at all")
+	}
+}
+
+// TestDoctor_AbsentSettingsBecomeTheNextStep pins that the person with nothing
+// set up is told what to do. An absent settings file was listed and then skipped
+// by every branch that chooses the next step, so the report named an unrelated
+// step and left the most fundamental gap unmentioned.
+func TestDoctor_AbsentSettingsBecomeTheNextStep(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// An identity must exist, because that is a more fundamental gap and is
+	// deliberately reported first.
+	keyDir := filepath.Join(home, ".config", "quic-link")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := newRootCmd()
+	var kout bytes.Buffer
+	root.SetOut(&kout)
+	root.SetErr(&kout)
+	root.SetArgs([]string{"keygen"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+
+	root = newRootCmd()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"doctor", "--json"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("doctor: %v", err)
+	}
+
+	var rep struct {
+		NextStep string `json:"next_step"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("parse doctor --json: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(rep.NextStep, "settings") {
+		t.Errorf("next step = %q, want it to name the missing settings file", rep.NextStep)
+	}
+	if !strings.Contains(rep.NextStep, "servers.") {
+		t.Errorf("next step = %q, want it to show what to write", rep.NextStep)
 	}
 }

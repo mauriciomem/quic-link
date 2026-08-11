@@ -52,7 +52,7 @@ type Artifact struct {
 // dnsPort and suffix come from validated configuration; nothing here re-checks
 // them, because a value that reached this point has already been refused if it
 // was dangerous.
-func Inventory(suffix string, dnsPort int, home string) []Artifact {
+func Inventory(suffix string, dnsPort int) []Artifact {
 	var out []Artifact
 
 	if runtime.GOOS == "darwin" {
@@ -116,26 +116,20 @@ func Missing(arts []Artifact) []Artifact {
 
 // UserPaths are the files an ordinary run looks after. They are listed
 // separately from Inventory because they are found relative to a home
-// directory, and a privileged run must not go looking for one.
-func UserPaths(home, keyFile, configFile string) []Artifact {
-	arts := []Artifact{
+// directory, and a privileged run must not go looking for one. Their paths are
+// passed in rather than derived here, so that a report always names the files a
+// run is really using.
+//
+// Only a file that exists, or that some command can bring into existence,
+// belongs in this list. Reporting one that nothing can create tells a person
+// something is missing and leaves them no way to supply it, which is worse than
+// not mentioning it: starting the daemon at a login is arranged with the
+// service manager and is the operator's own file, not this program's.
+func UserPaths(keyFile, configFile string) []Artifact {
+	return []Artifact{
 		{Path: configFile, Scope: User, Purpose: "your settings"},
 		{Path: keyFile, Scope: User, Purpose: "this machine's identity"},
 	}
-	if runtime.GOOS == "darwin" {
-		arts = append(arts, Artifact{
-			Path:    filepath.Join(home, "Library/LaunchAgents/io.quic-link.daemon.plist"),
-			Scope:   User,
-			Purpose: "start the daemon when you log in",
-		})
-	} else {
-		arts = append(arts, Artifact{
-			Path:    filepath.Join(home, ".config/systemd/user/quic-link.service"),
-			Scope:   User,
-			Purpose: "start the daemon when you log in",
-		})
-	}
-	return arts
 }
 
 // RealUser reports the account that invoked a privileged run, and whether the

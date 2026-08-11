@@ -156,6 +156,22 @@ func defaultConfigFilePath() string {
 	return filepath.Join(home, ".config", "quic-link", "config.toml")
 }
 
+// FileInUse reports which settings file a run is actually reading, given the
+// value of the path flag: the flag when one was given, otherwise the default
+// location.
+//
+// Anything that tells a person about their settings has to name the same file
+// the settings were read from. Rebuilding the default path by hand looks
+// equivalent and is not, because it ignores a path the user supplied — which
+// produced a report that called a file absent while the file it was told to use
+// sat there in plain sight.
+func FileInUse(pathFlag string) string {
+	if pathFlag != "" {
+		return pathFlag
+	}
+	return defaultConfigFilePath()
+}
+
 // ---- Load -------------------------------------------------------------------
 
 // Load builds a Config by applying defaults, then the config file (if any),

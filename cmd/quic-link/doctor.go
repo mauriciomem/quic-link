@@ -9,12 +9,12 @@ import (
 	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mauriciomem/quic-link/internal/buildinfo"
+	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/names"
@@ -126,12 +126,12 @@ func diagnose(cmd *cobra.Command, a *app) report {
 	if nerr == nil {
 		// Which system file we would write depends on the suffix, so with an
 		// unusable one there is no particular file to look for.
-		arts = setup.Survey(setup.Inventory(n.Suffix, n.DNSPort, home))
+		arts = setup.Survey(setup.Inventory(n.Suffix, n.DNSPort))
 	}
 	if home != "" {
-		arts = append(arts, setup.Survey(setup.UserPaths(home,
+		arts = append(arts, setup.Survey(setup.UserPaths(
 			expandTilde(a.cfg.Identity.KeyFile),
-			filepath.Join(home, ".config", "quic-link", "config.toml")))...)
+			config.FileInUse(a.configPath)))...)
 	}
 	for _, art := range arts {
 		r.Artifacts = append(r.Artifacts, artifactJSON{
@@ -213,6 +213,19 @@ func nextStep(r report, res setup.Resolver) string {
 	for _, a := range r.Artifacts {
 		if a.Scope == "user" && a.Purpose == "this machine's identity" && !a.Present {
 			return "make this machine an identity: quic-link keygen"
+		}
+	}
+	// Settings come after an identity because a file naming servers is no use
+	// without a key to reach them with. Saying nothing here used to leave the
+	// one person who most needs an answer — somebody with no settings at all —
+	// reading a report that listed the file as absent and then moved on.
+	for _, a := range r.Artifacts {
+		if a.Scope == "user" && a.Purpose == "your settings" && !a.Present {
+			return "write your settings, naming at least one server:\n" +
+				"    [servers.<name>]\n" +
+				"    addr = \"host:port\"\n" +
+				"    pin  = \"<the agent's pin>\"\n" +
+				"  in " + a.Path
 		}
 	}
 	if !r.Resolver.Supported {

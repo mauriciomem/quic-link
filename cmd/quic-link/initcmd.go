@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -30,7 +29,6 @@ import (
 func newInitCmd(a *app) *cobra.Command {
 	var (
 		assumeYes bool
-		noSudo    bool
 		undo      bool
 	)
 
@@ -38,15 +36,21 @@ func newInitCmd(a *app) *cobra.Command {
 		Use:   "init",
 		Short: "Set this machine up to reach servers by name",
 		Long: `Register this machine's resolver so that names ending in your suffix are
-answered locally, and set up the pieces that live in your own account.
+answered locally.
 
-Run it twice, once each way:
+    sudo quic-link init     writes the one system file that makes names resolve
 
-    quic-link init          your own settings, identity and login service
-    sudo quic-link init     the one system file that makes names resolve
+That file is the only thing this command installs, and writing it is the only
+part that needs a password. Run without sudo it installs nothing: it reports
+which files in your own account are in place, and names the command that makes
+each missing one.
 
-Either order, any number of times. Each run reports what it will do before it
-does anything, and does only what is still missing.`,
+Skipping it is a supported way to run quic-link. Everything except reaching a
+server by name in a browser works without it; without the file, names are
+answered only for whoever asks this machine's responder directly.
+
+It reports what it will do before doing anything, does only what is missing,
+and can be run any number of times.`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			n, err := a.cfg.Naming()
@@ -59,26 +63,22 @@ does anything, and does only what is still missing.`,
 			if undo {
 				return runUndo(cmd, a, n, privileged)
 			}
-			return runInit(cmd, a, n, privileged, assumeYes, noSudo)
+			return runInit(cmd, a, n, privileged, assumeYes)
 		},
 	}
 
 	cmd.Flags().BoolVar(&assumeYes, "yes", false, "do not ask for confirmation")
-	cmd.Flags().BoolVar(&noSudo, "no-sudo", false, "only do the parts that need no privileges")
 	cmd.Flags().BoolVar(&undo, "undo", false, "remove what a previous run installed")
 	return cmd
 }
 
-func runInit(cmd *cobra.Command, a *app, n config.Naming, privileged, assumeYes, noSudo bool) error {
+func runInit(cmd *cobra.Command, a *app, n config.Naming, privileged, assumeYes bool) error {
 	out := cmd.OutOrStdout()
 
 	if privileged {
-		if noSudo {
-			return usageErrorf("--no-sudo asks for the unprivileged half, so run it without sudo")
-		}
 		return runRootHalf(cmd, a, n, assumeYes)
 	}
-	return runUserHalf(cmd, a, n, assumeYes, noSudo, out)
+	return runUserHalf(cmd, a, n, out)
 }
 
 // runRootHalf writes the one system file, and touches nothing else.
@@ -93,7 +93,7 @@ func runRootHalf(cmd *cobra.Command, a *app, n config.Naming, assumeYes bool) er
 		return nil
 	}
 
-	arts := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort, ""))
+	arts := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort))
 	missing := setup.Missing(arts)
 	if len(missing) == 0 {
 		fmt.Fprintf(out, "Already set up. Nothing to do.\n\n%s", setup.DescribeInventory(arts))
@@ -145,31 +145,47 @@ func runRootHalf(cmd *cobra.Command, a *app, n config.Naming, assumeYes bool) er
 	return nil
 }
 
-// runUserHalf sets up what lives in your own account.
-func runUserHalf(cmd *cobra.Command, a *app, n config.Naming, assumeYes, noSudo bool, out io.Writer) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("setup: cannot find your home directory: %w", err)
-	}
-
+// runUserHalf reports on the files that live in your own account, and writes
+// nothing.
+//
+// It writes nothing because there is nothing here for it to write: the settings
+// file is yours to compose, the identity key is made by the command whose whole
+// job that is, and the one file this program does install belongs to the system
+// and needs a privileged run. This half exists to say which of those are in
+// place and what to do about the ones that are not.
+//
+// It is deliberately brief. The diagnosis command reports the same files plus
+// the system one, whether the daemon is running, and a real lookup, so anything
+// beyond a short answer and a pointer would be a second, worse copy of it.
+func runUserHalf(cmd *cobra.Command, a *app, n config.Naming, out io.Writer) error {
 	keyFile := expandTilde(a.cfg.Identity.KeyFile)
-	cfgFile := filepath.Join(home, ".config", "quic-link", "config.toml")
-	user := setup.Survey(setup.UserPaths(home, keyFile, cfgFile))
+	user := setup.Survey(setup.UserPaths(keyFile, config.FileInUse(a.configPath)))
 
-	fmt.Fprintf(out, "Your own settings:\n\n%s\n", setup.DescribeInventory(user))
+	fmt.Fprintf(out, "Nothing to do here: this half installs nothing.\n\n")
+	fmt.Fprintf(out, "In your account:\n\n%s\n", setup.DescribeInventory(user))
 
-	if !noSudo {
-		root := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort, ""))
-		if len(setup.Missing(root)) > 0 {
-			fmt.Fprintf(out, "Names will not resolve until one system file is written.\n"+
-				"That part needs a password, and is the only part that does:\n\n"+
-				"    sudo quic-link init\n\n")
-		} else {
-			fmt.Fprintf(out, "Names are already registered with this machine's resolver.\n\n")
+	for _, art := range user {
+		if art.Present {
+			continue
+		}
+		switch art.Purpose {
+		case "this machine's identity":
+			fmt.Fprintf(out, "Make one with: quic-link keygen\n")
+		case "your settings":
+			fmt.Fprintf(out, "Write yours at %s, naming at least one server.\n", art.Path)
 		}
 	}
 
-	fmt.Fprintf(out, "Check everything with: quic-link doctor\n")
+	root := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort))
+	if len(setup.Missing(root)) > 0 {
+		fmt.Fprintf(out, "\nNames will not resolve until one system file is written, which is the\n"+
+			"only part that needs a password:\n\n    sudo quic-link init\n")
+	} else {
+		fmt.Fprintf(out, "\nNames are already registered with this machine's resolver.\n")
+	}
+
+	fmt.Fprintf(out, "\nFor the whole picture, including whether the daemon is running:\n"+
+		"    quic-link doctor\n")
 	return nil
 }
 
@@ -181,7 +197,7 @@ func runUndo(cmd *cobra.Command, a *app, n config.Naming, privileged bool) error
 		return nil
 	}
 
-	arts := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort, ""))
+	arts := setup.Survey(setup.Inventory(n.Suffix, n.DNSPort))
 	removedAny := false
 	for _, art := range arts {
 		removed, err := setup.Remove(art.Path)
