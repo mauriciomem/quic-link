@@ -22,6 +22,7 @@ import (
 
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/router"
+	"log/slog"
 )
 
 // ErrInvalid is the sentinel for all configuration errors (structural or
@@ -268,25 +269,48 @@ func loadFile(cfg *Config, path string, explicitPath bool) error {
 // If QUIC_LINK_AGENT_* is set and cfg.Agent is nil, Agent is allocated so the
 // scalar can be set. The same applies to Names.
 func mergeEnv(cfg *Config) error {
+	var unknown []string
 	for _, env := range os.Environ() {
 		key, val, ok := strings.Cut(env, "=")
 		if !ok || !strings.HasPrefix(key, "QUIC_LINK_") {
 			continue
 		}
-		if err := applyEnvVar(cfg, key, val); err != nil {
+		recognised, err := applyEnvVar(cfg, key, val)
+		if err != nil {
 			return err
 		}
+		if !recognised {
+			unknown = append(unknown, key)
+		}
+	}
+	// A variable nobody reads used to be discarded in silence, while an unknown
+	// key in the file was refused outright — so a plausible-looking guess at a
+	// variable name had no effect and produced no clue, which is the least
+	// helpful pairing of the two. Say something.
+	//
+	// This warns rather than fails on purpose. The prefix is not reserved: a
+	// person may keep their own variables in it, or a wrapper script may set one
+	// this version does not know, and neither is a reason to refuse to start.
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		slog.Warn("ignoring environment variables this version does not recognise",
+			"variables", unknown,
+			"note", "a server can only be defined in the settings file or with flags")
 	}
 	return nil
 }
 
-// applyEnvVar maps a single QUIC_LINK_* variable onto the matching config field.
-func applyEnvVar(cfg *Config, key, val string) error {
+// applyEnvVar maps a single QUIC_LINK_* variable onto the matching config field
+// and reports whether the variable was one it knows.
+//
+// The caller warns about the ones it does not, so this stays a mapping and the
+// decision about what to say lives in one place.
+func applyEnvVar(cfg *Config, key, val string) (recognised bool, err error) {
 	switch key {
 	case "QUIC_LINK_SCHEMA":
 		n, err := strconv.Atoi(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
 		}
 		cfg.Schema = n
 
@@ -296,14 +320,14 @@ func applyEnvVar(cfg *Config, key, val string) error {
 	case "QUIC_LINK_IDENTITY_WARN_KEY_AGE_DAYS":
 		n, err := strconv.Atoi(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
 		}
 		cfg.Identity.WarnKeyAgeDays = n
 
 	case "QUIC_LINK_IDENTITY_REFUSE_OLD_KEY":
 		b, err := strconv.ParseBool(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be a boolean (true/false/1/0): %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be a boolean (true/false/1/0): %w", key, val, ErrInvalid)
 		}
 		cfg.Identity.RefuseOldKey = b
 
@@ -326,7 +350,7 @@ func applyEnvVar(cfg *Config, key, val string) error {
 		cfg.Log.Format = val
 
 	case "QUIC_LINK_PORTS_MODE":
-		return removedKeyError("QUIC_LINK_PORTS_MODE", removedPortsTable)
+		return false, removedKeyError("QUIC_LINK_PORTS_MODE", removedPortsTable)
 
 	case "QUIC_LINK_NAMES_SUFFIX":
 		if cfg.Names == nil {
@@ -335,12 +359,12 @@ func applyEnvVar(cfg *Config, key, val string) error {
 		cfg.Names.Suffix = val
 
 	case "QUIC_LINK_NAMES_BLOCK":
-		return removedKeyError("QUIC_LINK_NAMES_BLOCK", removedNamesBlock)
+		return false, removedKeyError("QUIC_LINK_NAMES_BLOCK", removedNamesBlock)
 
 	case "QUIC_LINK_NAMES_DNS_PORT":
 		n, err := strconv.Atoi(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
 		}
 		if cfg.Names == nil {
 			cfg.Names = &Names{}
@@ -350,7 +374,7 @@ func applyEnvVar(cfg *Config, key, val string) error {
 	case "QUIC_LINK_NAMES_HTTP_PORT":
 		n, err := strconv.Atoi(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
 		}
 		if cfg.Names == nil {
 			cfg.Names = &Names{}
@@ -360,7 +384,7 @@ func applyEnvVar(cfg *Config, key, val string) error {
 	case "QUIC_LINK_NAMES_HTTPS_PORT":
 		n, err := strconv.Atoi(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be an integer: %w", key, val, ErrInvalid)
 		}
 		if cfg.Names == nil {
 			cfg.Names = &Names{}
@@ -370,14 +394,19 @@ func applyEnvVar(cfg *Config, key, val string) error {
 	case "QUIC_LINK_NAMES_SUFFIX_IS_MINE":
 		b, err := strconv.ParseBool(val)
 		if err != nil {
-			return fmt.Errorf("env %s=%q: must be a boolean (true/false/1/0): %w", key, val, ErrInvalid)
+			return false, fmt.Errorf("env %s=%q: must be a boolean (true/false/1/0): %w", key, val, ErrInvalid)
 		}
 		if cfg.Names == nil {
 			cfg.Names = &Names{}
 		}
 		cfg.Names.SuffixIsMine = b
+
+	default:
+		// Not one of ours to act on. The caller says so out loud rather than
+		// letting a misspelling look like it worked.
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // ---- Validate ---------------------------------------------------------------

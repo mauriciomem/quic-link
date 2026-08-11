@@ -40,7 +40,7 @@ config, that server is used automatically.`,
 				return err
 			}
 
-			return runDaemonOwner(cmd, a.cfg, scope)
+			return runDaemonOwner(cmd, a.cfg, scope, a.configPath)
 		},
 	}
 	return cmd

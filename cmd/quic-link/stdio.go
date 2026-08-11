@@ -58,10 +58,19 @@ func newStdioCmd(a *app) *cobra.Command {
 			// flags override. This makes stdio work both as a standalone
 			// tool (flags only) and as a ProxyCommand helper (config lookup).
 			srv, ok := a.cfg.Servers[serverName]
+			// A settings entry is only needed to dial the agent directly. The
+			// daemon path needs the name and nothing else, so a server the daemon
+			// is managing is enough on its own — which is the only thing a server
+			// defined on that daemon's command line ever has, since it exists in
+			// that process and in no file.
 			if !ok && !flags.Changed("server") && !flags.Changed("pin") {
-				// No config entry and no flags → unresolvable.
-				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-				return usageErrorf("server %q not found in config (and --server/--pin not provided)", serverName)
+				names, _, known := knownServers(a)
+				if _, managed := names[serverName]; !known || !managed {
+					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+					return usageErrorf(
+						"server %q is not in your settings and is not managed by a running daemon "+
+							"(and --server/--pin were not given)", serverName)
+				}
 			}
 
 			// Flag overrides always win.

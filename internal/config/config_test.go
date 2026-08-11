@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1183,5 +1185,81 @@ allow_remote_route_mutation = true
 	}
 	if !cfg.Agent.AllowRemoteRouteMutation {
 		t.Error("the value did not survive loading under the client role")
+	}
+}
+
+// TestMergeEnv_UnknownVariableWarnsAndDoesNotFail pins both halves of how an
+// unrecognised variable is treated. It used to be discarded in silence, while an
+// unknown key in the file was refused outright — so a plausible guess at a
+// variable name had no effect and gave no clue, which is the least helpful of the
+// four possible pairings.
+//
+// It must warn and not fail. The prefix is not reserved: somebody may keep their
+// own variables in it, or a wrapper may set one a newer version reads, and
+// neither is a reason to refuse to start.
+func TestMergeEnv_UnknownVariableWarnsAndDoesNotFail(t *testing.T) {
+	// An empty path means the default location, so the home directory has to be
+	// somewhere this test owns. Without that it reads whatever the person running
+	// it happens to have configured, and asserts against their machine.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("QUIC_LINK_SERVERS_WEB1_ADDR", "127.0.0.1:7443")
+	t.Setenv("QUIC_LINK_NOT_A_REAL_KEY", "x")
+
+	// Capture the log, because the whole point of the change is that something is
+	// said. Asserting only that the load succeeds would pass just as well with the
+	// warning deleted, which is the shape of test this project has been bitten by.
+	var logged bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	defer slog.SetDefault(restore)
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("an unrecognised variable must not stop a load: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("Load returned no config")
+	}
+	// And it must not have invented a server from a variable nothing reads.
+	if len(cfg.Servers) != 0 {
+		t.Errorf("servers = %v, want none: a server cannot be defined by the environment", cfg.Servers)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "QUIC_LINK_SERVERS_WEB1_ADDR") {
+		t.Errorf("the warning must name the variable that was ignored; log was:\n%s", out)
+	}
+	if !strings.Contains(out, "QUIC_LINK_NOT_A_REAL_KEY") {
+		t.Errorf("every ignored variable must be named; log was:\n%s", out)
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("it must be a warning, not a lower level nobody sees; log was:\n%s", out)
+	}
+}
+
+// TestMergeEnv_RecognisedVariableStillApplies is the other side of the same
+// change: adding a warning for the unknown must not have stopped the known from
+// working.
+func TestMergeEnv_RecognisedVariableStillApplies(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// "internal" is the reserved-for-private-use default; an arbitrary suffix is
+	// refused unless the operator says they own it, which is a separate rule and
+	// not what this test is about.
+	t.Setenv("QUIC_LINK_NAMES_SUFFIX", "internal")
+	t.Setenv("QUIC_LINK_LOG_LEVEL", "debug")
+
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	n, err := cfg.Naming()
+	if err != nil {
+		t.Fatalf("Naming: %v", err)
+	}
+	if n.Suffix != "internal" {
+		t.Errorf("suffix = %q, want %q from the environment", n.Suffix, "internal")
+	}
+	if cfg.Log.Level != "debug" {
+		t.Errorf("log level = %q, want %q from the environment", cfg.Log.Level, "debug")
 	}
 }

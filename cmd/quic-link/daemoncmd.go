@@ -95,6 +95,8 @@ func probeSocket(sock string) (canReclaim bool, err error) {
 // launchd agent, shell &) is responsible for backgrounding it.
 func newDaemonCmd(a *app) *cobra.Command {
 	var serverName string
+	addServers := serverSpecList{flag: "server-add"}
+	serverPins := serverSpecList{flag: "server-pin"}
 
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -117,12 +119,19 @@ and tells you to use 'quic-link status' or stop the running owner first.
 Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then exit.`,
 		Args: wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemonOwner(cmd, a.cfg, serverName)
+			if err := applyServerFlags(a.cfg, &addServers, &serverPins, a.configPath); err != nil {
+				return err
+			}
+			return runDaemonOwner(cmd, a.cfg, serverName, a.configPath)
 		},
 	}
 
 	cmd.Flags().StringVar(&serverName, "server", "",
 		"manage only this server (name from config); default manages all enabled servers")
+	cmd.Flags().Var(&addServers, "server-add",
+		"define a server as NAME=ADDR, repeatable; replaces the servers in your settings file")
+	cmd.Flags().Var(&serverPins, "server-pin",
+		"the pin for a server defined with --server-add, as NAME=PIN, repeatable")
 
 	return cmd
 }
@@ -184,7 +193,7 @@ func classifyListenBindError(srvName, listen string, err error) error {
 // When scope is non-empty the config is narrowed to contain only that server
 // before the pool and edges are built, so status --json reports only the
 // scoped server rather than the full fleet.
-func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error {
+func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope, configPath string) error {
 	// Validate scope against the config before doing any I/O.
 	if scope != "" {
 		srv, ok := cfg.Servers[scope]
@@ -211,6 +220,14 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 		narrowed := *cfg
 		narrowed.Servers = map[string]config.Server{scope: srv}
 		cfg = &narrowed
+	}
+
+	// An owner with nothing to manage used to start anyway: the naming sockets
+	// came up, the local API answered, and not one tunnel existed. From outside
+	// that is indistinguishable from a misconfiguration, and the log said only
+	// that it was serving names for no servers. Say what is missing instead.
+	if len(cfg.Servers) == 0 {
+		return usageErrorf("%s", describeMinimumViableRun(configPath))
 	}
 
 	// Resolve the socket path (also creates and verifies the directory).
