@@ -193,8 +193,18 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope string) error 
 				scope, serverNameList(cfg.Servers))
 		}
 		if srv.Enabled != nil && !*srv.Enabled {
-			return usageErrorf("server %q is disabled; set enabled = true in the config to use it",
-				scope)
+			// The name resolved, so this is not a mistake in the command: the
+			// server is switched off, and the fix is to switch it on. That is a
+			// state of the world rather than a usage error, which is how the
+			// three verbs that reach a session already report it, and this verb
+			// now agrees with them. A name absent from settings stays a usage
+			// error above, because that is a typo or a missing block.
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"server %q is disabled; set enabled = true in the config to use it\n", scope)
+			return &errFinalExitCode{
+				code: 3,
+				msg:  fmt.Sprintf("server %q is disabled", scope),
+			}
 		}
 		// Narrow the config to only the requested server. The original cfg is
 		// not mutated — we build a shallow copy with a single-entry Servers map.

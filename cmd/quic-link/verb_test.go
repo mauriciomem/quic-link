@@ -214,8 +214,10 @@ pin     = "`+pin+`"
 enabled = false
 `)
 	err := runVerb([]string{"--config", path, "connect", "off"})
-	if exitCode(err) != 2 {
-		t.Errorf("expected exit 2 for disabled server, got %d: %v", exitCode(err), err)
+	// Exit 3: the name resolved and the server is switched off, which is a state
+	// to change rather than a command to correct.
+	if exitCode(err) != 3 {
+		t.Errorf("expected exit 3 for disabled server, got %d: %v", exitCode(err), err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Errorf("error should mention 'disabled', got: %v", err)

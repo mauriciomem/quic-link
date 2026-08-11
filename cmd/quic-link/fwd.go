@@ -180,7 +180,7 @@ func runFwd(cmd *cobra.Command, a *app, args []string) error {
 	if serverArg != "" {
 		scopeArgs = []string{serverArg}
 	}
-	server, err := resolveConnectScope(a.cfg, scopeArgs)
+	server, err := autoSelectServer(a, scopeArgs)
 	if err != nil {
 		return err
 	}

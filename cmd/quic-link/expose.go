@@ -59,12 +59,12 @@ func runExpose(cmd *cobra.Command, a *app, args []string, label string) error {
 		return usageErrorf("expose: %q is not a port between 1 and 65535", portArg)
 	}
 
-	serverName, err := resolveConnectScope(a.cfg, serverArgs)
+	serverName, err := autoSelectServer(a, serverArgs)
 	if err != nil {
 		return err
 	}
-	if _, ok := a.cfg.Servers[serverName]; !ok {
-		return usageErrorf("server %q not found in config", serverName)
+	if err := requireKnownServer(a, serverName); err != nil {
+		return err
 	}
 
 	naming, err := a.cfg.Naming()

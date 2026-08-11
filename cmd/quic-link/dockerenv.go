@@ -56,7 +56,7 @@ With no SERVER, the sole enabled server in the config is used automatically
 }
 
 func runDockerEnv(cmd *cobra.Command, a *app, args []string) error {
-	serverName, err := resolveConnectScope(a.cfg, args)
+	serverName, err := autoSelectServer(a, args)
 	if err != nil {
 		return err
 	}

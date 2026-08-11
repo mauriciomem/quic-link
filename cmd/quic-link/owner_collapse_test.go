@@ -94,17 +94,23 @@ func TestDaemonServerFlag_MissingScopeExitsTwo(t *testing.T) {
 // when the named server has enabled=false is a usage error (exit 2) with a
 // remedy message telling the user to set enabled = true.
 //
-// Pre-fix failure mode: no --server flag existed; cobra emitted "unknown flag".
-func TestDaemonServerFlag_DisabledScopeExitsTwo(t *testing.T) {
+// It exits 3, not 2, and that is the point of the test. The name resolved, so
+// nothing about the command was wrong: the server is switched off, and the fix
+// is to switch it on. Three other verbs already reported it that way and this
+// one did not, which meant the same situation had two different exit codes
+// depending on which verb a person happened to type.
+func TestDaemonServerFlag_DisabledScopeExitsThree(t *testing.T) {
 	unsetQLEnvForTest(t)
 	path := oneDisabledServerConfig(t)
 
 	err := runVerb([]string{"--config", path, "daemon", "--server", "offsrv"})
-	if exitCode(err) != 2 {
-		t.Errorf("daemon --server disabled: want exit 2, got %d: %v", exitCode(err), err)
+	if exitCode(err) != 3 {
+		t.Errorf("daemon --server disabled: want exit 3, got %d: %v", exitCode(err), err)
 	}
-	if err == nil || !strings.Contains(err.Error(), "enabled") {
-		t.Errorf("error should mention 'enabled' remedy, got: %v", err)
+	// The remedy goes to stderr, as it does for the verbs this now matches, so
+	// the error itself stays terse and the advice is not doubled up.
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Errorf("error should say the server is disabled, got: %v", err)
 	}
 }
 
@@ -300,11 +306,14 @@ func TestConnectAliasUsesServerArg(t *testing.T) {
 			wantMsg:  "nosuch",
 		},
 		{
-			name:     "disabled server → exit 2",
+			// A name that resolved and is switched off is a state of the world,
+			// not a mistyped command, so it exits 3 like the verbs that reach a
+			// session. The remedy is on stderr, so the error itself is terse.
+			name:     "disabled server → exit 3",
 			cfgFunc:  oneDisabledServerConfig,
 			server:   "offsrv",
-			wantCode: 2,
-			wantMsg:  "enabled",
+			wantCode: 3,
+			wantMsg:  "disabled",
 		},
 	}
 	for _, tt := range tests {

@@ -214,7 +214,7 @@ func runSSHCore(cmd *cobra.Command, a *app, serverArg string, passthrough []stri
 				"SERVER is required as a label when --server/--pin are given " +
 					"(there is no config to default it from)")
 		}
-		name, rerr := resolveConnectScope(a.cfg, nil)
+		name, rerr := autoSelectServer(a, nil)
 		if rerr != nil {
 			return rerr
 		}
@@ -223,19 +223,21 @@ func runSSHCore(cmd *cobra.Command, a *app, serverArg string, passthrough []stri
 	}
 
 	if !flagMode {
-		srv, ok := a.cfg.Servers[bareServer]
-		if !ok {
-			return usageErrorf(
-				"server %q not found in config (and --server/--pin not provided)", bareServer)
+		// Both checks below happen before ssh is exec'd, and that ordering is
+		// the whole point of doing them here. Once ssh runs, its ProxyCommand
+		// failure surfaces from inside a child process as a generic connection
+		// error, so a name nobody knows or a server switched off would reach the
+		// user with none of the remedy either one has.
+		if err := requireKnownServer(a, bareServer); err != nil {
+			return err
 		}
-		// A disabled server is not a usage error (the name was valid); it is
-		// a semantic config state meaning the session is unavailable. This
-		// must be checked before exec'ing ssh: without it, ssh runs its
-		// ProxyCommand, the spawned stdio process exits 3 deep inside a
-		// child process, and the user sees a confusing generic ssh
-		// connection failure instead of the actual remedy. Message and exit
-		// code match stdio's identical check exactly so the two verbs agree.
-		if srv.Enabled != nil && !*srv.Enabled {
+		// A disabled server is not a usage error (the name resolved); it is a
+		// state meaning the session is unavailable, so it exits 3 with the
+		// remedy. Message and exit code match stdio's identical check exactly so
+		// the two verbs agree. Only settings can say "disabled" — a server the
+		// daemon manages is by definition not switched off — so this reads the
+		// file when it has an entry and is silent when it does not.
+		if srv, inFile := a.cfg.Servers[bareServer]; inFile && srv.Enabled != nil && !*srv.Enabled {
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"server %q is disabled; set enabled = true in the config to use it\n",
 				bareServer)

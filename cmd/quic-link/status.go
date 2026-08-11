@@ -109,12 +109,12 @@ func runStatusPlain(cmd *cobra.Command, a *app, jsonFlag bool) error {
 // which is printed and mapped to the exit code verbatim — this function
 // does not re-derive or re-word any of those messages.
 func runStatusRoutes(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error {
-	serverName, err := resolveConnectScope(a.cfg, args)
+	serverName, err := autoSelectServer(a, args)
 	if err != nil {
 		return err
 	}
-	if _, ok := a.cfg.Servers[serverName]; !ok {
-		return usageErrorf("server %q not found in config", serverName)
+	if err := requireKnownServer(a, serverName); err != nil {
+		return err
 	}
 
 	sock, err := daemonSocketPath(a.cfg)
