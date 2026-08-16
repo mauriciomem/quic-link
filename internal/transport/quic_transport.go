@@ -60,10 +60,17 @@ type QUICTransport struct {
 	inner    *quic.Transport
 }
 
-// NewQUICTransport creates a QUICTransport from a pre-bound *net.UDPConn.
+// NewQUICTransport creates a QUICTransport from an already-bound packet socket.
+// The parameter is the general packet-connection interface rather than a UDP
+// socket specifically, so a descriptor this process did not bind itself — one
+// inherited from a service supervisor, for example — is usable without any
+// change here. A UDP socket satisfies it, and gains some send/receive
+// optimizations that quic-go enables only for sockets exposing out-of-band
+// control messages.
+//
 // tlsConf must not be nil; set NextProtos to []string{ALPN} on both sides.
 // quicConf may be nil to use the defaults returned by DefaultQUICConfig.
-func NewQUICTransport(conn *net.UDPConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
+func NewQUICTransport(conn net.PacketConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
 	if tlsConf == nil {
 		return nil, fmt.Errorf("tlsConf must not be nil")
 	}
@@ -86,7 +93,7 @@ func NewQUICTransport(conn *net.UDPConn, tlsConf *tls.Config, quicConf *quic.Con
 // in exchange a flood of forged source addresses is absorbed without allocating
 // per-attempt state for each one. It matters most for a socket that sits on a
 // workstation rather than a server, which is exactly the case this exists for.
-func NewQUICListenTransport(conn *net.UDPConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
+func NewQUICListenTransport(conn net.PacketConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
 	t, err := NewQUICTransport(conn, tlsConf, quicConf)
 	if err != nil {
 		return nil, err
@@ -95,8 +102,8 @@ func NewQUICListenTransport(conn *net.UDPConn, tlsConf *tls.Config, quicConf *qu
 	return t, nil
 }
 
-// Listen implements Transport.  The listen address is determined by the
-// *net.UDPConn that was passed to NewQUICTransport.
+// Listen implements Transport.  The listen address is determined by the socket
+// that was passed to NewQUICTransport.
 func (t *QUICTransport) Listen() (Listener, error) {
 	l, err := t.inner.Listen(t.tlsConf, t.quicConf)
 	if err != nil {
