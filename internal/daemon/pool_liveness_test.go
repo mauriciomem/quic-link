@@ -134,6 +134,12 @@ func TestStateReconnecting_SerializesToConnecting(t *testing.T) {
 	if !bytes.Contains(b, []byte(`"session":"connecting"`)) {
 		t.Errorf("JSON does not contain \"session\":\"connecting\"; got: %s", b)
 	}
+	// A session that is not connected has no route to name, so the field that
+	// names one must be absent rather than carrying a stale or invented word.
+	if bytes.Contains(b, []byte(`"path"`)) {
+		t.Errorf("a session that is still trying reports a path; nothing is connected, so there "+
+			"is no route to describe: %s", b)
+	}
 }
 
 // ---- C3b: stateAuthFailed → JSON "auth_failed" ----------------------------
@@ -201,6 +207,11 @@ func TestStateAuthFailed_SerializesToAuthFailed(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte(`"session":"auth_failed"`)) {
 		t.Errorf("JSON does not contain \"session\":\"auth_failed\"; got: %s", b)
+	}
+	// The connection was made and then destroyed for good. Reporting a route
+	// would tell a reader there is a working way to a peer that has rejected us.
+	if bytes.Contains(b, []byte(`"path"`)) {
+		t.Errorf("a permanently rejected session reports a path; the connection is gone: %s", b)
 	}
 }
 

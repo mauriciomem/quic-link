@@ -902,17 +902,31 @@ func dialStateLabel(st internalConnState) string {
 
 // State returns the current connection state snapshot.
 func (e *dialEntry) State() SessionState {
+	// The live connection is copied out under the lock and asked about itself
+	// afterwards, which is the shape the control-call path already uses: nothing
+	// outside this type is ever called while the entry's lock is held.
+	//
+	// The transport is deliberately not consulted. It is owned by the run loop
+	// and replaced without the lock when a socket has to be abandoned, so
+	// reading it here would be a race — and it could not answer this question
+	// anyway, since a socket accepting both families cannot say which one a
+	// session is using.
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	st := e.intState
+	since := e.since
+	conn := e.current
+	dialErr := e.dialErr
+	e.mu.Unlock()
 
 	return SessionState{
 		Name:       e.name,
-		State:      dialStateLabel(e.intState),
+		State:      dialStateLabel(st),
 		Transport:  transportDial,
-		Since:      e.since,
+		Since:      since,
 		SSHPort:    e.sshPort,
 		DockerPort: e.dockerPort,
-		LastError:  dialFailureText(e.intState, e.dialErr),
+		LastError:  dialFailureText(st, dialErr),
+		Path:       pathOf(conn),
 	}
 }
 

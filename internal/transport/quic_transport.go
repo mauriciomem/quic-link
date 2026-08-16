@@ -408,6 +408,16 @@ func (c *quicConn) CloseWithError(code uint64, msg string) error {
 
 // PeerCertificates returns the verified peer certificate chain from the QUIC
 // connection's completed TLS handshake (leaf first).
+// RemoteAddr returns the address of the peer at the other end of this
+// connection. It implements the optional remote-address interface so a caller
+// can tell which address family a session is actually using — which the socket
+// cannot say when it accepts both and the peer is the one that connected.
+func (c *quicConn) RemoteAddr() net.Addr {
+	return c.c.RemoteAddr()
+}
+
 func (c *quicConn) PeerCertificates() []*x509.Certificate {
 	return c.c.ConnectionState().TLS.PeerCertificates
 }
+
+var _ RemoteAddrProvider = (*quicConn)(nil)

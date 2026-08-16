@@ -30,13 +30,17 @@ func TestStatusJSON_ReverseGoldenFile(t *testing.T) {
 			Since:      clock.Now(),
 			SSHPort:    42000,
 			DockerPort: 42001,
+			// Deliberately the other family from the forward golden, so the two
+			// goldens between them pin both words that can be reported.
+			Path: "ipv6-direct",
 		},
 		{
 			Name:      "reverse",
 			State:     "listening",
 			Transport: "listen",
 			Since:     clock.Now(),
-			// No ports: nothing is bound for a session that has no peer yet.
+			// No ports and no path: nothing is bound and nothing has arrived
+			// for a session that has no peer yet.
 		},
 	}
 

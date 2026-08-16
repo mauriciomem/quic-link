@@ -113,6 +113,7 @@ func TestStatusJSON_GoldenFile(t *testing.T) {
 			Since:      clock.Now(),
 			SSHPort:    42000,
 			DockerPort: 42001,
+			Path:       "ipv4-direct",
 		},
 		{
 			Name:      "server2",
@@ -120,7 +121,9 @@ func TestStatusJSON_GoldenFile(t *testing.T) {
 			Transport: "dial",
 			Since:     clock.Now(),
 			// SSHPort and DockerPort are 0: a disabled server has no listeners.
-			// The golden captures this as {"ssh":0,"docker":0}.
+			// The golden captures this as {"ssh":0,"docker":0}. Path is left
+			// unset for the same reason, and the golden captures its absence:
+			// nothing was ever attempted, so there is no route to name.
 		},
 	}
 

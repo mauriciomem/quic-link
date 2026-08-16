@@ -443,6 +443,10 @@ type SessionState struct {
 	// network said. It is empty once a session connects, so anything here
 	// describes the situation now rather than a failure already recovered from.
 	LastError string
+	// Path says how a live session is reaching its peer. It is empty whenever
+	// nothing is connected, and whenever the connection cannot say which way it
+	// arrived: in both cases there is nothing true to report.
+	Path string
 }
 
 // ---- Status snapshot ---------------------------------------------------------
@@ -453,9 +457,10 @@ type SessionState struct {
 // listing and the socket itself each carry their own, and they move
 // independently.
 //
-// 2 added a field naming why a session that is still retrying has not
-// connected. The field is omitted when there is nothing wrong, so a reader
-// written against 1 sees no difference until something fails.
+// 2 added two fields, each omitted when it has nothing to say, so a reader
+// written against 1 sees no difference until something happens: why a session
+// that is still retrying has not connected, and how a live session is reaching
+// its peer.
 const statusSchema = 2
 
 // StatusSnapshot is the JSON-serializable status document. It implements the
@@ -493,6 +498,11 @@ type ServerSnapshot struct {
 	// Absent when there is nothing wrong, so a healthy document is unchanged
 	// from one produced before this field existed.
 	LastError string `json:"last_error,omitempty"`
+	// Absent unless a session is live and can say how it is reaching its peer.
+	// A word here naming a route nothing had taken would be worse than none,
+	// because the vocabulary is open and a reader would take an unfamiliar word
+	// for a route it did not recognise rather than for an invention.
+	Path string `json:"path,omitempty"`
 }
 
 // PortsInfo carries the computed local port numbers for ssh and docker.
@@ -567,6 +577,7 @@ func BuildSnapshot(
 			// never look at. A live route table is available through its
 			// own relay (RoutesSnapshot, routes.go), fetched only when asked.
 			LastError: ss.LastError,
+			Path:      ss.Path,
 		})
 	}
 

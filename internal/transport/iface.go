@@ -119,3 +119,24 @@ type LocalAddrProvider interface {
 	// LocalAddr returns the local network address of the underlying socket.
 	LocalAddr() net.Addr
 }
+
+// RemoteAddrProvider is an optional interface implemented by connections that
+// can report the address at the other end.
+//
+// It answers a question the socket cannot. A socket that accepts both address
+// families reports only that it accepts both, so for a connection that arrived
+// rather than one this side opened, the socket says nothing about which family
+// the peer actually used. The connection knows, because the address came off
+// the packet that opened it.
+//
+// Like the local-address interface above, it is optional: a connection that has
+// no network address — the in-memory one used in tests — simply does not
+// implement it, and a caller must treat absence as "not known" rather than as
+// an error. Note that a type embedding the Conn interface to override one method
+// does not inherit this one, because an embedded interface only carries the
+// methods it declares; such a wrapper reports absence, which is the safe way to
+// be wrong.
+type RemoteAddrProvider interface {
+	// RemoteAddr returns the network address of the peer.
+	RemoteAddr() net.Addr
+}

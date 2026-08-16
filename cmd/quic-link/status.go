@@ -25,12 +25,24 @@ If the daemon is a stale version (socket schema mismatch), status exits 3 with
 a restart instruction.
 
 The --json flag prints the frozen machine-readable shape to stdout (CONTRACT):
-  {"schema":1,"identity":{"created":"...","age_days":N,"rotation_due":false},
+  {"schema":2,"identity":{"created":"...","age_days":N,"rotation_due":false},
    "servers":[{"name":"...","session":"connected|connecting|listening|disabled|auth_failed",
-   "transport":"dial|listen","since_ms":N,"local_ports":{"ssh":N,"docker":N}}]}
+   "transport":"dial|listen","since_ms":N,"local_ports":{"ssh":N,"docker":N},
+   "last_error":"...","path":"ipv4-direct|ipv6-direct|router-mapped|punched|bound-proxy|relayed"}]}
 
 The "session" field is an open enum: consumers must tolerate unrecognized values
 by treating them as "not healthy / see logs".
+
+"last_error" says why a session that is still trying has not connected. It is
+prose for a person, never something to branch on, and it is absent when there is
+nothing wrong.
+
+"path" says how a live session is reaching the far end — the axis "session" does
+not carry. Only "ipv4-direct" and "ipv6-direct" are ever emitted today; the other
+four name work that is not built and are listed so the vocabulary is fixed before
+anything depends on it. Like "session" it is an open enum. It is absent whenever
+nothing is connected: a session still trying, one waiting to be called in, one
+switched off, and one whose identity was permanently rejected all omit it.
 
 --routes additionally asks a named SERVER's agent, live, for its current
 route table. This is a real network round trip through the daemon to the

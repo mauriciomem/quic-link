@@ -398,6 +398,12 @@ func (e *listenEntry) State() SessionState {
 	// never dials, so there is no attempt of its own that could have failed;
 	// the side that dials in this arrangement is the far one, and its failures
 	// are its own to report.
+	//
+	// The path is answered the same way as for a session this side opened, from
+	// the live connection rather than the socket. That distinction does the work
+	// here: this socket accepts both address families, so it cannot say which
+	// one the peer used, while the connection carries the address the peer
+	// arrived from.
 	return SessionState{
 		Name:       e.name,
 		State:      listenStateLabel(e.intState),
@@ -405,6 +411,7 @@ func (e *listenEntry) State() SessionState {
 		Since:      e.since,
 		SSHPort:    e.sshPort,
 		DockerPort: e.dockerPort,
+		Path:       pathOf(e.current),
 	}
 }
 
