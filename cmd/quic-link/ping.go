@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"time"
 
@@ -196,9 +195,9 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 	)
 
 	for i := 1; i <= count; i++ {
-		// Each probe uses a fresh QUIC connection on a new udp4 socket.
-		// udp4 (not dual-stack [::]) so on-link LAN peers are reachable on macOS.
-		udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		// Each probe uses a fresh connection on a new socket, in the family the
+		// address being probed needs.
+		udpConn, err := bindDialingSocket(server)
 		if err != nil {
 			return fmt.Errorf("UDP socket: %w", err)
 		}

@@ -51,7 +51,7 @@ func TestDaemonRefusesAnImpossibleAddressFromTheSettingsFile(t *testing.T) {
 		addr string
 	}{
 		{"unparseable", "this is not an address at all"},
-		{"IPv6 literal", "[fd3e:5c82:9b1a:1::20]:7443"},
+		{"port with no host", ":7443"},
 	}
 
 	for _, tc := range cases {
@@ -82,7 +82,7 @@ func TestDaemonRefusesAnImpossibleAddressGivenOnTheCommandLine(t *testing.T) {
 
 	err := runVerb([]string{
 		"daemon", "--config", cfgPath,
-		"--server-add", "flagged=[fd3e:5c82:9b1a:1::20]:7443",
+		"--server-add", "flagged=this is not an address at all",
 		"--server-pin", "flagged=" + pin,
 	})
 	if err == nil {
@@ -111,7 +111,7 @@ func TestAgentRefusesAnImpossibleClientAddress(t *testing.T) {
 
 	cfgPath := filepath.Join(dir, "config.toml")
 	body := "[identity]\nkey_file = " + quoted(keyPath) + "\n\n" +
-		"[agent]\ndial = " + quoted("[fd3e:5c82:9b1a:1::20]:7443") + "\n" +
+		"[agent]\ndial = " + quoted("this is not an address at all") + "\n" +
 		"authorized_clients = [" + quoted(mustTestPin(t)) + "]\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -144,7 +144,7 @@ func TestAgentRefusesAnImpossibleClientAddress(t *testing.T) {
 	if got := exitCode(err); got != 2 {
 		t.Errorf("exit code %d, want 2: %v", got, err)
 	}
-	if !strings.Contains(err.Error(), "fd3e:5c82:9b1a:1::20") {
+	if !strings.Contains(err.Error(), "not an address") {
 		t.Errorf("message does not quote the address: %v", err)
 	}
 }

@@ -43,7 +43,7 @@ func TestPoolRefusesAnAddressItCouldNeverDial(t *testing.T) {
 	}{
 		{"unparseable", "this is not an address at all"},
 		{"no port", "192.0.2.10"},
-		{"IPv6 literal", "[fd3e:5c82:9b1a:1::20]:7443"},
+		{"port with no host", ":7443"},
 	}
 
 	for _, tc := range cases {
@@ -94,7 +94,7 @@ func TestRefusingAnAddressStartsNoRetryLoop(t *testing.T) {
 	var dials atomic.Int64
 
 	cfg := config.Defaults()
-	cfg.Servers = map[string]config.Server{"web": {Addr: "[fd3e:5c82:9b1a:1::20]:7443"}}
+	cfg.Servers = map[string]config.Server{"web": {Addr: "this is not an address at all"}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -462,5 +462,46 @@ func TestTheReportedReasonKeepsItsNameInTheDocument(t *testing.T) {
 	if doc.Schema != 2 {
 		t.Errorf("document version is %d, want 2; the version has to move when the shape does",
 			doc.Schema)
+	}
+}
+
+// TestAnAddressInEitherFamilyIsAccepted guards the other side of the refusal:
+// a server that can be reached must not be turned away before anything is
+// tried. Both families are dialled, each on its own socket, so neither is a
+// reason to refuse.
+//
+// It exists because the refusal above once included a family rule, and a rule
+// like that is easy to reinstate by someone reading only the failing half.
+func TestAnAddressInEitherFamilyIsAccepted(t *testing.T) {
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"IPv4", "192.0.2.10:7443"},
+		{"IPv6", "[2001:db8::1]:7443"},
+		{"IPv6 with an interface name", "[fe80::1%lo]:7443"},
+	}
+
+	for _, tc := range cases {
+		hub := mem.NewHub()
+		cfg := config.Defaults()
+		cfg.Servers = map[string]config.Server{"web": {Addr: tc.addr}}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		pool, err := daemon.NewRealPool(
+			ctx, cfg,
+			func(_ string, _ config.Server) (transport.Transport, error) {
+				return hub.Transport("either:1"), nil
+			},
+			ceilingPolicy(), daemon.WallClock{}, nil,
+		)
+		if err != nil {
+			t.Errorf("%s: a server at %s was refused, so it could never be reached even when it "+
+				"is there: %v", tc.name, tc.addr, err)
+			cancel()
+			continue
+		}
+		pool.Close()
+		cancel()
 	}
 }

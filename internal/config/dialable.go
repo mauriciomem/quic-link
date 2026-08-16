@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"net"
-	"strings"
 )
 
 // DialableAddr reports why an address could never be dialled, or nil when it
@@ -11,8 +10,13 @@ import (
 //
 // It answers only the question that has a permanent answer: whether this
 // program could send a single packet to that address, no matter how the network
-// changed around it. An address with no port, or one in a family the outgoing
-// socket cannot carry, is wrong in a way that waiting will not fix.
+// changed around it. An address that is not a host and a port at all is wrong
+// in a way that waiting will not fix.
+//
+// It deliberately says nothing about which address family an address belongs
+// to. Both families are dialled, each on its own socket, so a family is no
+// longer a reason to refuse anything — and a rule naming one would have to be
+// revisited the next time that changed.
 //
 // Everything that merely happens to be failing right now is deliberately not
 // its business — a name that does not resolve yet, a host that is switched off,
@@ -32,27 +36,5 @@ func DialableAddr(label, addr string) error {
 			label, addr, ErrInvalid)
 	}
 
-	// An address carrying an interface name is always IPv6: the notation exists
-	// only for addresses whose meaning depends on which interface they are used
-	// on, and no IPv4 address is written that way. It is separated out because
-	// the parser below does not accept the interface suffix and would otherwise
-	// mistake the whole thing for a hostname.
-	if strings.ContainsRune(host, '%') {
-		return fmt.Errorf("server %q: cannot dial %q: outgoing connections carry IPv4 only, "+
-			"so this address can never be reached from here: %w", label, addr, ErrInvalid)
-	}
-
-	// A literal address states its family outright, so it can be judged here.
-	// A name cannot: the addresses behind it are decided elsewhere and can
-	// change, so it is left to the connection attempt to find out.
-	//
-	// The nil check is what keeps a name out of this branch. Parsing a name as
-	// an address yields nothing, and asking that nothing for its IPv4 form also
-	// yields nothing, which would otherwise read as "this is not IPv4" for
-	// every hostname there is.
-	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
-		return fmt.Errorf("server %q: cannot dial %q: outgoing connections carry IPv4 only, "+
-			"so this address can never be reached from here: %w", label, addr, ErrInvalid)
-	}
 	return nil
 }

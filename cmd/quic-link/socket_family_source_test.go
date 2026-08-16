@@ -33,9 +33,9 @@ import (
 // expectedSocketFamilies records, per function, the network string of every UDP
 // socket it binds, in source order, and why that family is the right one.
 //
-// A function binding more than one socket lists them all: the pair that serves
-// the two connection directions legitimately differs, and recording both is
-// what makes swapping them visible.
+// A function binding more than one socket lists them all: a function that opens
+// one socket per address family legitimately holds both, and recording them in
+// order is what makes swapping them visible.
 var expectedSocketFamilies = map[string]struct {
 	networks []string
 	reason   string
@@ -44,21 +44,13 @@ var expectedSocketFamilies = map[string]struct {
 		networks: []string{"udp"},
 		reason:   "waits for connections, so it must be reachable over either family",
 	},
-	"agentDialOut": {
-		networks: []string{"udp4"},
-		reason:   "connects out, and a dual-stack socket fails silently against on-link IPv4 peers on some platforms",
-	},
-	"pingRun": {
-		networks: []string{"udp4"},
-		reason:   "connects out, same reason as the agent's outbound socket",
-	},
-	"stdioRun": {
-		networks: []string{"udp4"},
-		reason:   "connects out, same reason as the agent's outbound socket",
+	"bindDialingSocket": {
+		networks: []string{"udp6", "udp4"},
+		reason:   "opens the socket every outgoing connection uses, one family per socket, chosen from the address being dialled; a socket carrying both families fails silently against on-link IPv4 peers on some platforms",
 	},
 	"bindServerSocket": {
-		networks: []string{"udp4", "udp"},
-		reason:   "one socket per direction: IPv4-only to connect out, dual-stack to wait for a connection",
+		networks: []string{"udp"},
+		reason:   "waits for a connection, so it must be reachable over either family; the direction that connects out is opened by the shared helper instead",
 	},
 	"acquireNamingListeners": {
 		networks: []string{"udp4"},

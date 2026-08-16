@@ -337,13 +337,10 @@ func agentDialOut(
 		return err
 	}
 
-	// Bind IPv4-only for the same reason every other initiating path in this
-	// binary does: a dual-stack socket on macOS silently fails to transmit to
-	// on-link IPv4 neighbours, because the first outbound datagram has no
-	// prior context for the OS to route from. The agent's listening socket is
-	// dual-stack precisely because it is not initiating, so the convention
-	// there is the opposite one and must not be copied here.
-	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	// The socket matches the family of the address being dialled. The listening
+	// socket above takes both families for the opposite reason, and the two
+	// conventions must not be swapped.
+	udpConn, err := bindDialingSocket(dial)
 	if err != nil {
 		return fmt.Errorf("UDP socket: %w", err)
 	}

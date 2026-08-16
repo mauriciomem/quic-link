@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -196,10 +195,8 @@ func stdioRun(ctx context.Context, server, target, keyFile, serverPin string) er
 		return err
 	}
 
-	// Bind a udp4 (not dual-stack [::]) socket. On macOS a dual-stack socket
-	// silently fails to transmit to on-link IPv4 LAN neighbors because no ARP
-	// is performed.
-	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	// The socket matches the family of the address being dialled.
+	udpConn, err := bindDialingSocket(server)
 	if err != nil {
 		return fmt.Errorf("UDP socket: %w", err)
 	}

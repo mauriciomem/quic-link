@@ -139,15 +139,14 @@ Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then exit.`,
 // bindServerSocket binds the UDP socket a server needs, which differs by
 // direction.
 //
-// A server we connect out to gets an ephemeral local port, bound IPv4-only:
-// a dual-stack socket on macOS silently fails to transmit to on-link IPv4
-// neighbours because no address resolution happens for the mapped form. A
-// server that connects to us gets the address the operator configured, bound
-// dual-stack so it is reachable over either family, which is the same choice
-// the agent's own listener makes for the same reason.
+// A server we connect out to gets an ephemeral local port in the family its
+// address needs, one family per socket. A server that connects to us gets the
+// address the operator configured, bound for both families so it is reachable
+// either way, which is the same choice the agent's own listener makes for the
+// same reason.
 func bindServerSocket(srvName string, srv config.Server, waiting bool) (*net.UDPConn, error) {
 	if !waiting {
-		udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		udpConn, err := bindDialingSocket(srv.Addr)
 		if err != nil {
 			return nil, fmt.Errorf("UDP socket for server %q: %w", srvName, err)
 		}

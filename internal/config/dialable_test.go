@@ -9,6 +9,11 @@ import (
 // TestDialableAddrRefusesWhatCanNeverWork covers addresses that are wrong on
 // their face. Each one is wrong for a reason no change in the network could
 // repair, which is what separates them from an address that merely fails today.
+//
+// Note what is not here: an address family. Both are dialled now, so no address
+// is refused for being one or the other, and the unbracketed entries below are
+// refused for having too many colons to be a host and a port — not for being
+// IPv6.
 func TestDialableAddrRefusesWhatCanNeverWork(t *testing.T) {
 	cases := []struct {
 		name string
@@ -21,9 +26,6 @@ func TestDialableAddrRefusesWhatCanNeverWork(t *testing.T) {
 		{"unbracketed IPv6", "fd3e:5c82:9b1a:1::20:7443"},
 		{"unbracketed loopback IPv6", "::1:7443"},
 		{"port only", ":7443"},
-		{"IPv6 literal", "[fd3e:5c82:9b1a:1::20]:7443"},
-		{"IPv6 loopback literal", "[::1]:7443"},
-		{"IPv6 link-local with zone", "[fe80::1%eth0]:7443"},
 	}
 	for _, tc := range cases {
 		err := DialableAddr("web", tc.addr)
@@ -53,7 +55,9 @@ func TestDialableAddrRefusesWhatCanNeverWork(t *testing.T) {
 //
 // Several are drawn from addresses the test suite itself uses, so a stricter
 // rule than this one would be caught here rather than by a puzzling failure
-// somewhere else.
+// somewhere else. The IPv6 entries were once refused; they are here now, rather
+// than deleted, so that reinstating that rule fails loudly instead of quietly
+// leaving the suite with nothing to say about either family.
 func TestDialableAddrAllowsWhatMightWork(t *testing.T) {
 	cases := []struct {
 		name string
@@ -69,6 +73,9 @@ func TestDialableAddrAllowsWhatMightWork(t *testing.T) {
 		{"named port", "127.0.0.1:domain"},
 		{"named port https", "127.0.0.1:https"},
 		{"IPv4-mapped IPv6", "[::ffff:1.2.3.4]:7443"},
+		{"IPv6 literal", "[fd3e:5c82:9b1a:1::20]:7443"},
+		{"IPv6 loopback literal", "[::1]:7443"},
+		{"IPv6 link-local with an interface name", "[fe80::1%eth0]:7443"},
 		{"localhost", "localhost:7443"},
 	}
 	for _, tc := range cases {
