@@ -2,10 +2,14 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/config"
@@ -198,6 +202,19 @@ func NewRealPoolWithLiveness(
 			p.entries[name] = newListenEntry(ctx, name, ln, t, sshPort, dockerPort, ownPin, clock, liveness)
 			p.order = append(p.order, name)
 			continue
+		}
+
+		// An address that could never be dialled is refused here, before any
+		// retrying begins. The alternative is a session that reports itself as
+		// connecting for as long as the daemon runs, which is a claim about the
+		// future that will never come true. The socket bound a moment ago is
+		// released first so a refusal costs nothing.
+		//
+		// This mirrors what the waiting direction already does with an address
+		// it cannot understand, a few lines above.
+		if err := config.DialableAddr(name, srv.Addr); err != nil {
+			_ = t.Close()
+			return nil, err
 		}
 
 		// Capture name and srv for the closure — do not use the loop variable
@@ -892,7 +909,67 @@ func (e *dialEntry) State() SessionState {
 		Since:      e.since,
 		SSHPort:    e.sshPort,
 		DockerPort: e.dockerPort,
+		LastError:  dialFailureText(e.intState, e.dialErr),
 	}
+}
+
+// dialFailureText renders why a session that is still trying has not connected.
+//
+// It says nothing about a session that is connected, because there is no
+// failure to describe, and nothing about one that has stopped for good, because
+// its state already says so and repeating it in prose adds no information. A
+// cancellation is also passed over: that is the daemon being asked to shut down,
+// not the far end being unreachable.
+//
+// The text is capped and stripped of anything that could disturb a terminal.
+// Part of it can originate at the far end, and output that a person reads or a
+// script parses should not be steerable from there.
+func dialFailureText(st internalConnState, err error) string {
+	if err == nil || st == stateConnected || st == stateAuthFailed {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return ""
+	}
+	return boundedFailureText(err.Error())
+}
+
+// maxFailureTextBytes bounds the reported reason. It is generous enough for the
+// messages this program produces and small enough that no single line of status
+// output can be made unreadable.
+const maxFailureTextBytes = 200
+
+// boundedFailureText makes an error safe to print beside other fields: valid
+// text, on one line, of a predictable length.
+func boundedFailureText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == utf8.RuneError:
+			// Reached for bytes that are not valid text at all; drop them
+			// rather than emit a replacement character for each one.
+			continue
+		case r == '\n' || r == '\r' || r == '\t':
+			// Whitespace that would otherwise split one field across lines and
+			// let a message impersonate another.
+			b.WriteRune(' ')
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if len(out) <= maxFailureTextBytes {
+		return out
+	}
+	// Cut on a character boundary so the result stays valid text.
+	cut := out[:maxFailureTextBytes]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return strings.TrimSpace(cut) + "…"
 }
 
 // ControlCall copies the current control client under e.mu, releases the

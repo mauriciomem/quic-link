@@ -329,6 +329,14 @@ func agentDialOut(
 	authorized pinList,
 	serveOpts tunnel.ServeOpts,
 ) error {
+	// Refuse an address that could never be reached before opening a socket or
+	// starting to retry. This end retries indefinitely by design, which is
+	// right for a client that is merely switched off and wrong for an address
+	// no amount of waiting can make work.
+	if err := config.DialableAddr("client", dial); err != nil {
+		return err
+	}
+
 	// Bind IPv4-only for the same reason every other initiating path in this
 	// binary does: a dual-stack socket on macOS silently fails to transmit to
 	// on-link IPv4 neighbours, because the first outbound datagram has no

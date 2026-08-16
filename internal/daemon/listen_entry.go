@@ -394,6 +394,10 @@ func (e *listenEntry) State() SessionState {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// LastError is deliberately left empty. This end waits to be contacted and
+	// never dials, so there is no attempt of its own that could have failed;
+	// the side that dials in this arrangement is the far one, and its failures
+	// are its own to report.
 	return SessionState{
 		Name:       e.name,
 		State:      listenStateLabel(e.intState),

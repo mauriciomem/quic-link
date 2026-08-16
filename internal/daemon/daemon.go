@@ -436,9 +436,27 @@ type SessionState struct {
 	// for both fields — zero means nothing is listening on that port.
 	SSHPort    int
 	DockerPort int
+	// LastError says why the most recent attempt to reach this server failed,
+	// for a session that is still trying. It is a sentence for a person to
+	// read, never a value to branch on: State answers "is it up?" from a fixed
+	// set of words, and this answers "what went wrong?" with whatever the
+	// network said. It is empty once a session connects, so anything here
+	// describes the situation now rather than a failure already recovered from.
+	LastError string
 }
 
 // ---- Status snapshot ---------------------------------------------------------
+
+// statusSchema is the version of the status document. It is raised whenever a
+// field is added, removed or changes meaning, so a reader can tell which shape
+// it is holding. It counts only this document: the doctor report, the route
+// listing and the socket itself each carry their own, and they move
+// independently.
+//
+// 2 added a field naming why a session that is still retrying has not
+// connected. The field is omitted when there is nothing wrong, so a reader
+// written against 1 sees no difference until something fails.
+const statusSchema = 2
 
 // StatusSnapshot is the JSON-serializable status document. It implements the
 // frozen byte-shape of the status --json output. Do not add fields without
@@ -472,6 +490,9 @@ type ServerSnapshot struct {
 	SinceMS    int64       `json:"since_ms"`
 	LocalPorts PortsInfo   `json:"local_ports"`
 	Routes     []RouteInfo `json:"routes,omitempty"`
+	// Absent when there is nothing wrong, so a healthy document is unchanged
+	// from one produced before this field existed.
+	LastError string `json:"last_error,omitempty"`
 }
 
 // PortsInfo carries the computed local port numbers for ssh and docker.
@@ -512,7 +533,7 @@ func BuildSnapshot(
 	metaReader func(path string) (created time.Time, present bool, err error),
 ) StatusSnapshot {
 	snap := StatusSnapshot{
-		Schema:  1,
+		Schema:  statusSchema,
 		Servers: make([]ServerSnapshot, 0, len(states)),
 	}
 
@@ -545,6 +566,7 @@ func BuildSnapshot(
 			// modes of a live control-plane RPC for a field most callers
 			// never look at. A live route table is available through its
 			// own relay (RoutesSnapshot, routes.go), fetched only when asked.
+			LastError: ss.LastError,
 		})
 	}
 
