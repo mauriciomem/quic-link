@@ -505,3 +505,96 @@ func TestAnAddressInEitherFamilyIsAccepted(t *testing.T) {
 		cancel()
 	}
 }
+
+// TestTheReasonStaysVisibleWhileASessionIsDown covers the difference between
+// having a reason and being asked for it at the right moment.
+//
+// The reason used to be cleared just before each new attempt, so it existed
+// only during the pause between attempts. That is the opposite of when anyone
+// asks: an attempt against an unreachable address runs until it times out,
+// which is most of the wall-clock time and nearly all of it when the far end
+// is silent rather than refusing. Asked during an attempt, a session that had
+// never once connected reported no reason at all.
+//
+// The dial here takes time to fail, which is what makes the test able to fail:
+// against a transport that fails instantly there is no interval to catch, and
+// the same assertion would pass whether the defect was present or not.
+func TestTheReasonStaysVisibleWhileASessionIsDown(t *testing.T) {
+	tr := &slowFailingTransport{delay: 150 * time.Millisecond}
+
+	cfg := config.Defaults()
+	cfg.Servers = map[string]config.Server{"web": {Addr: "nothing-here:1"}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pool, err := daemon.NewRealPool(
+		ctx, cfg,
+		func(_ string, _ config.Server) (transport.Transport, error) { return tr, nil },
+		ceilingPolicy(), daemon.WallClock{}, nil,
+	)
+	if err != nil {
+		t.Fatalf("NewRealPool: %v", err)
+	}
+	defer pool.Close()
+
+	// Wait for the first failure, so there is a reason to report at all.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if st := pool.State(); len(st) == 1 && st[0].LastError != "" {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st := pool.State(); st[0].LastError == "" {
+		t.Fatal("no reason was reported even once, so this test cannot say anything about " +
+			"whether it stays reported")
+	}
+
+	// From here the reason must never disappear. The sampling deliberately
+	// spans several attempts, each of which takes long enough to be sampled
+	// during rather than only between.
+	var absent int
+	const samples = 60
+	for i := 0; i < samples; i++ {
+		st := pool.State()
+		if len(st) != 1 {
+			t.Fatalf("got %d servers, want 1", len(st))
+		}
+		if st[0].State != "connecting" {
+			t.Fatalf("session is %q, want connecting: this test only means something while the "+
+				"session is still trying", st[0].State)
+		}
+		if st[0].LastError == "" {
+			absent++
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if absent > 0 {
+		t.Errorf("the reason was missing in %d of %d samples of a session that has never "+
+			"connected; it is being cleared around each attempt rather than describing the "+
+			"situation, so whoever asks during an attempt is told nothing", absent, samples)
+	}
+}
+
+// slowFailingTransport fails every dial, but not instantly. The delay is the
+// point: it stands in for an address that is silent rather than refusing, where
+// each attempt runs until it times out.
+type slowFailingTransport struct {
+	delay time.Duration
+}
+
+func (t *slowFailingTransport) Dial(ctx context.Context, _ string) (transport.Conn, error) {
+	select {
+	case <-time.After(t.delay):
+		return nil, errors.New("no response from server")
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (t *slowFailingTransport) Listen() (transport.Listener, error) {
+	return nil, errors.New("this transport only dials")
+}
+func (t *slowFailingTransport) Close() error { return nil }

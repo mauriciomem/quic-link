@@ -578,11 +578,14 @@ func (e *dialEntry) runLoop(ctx context.Context) {
 			case <-e.clock.After(d):
 			}
 
-			// Prepare for the next attempt.
+			// Prepare for the next attempt. The last failure is deliberately
+			// left in place: it is why this session is not connected, and it
+			// stays true until the next attempt says otherwise. Clearing it
+			// here made it visible only during the wait between attempts, so
+			// anyone asking why a session was down usually got no answer.
 			e.mu.Lock()
 			e.dialing = true
 			e.dialDone = make(chan struct{})
-			e.dialErr = nil
 			e.mu.Unlock()
 			continue
 		}
