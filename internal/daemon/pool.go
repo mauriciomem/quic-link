@@ -942,6 +942,15 @@ func (e *dialEntry) Close(err error) {
 
 	// Wait for the run-loop to exit so we don't leak goroutines.
 	<-e.runDone
+
+	// Release the socket too. The run-loop stopping does not close it, and the
+	// entry owns it for its whole life, so this is the only place left. The
+	// waiting direction has always done this; the dialing one did not, which
+	// went unnoticed because the in-memory transport used in tests has no
+	// socket to leak.
+	if e.t != nil {
+		_ = e.t.Close()
+	}
 }
 
 // ---- helpers ----------------------------------------------------------------
