@@ -32,13 +32,23 @@ once, deploy the new binary to both ends.
 
 ## Reverse mode
 
-Normally the daemon connects to the agent. That needs the agent to have an address
-your workstation can reach, which is not always true: the machine you want to reach
-may be behind NAT, on a home network, or on a connection you cannot forward a port
-through.
+By default the daemon connects to the agent, so the agent needs an address you can
+reach — a public one, or a forwarded port on a router you control. Often there is
+no way to give it one: it may sit behind carrier-grade NAT, where the ISP shares
+one address among many customers and there is nothing to forward, or on an office
+network you do not administer.
 
-Reverse mode turns the connection around. The daemon waits, and the agent connects
-out to it:
+Reverse mode turns the connection around. The daemon waits, the agent connects out
+to it, and **only one end ever has to be reachable — this is how you choose which
+one.** Outbound connections work from nearly anywhere; inbound ones often do not.
+
+Only the direction changes. The agent still serves `ssh` and `docker`, you still
+type `quic-link ssh homelab` on the daemon's machine, and once the connection is up
+it carries streams both ways regardless of who opened it.
+
+Say a machine at home holds your builds, behind an ISP using carrier-grade NAT, and
+your workstation is somewhere you can open one UDP port. Point the agent at the
+workstation and have the daemon wait:
 
 ```toml
 # On the workstation: wait instead of connecting out.
@@ -54,29 +64,30 @@ dial               = "workstation.example.com:17443"
 authorized_clients = ["<the workstation's pin>"]
 ```
 
-Everything else is unchanged. Authentication is still mutual and still pin-based in
-both directions, the agent still decides which named services may be reached, and
-`ssh`, `fwd` and `docker-env` work exactly as before. `status` reports which
-direction each server uses, and shows `listening` while a waiting server has no
-connected agent.
+Everything else is unchanged: authentication is mutual and pin-based in both
+directions, the agent still decides which services may be reached, and `ssh`, `fwd`
+and `docker-env` behave as before. `status` shows `listening` until an agent
+connects.
 
-Two things to know:
+Four things worth knowing:
 
-- **The waiting end needs a reachable port.** That is the whole point of turning it
-  around, so the workstation now needs an address the agent can reach, and a
-  firewall that lets the traffic in.
-- **Pick a port of 1024 or above.** Binding a lower one needs privileges the daemon
-  deliberately does not take; see [platform notes](platform-notes.md).
+- **It moves the reachable port; it does not remove it.** One end must still accept
+  a connection. What you gain is choosing which.
+- **It is not NAT traversal.** No hole punching, no relay, no third party in the
+  path — just which end places the call.
+- **Connecting does not confer a role.** Roles come from configuration and are
+  checked against key identity, so an end claiming the wrong one is refused.
+- **Two waiting servers need different pins**, since an incoming connection is
+  identified by its pin and nothing else. Use a port of 1024 or above; lower ones
+  need privileges the daemon deliberately does not take (see
+  [platform notes](platform-notes.md)).
 
 ## The connection model
 
 - **Either end can be the one that connects.** By default the daemon connects to
-  the agent, which is what you want when the agent has a reachable address. If it
-  does not — an agent behind NAT, or a home machine you cannot forward a port to —
-  you can turn it around: the daemon waits and the agent connects out to it. This
-  changes nothing about who does what. The daemon is still the client and the agent
-  still decides which local services may be reached; only the direction of the
-  initial connection moves. See [Reverse mode](#reverse-mode).
+  the agent, which is what you want when the agent has a reachable address. When it
+  does not, you can turn it around, and only the direction of the initial
+  connection moves — not who does what. See [Reverse mode](#reverse-mode).
 - **One QUIC connection per configured server**, re-established automatically if it
   drops. Whichever end connects is the end that reconnects.
 - **Many streams, one connection.** Every SSH login and every Docker API call rides
