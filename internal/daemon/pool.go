@@ -763,7 +763,7 @@ func runLivenessProbeOn(
 			"session", name,
 			"consecutive_probe_failures", consecutiveFailures,
 			"threshold", threshold,
-			"err", err,
+			"err", probeFailureText(err),
 		)
 
 		if consecutiveFailures >= threshold {
@@ -802,6 +802,35 @@ func (e *dialEntry) rebindTransport() error {
 	e.t = newT
 	return nil
 }
+
+// probeFailureText says why a liveness probe failed, in words that describe the
+// session rather than the machinery underneath it.
+//
+// One case needs translating. The control stream is used once and never
+// re-dialled, so when a session has already ended the attempt to reuse it is
+// refused by design — and the refusal is worded for whoever is reading this
+// file, not for an operator. Reported raw, and wrapped in two layers of
+// remote-call framing on the way out, it reaches a log as an assertion about a
+// dialer, offered as the reason someone's session dropped. The condition it
+// actually describes is that the session was already gone before this probe ran.
+//
+// Anything else is passed through: those messages are about the network and are
+// already the most specific thing available.
+func probeFailureText(err error) string {
+	if err == nil {
+		return ""
+	}
+	if strings.Contains(err.Error(), errControlDialerReused) {
+		return "the session's control stream had already ended"
+	}
+	return err.Error()
+}
+
+// errControlDialerReused is the text the control client uses when something
+// tries to reuse a stream that is only good once. Matched as text deliberately:
+// it arrives wrapped in remote-call framing that discards the original error
+// value, so there is nothing else left to compare against.
+const errControlDialerReused = "dialer may only be used once"
 
 // localAddrOf returns the local UDP address of t if t implements the optional
 // LocalAddrProvider interface, otherwise returns "<unavailable>".

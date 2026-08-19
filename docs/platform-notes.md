@@ -8,16 +8,21 @@ the CLI's own `--help` output is the final word.*
 
 Ports below 1024 require elevated privileges on both Linux and macOS.
 
-- **High-port workaround:** run the agent with `--listen :4443` (or any port at or
-  above 1024); no privilege needed.
-- **Linux** (preferred over running as root): grant the binary the one capability
-  it needs instead of using `sudo`:
+- **Use a port at or above 1024.** Run the agent with `--listen :4443`, or any
+  other high port; no privilege is needed and nothing has to be granted. This is
+  the supported answer.
+- **On Linux you can grant the capability yourself**, if you have a reason to want
+  a low port:
 
   ```bash
   sudo setcap 'cap_net_bind_service=+ep' ./quic-link
   ```
 
-  There's no macOS equivalent for this; on macOS use a high port or `sudo`.
+  This works, and quic-link neither needs nor asks for it. Know the trade-off
+  before you rely on it: the capability is attached to the file, so **replacing the
+  binary silently removes it** — every upgrade, every rebuild. The bind then fails
+  with a permission error that looks like a bug rather than a missing grant.
+  There is no macOS equivalent; on macOS, use a high port.
 
 The same applies to the client side in reverse mode. A `[servers.<name>]` block with
 `listen` set binds a port on the workstation, and a port below 1024 is refused there

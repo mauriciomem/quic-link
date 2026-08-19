@@ -172,7 +172,7 @@ func diagnose(cmd *cobra.Command, a *app) report {
 		}
 	} else {
 		r.Daemon = &daemonReport{Running: false}
-		r.Resolution.Note = "no daemon is running, so nothing could answer"
+		r.Resolution.Note = noDaemonNote(r.Resolution.Answered)
 	}
 
 	r.NextStep = nextStep(r, res)
@@ -205,10 +205,52 @@ func askDaemon(a *app, probe string) (daemon.DoctorSnapshot, bool) {
 // nextStep picks the single most useful thing to do, working up from the most
 // fundamental. Listing everything that is wrong at once leaves a person to work
 // out the order themselves, and the order is always the same.
+// noDaemonNote explains a lookup's outcome when this program is not running.
+//
+// The note prints directly beneath a line that already says whether anything
+// answered, so the two must agree. Saying nothing could answer, under a line
+// reporting that something did, reads as the report contradicting itself.
+//
+// Both situations are real. A name can resolve while this program is stopped,
+// because the file pointing the resolver here is still in place and something
+// else — a search domain, a cache, another responder — answers instead. That is
+// worth saying plainly, and it is not the same as no answer at all.
+func noDaemonNote(answered bool) string {
+	if answered {
+		return "something answered, but this machine's responder is not running, so it was not us"
+	}
+	return "this machine's responder is not running, so nothing here could answer"
+}
+
+// privilegedViewAdvice explains why per-user files look absent to a privileged
+// run, and how to see them. It names the account when the system says which one
+// invoked the command, because "your files" is not useful to somebody who has
+// just been told they are missing.
+func privilegedViewAdvice(who string) string {
+	const tail = " are not visible here; run without sudo to check them: quic-link doctor"
+	if who != "" {
+		return "this is root's view, so files belonging to " + who + tail
+	}
+	return "this is root's view, so per-user files" + tail
+}
+
 func nextStep(r report, res setup.Resolver) string {
 	// Nothing else can be acted on until the settings can be read.
 	if r.ConfigError != "" {
 		return "fix your settings: " + r.ConfigError
+	}
+	// A privileged run looks at root's home, not the home of the person who
+	// typed the command. Anything kept per-user is therefore reported absent
+	// here even when it exists, so advice about those files would send someone
+	// to create a second copy of something they already have. Say whose view
+	// this is instead, and let them run the same command unprivileged to see
+	// their own.
+	if who, privileged := setup.RealUser(); privileged {
+		for _, a := range r.Artifacts {
+			if a.Scope == "user" && !a.Present {
+				return privilegedViewAdvice(who)
+			}
+		}
 	}
 	for _, a := range r.Artifacts {
 		if a.Scope == "user" && a.Purpose == "this machine's identity" && !a.Present {
