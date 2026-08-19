@@ -21,8 +21,9 @@ type MutationPolicy struct {
 // readOnlyMethods may be called by any authenticated peer. They report on the
 // agent; none of them changes it.
 var readOnlyMethods = map[string]bool{
-	"Ping":      true,
-	"GetStatus": true,
+	"Ping":       true,
+	"GetStatus":  true,
+	"ListVhosts": true,
 }
 
 // Authorize implements Policy.

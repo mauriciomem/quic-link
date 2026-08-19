@@ -21,6 +21,15 @@ service Control {
   // Anything added this way lasts only as long as the process: the name
   // table is rebuilt from configuration at every start.
   rpc AddVhost(AddVhostRequest) returns (AddVhostResponse);
+  // ListVhosts reports every name this agent publishes, whether it came from
+  // the operator's configuration or was added while the agent was running.
+  //
+  // It reads and changes nothing, so it needs no consent from the agent's
+  // operator: a caller that is already authenticated may ask what a name table
+  // holds. Until this existed nothing disclosed a published name at all, so an
+  // agent's own log was the only record of one and it went away with the
+  // process.
+  rpc ListVhosts(ListVhostsRequest) returns (ListVhostsResponse);
 }
 
 message PingRequest {
@@ -71,6 +80,26 @@ message AddVhostRequest {
   // names is precisely what the route table exists to prevent. A field that
   // cannot express a destination has no edge case a validator could miss.
   uint32 port = 2;
+}
+
+message ListVhostsRequest {}
+
+message ListVhostsResponse {
+  repeated VhostInfo vhosts = 1;
+}
+
+message VhostInfo {
+  // host is the whole name, with its star if it is a pattern.
+  string host = 1;
+  // address is where the name points, as configured.
+  string address = 2;
+  // builtin is carried for symmetry with a route entry. No published name is
+  // compiled in, so it is always false; provenance is the field that
+  // distinguishes configuration from a runtime addition.
+  bool builtin = 3;
+  // provenance says where the entry came from. A peer too old to send it leaves
+  // it empty, which a reader must tolerate rather than treat as another kind.
+  string provenance = 4;
 }
 
 message AddVhostResponse {

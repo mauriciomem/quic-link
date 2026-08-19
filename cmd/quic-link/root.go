@@ -87,6 +87,7 @@ Examples:
 		newStdioCmd(a),
 		newDaemonCmd(a),
 		newStatusCmd(a),
+		newVhostsCmd(a),
 		newSSHCmd(a),
 		newDockerEnvCmd(a),
 		newAttachCmd(a),

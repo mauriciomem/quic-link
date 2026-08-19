@@ -84,6 +84,10 @@ type controlPlane struct {
 	// means this session reports no routes, which is a valid configuration
 	// rather than a failure.
 	routes control.RouteSource
+	// vhosts reports the names this agent publishes. It sits beside routes and
+	// not beside names below, because reporting what a table holds is not
+	// changing it and needs no consent from the operator.
+	vhosts control.VhostSource
 	// names publishes a hostname while the agent runs. A nil value means this
 	// agent cannot, and is what the operator's default produces.
 	names control.VhostPublisher
@@ -98,6 +102,26 @@ type controlPlane struct {
 // imports both.
 type controlRouteSource struct {
 	rtr *router.Router
+}
+
+// controlVhostSource adapts *router.Router to control.VhostSource, for the same
+// reason and at the same boundary as the route adapter above.
+type controlVhostSource struct {
+	rtr *router.Router
+}
+
+func (s controlVhostSource) VhostDetails() []control.VhostDetail {
+	details := s.rtr.VhostDetails()
+	out := make([]control.VhostDetail, len(details))
+	for i, d := range details {
+		out[i] = control.VhostDetail{
+			Name:       d.Name,
+			Address:    d.Address,
+			Builtin:    d.Builtin,
+			Provenance: string(d.Provenance),
+		}
+	}
+	return out
 }
 
 func (s controlRouteSource) RouteDetails() []control.RouteDetail {
@@ -290,6 +314,7 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 	var cp controlPlane
 	if rtr != nil {
 		cp.routes = controlRouteSource{rtr: rtr}
+		cp.vhosts = controlVhostSource{rtr: rtr}
 		// Withheld unless the operator asked for it. This is the second of the
 		// two gates: the policy refuses such a call anyway, and this makes
 		// sure there would be nothing behind the refusal to reach even if it
@@ -472,6 +497,7 @@ func serveControl(
 	// Serve gRPC until the control stream dies; then the session is dead.
 	controlOpts := control.ServeOpts{
 		Routes:    cp.routes,
+		Vhosts:    cp.vhosts,
 		Names:     cp.names,
 		Version:   opt.Version,
 		StartedAt: opt.StartedAt,

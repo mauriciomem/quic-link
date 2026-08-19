@@ -281,6 +281,43 @@ type RouteDetail struct {
 	Provenance Provenance
 }
 
+// VhostDetail is one published name, with where it came from and where it
+// points. It mirrors RouteDetail because the two answer the same question about
+// different namespaces, and a reader of one should not have to learn a second
+// shape to read the other.
+type VhostDetail struct {
+	// Name is the whole hostname. A pattern is rendered with its star, as the
+	// operator wrote it.
+	Name string
+	// Address is the destination as configured, in the form it was given.
+	Address string
+	// Builtin is derived from Provenance, for symmetry with a route. No
+	// published name is compiled in today, so this is always false — the
+	// distinction that matters here is between the operator's configuration and
+	// something added while the agent was running, which Provenance carries.
+	Builtin bool
+	// Provenance says where the entry came from. Readers should treat the set of
+	// values as open rather than assuming the ones they know are all there will
+	// ever be.
+	Provenance Provenance
+}
+
+// VhostDetails returns every name this agent publishes, sorted by name.
+//
+// Until this existed a published name was disclosed by nothing: the table could
+// be added to over the control plane and read by no one, so the agent's own log
+// was the only record and it went away when the process did.
+func (r *Router) VhostDetails() []VhostDetail {
+	if r.vhosts == nil {
+		return nil
+	}
+	out := r.vhosts.details()
+	for i := range out {
+		out[i].Builtin = out[i].Provenance == ProvenanceBuiltin
+	}
+	return out
+}
+
 // RouteDetails returns every route's name, configured address, and
 // provenance, sorted by name so the result is deterministic regardless of
 // the route table's internal map order.

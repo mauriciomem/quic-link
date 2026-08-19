@@ -354,6 +354,161 @@ func (x *AddVhostRequest) GetPort() uint32 {
 	return 0
 }
 
+type ListVhostsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListVhostsRequest) Reset() {
+	*x = ListVhostsRequest{}
+	mi := &file_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListVhostsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVhostsRequest) ProtoMessage() {}
+
+func (x *ListVhostsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVhostsRequest.ProtoReflect.Descriptor instead.
+func (*ListVhostsRequest) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{6}
+}
+
+type ListVhostsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vhosts        []*VhostInfo           `protobuf:"bytes,1,rep,name=vhosts,proto3" json:"vhosts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListVhostsResponse) Reset() {
+	*x = ListVhostsResponse{}
+	mi := &file_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListVhostsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListVhostsResponse) ProtoMessage() {}
+
+func (x *ListVhostsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListVhostsResponse.ProtoReflect.Descriptor instead.
+func (*ListVhostsResponse) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ListVhostsResponse) GetVhosts() []*VhostInfo {
+	if x != nil {
+		return x.Vhosts
+	}
+	return nil
+}
+
+type VhostInfo struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// host is the whole name, with its star if it is a pattern.
+	Host string `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
+	// address is where the name points, as configured.
+	Address string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
+	// builtin is carried for symmetry with a route entry. No published name is
+	// compiled in, so it is always false; provenance is the field that
+	// distinguishes configuration from a runtime addition.
+	Builtin bool `protobuf:"varint,3,opt,name=builtin,proto3" json:"builtin,omitempty"`
+	// provenance says where the entry came from. A peer too old to send it leaves
+	// it empty, which a reader must tolerate rather than treat as another kind.
+	Provenance    string `protobuf:"bytes,4,opt,name=provenance,proto3" json:"provenance,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VhostInfo) Reset() {
+	*x = VhostInfo{}
+	mi := &file_control_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VhostInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VhostInfo) ProtoMessage() {}
+
+func (x *VhostInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_control_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VhostInfo.ProtoReflect.Descriptor instead.
+func (*VhostInfo) Descriptor() ([]byte, []int) {
+	return file_control_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *VhostInfo) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *VhostInfo) GetAddress() string {
+	if x != nil {
+		return x.Address
+	}
+	return ""
+}
+
+func (x *VhostInfo) GetBuiltin() bool {
+	if x != nil {
+		return x.Builtin
+	}
+	return false
+}
+
+func (x *VhostInfo) GetProvenance() string {
+	if x != nil {
+		return x.Provenance
+	}
+	return ""
+}
+
 type AddVhostResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// host and port echo what was actually published, after validation, so the
@@ -367,7 +522,7 @@ type AddVhostResponse struct {
 
 func (x *AddVhostResponse) Reset() {
 	*x = AddVhostResponse{}
-	mi := &file_control_proto_msgTypes[6]
+	mi := &file_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -379,7 +534,7 @@ func (x *AddVhostResponse) String() string {
 func (*AddVhostResponse) ProtoMessage() {}
 
 func (x *AddVhostResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_control_proto_msgTypes[6]
+	mi := &file_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -392,7 +547,7 @@ func (x *AddVhostResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddVhostResponse.ProtoReflect.Descriptor instead.
 func (*AddVhostResponse) Descriptor() ([]byte, []int) {
-	return file_control_proto_rawDescGZIP(), []int{6}
+	return file_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *AddVhostResponse) GetHost() string {
@@ -433,14 +588,26 @@ const file_control_proto_rawDesc = "" +
 	"provenance\"9\n" +
 	"\x0fAddVhostRequest\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\rR\x04port\":\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\"\x13\n" +
+	"\x11ListVhostsRequest\"D\n" +
+	"\x12ListVhostsResponse\x12.\n" +
+	"\x06vhosts\x18\x01 \x03(\v2\x16.quiclink.v1.VhostInfoR\x06vhosts\"s\n" +
+	"\tVhostInfo\x12\x12\n" +
+	"\x04host\x18\x01 \x01(\tR\x04host\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\x12\x18\n" +
+	"\abuiltin\x18\x03 \x01(\bR\abuiltin\x12\x1e\n" +
+	"\n" +
+	"provenance\x18\x04 \x01(\tR\n" +
+	"provenance\":\n" +
 	"\x10AddVhostResponse\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\rR\x04port2\xdb\x01\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port2\xaa\x02\n" +
 	"\aControl\x12;\n" +
 	"\x04Ping\x12\x18.quiclink.v1.PingRequest\x1a\x19.quiclink.v1.PingResponse\x12J\n" +
 	"\tGetStatus\x12\x1d.quiclink.v1.GetStatusRequest\x1a\x1e.quiclink.v1.GetStatusResponse\x12G\n" +
-	"\bAddVhost\x12\x1c.quiclink.v1.AddVhostRequest\x1a\x1d.quiclink.v1.AddVhostResponseBCZAgithub.com/mauriciomem/quic-link/internal/control/proto;controlpbb\x06proto3"
+	"\bAddVhost\x12\x1c.quiclink.v1.AddVhostRequest\x1a\x1d.quiclink.v1.AddVhostResponse\x12M\n" +
+	"\n" +
+	"ListVhosts\x12\x1e.quiclink.v1.ListVhostsRequest\x1a\x1f.quiclink.v1.ListVhostsResponseBCZAgithub.com/mauriciomem/quic-link/internal/control/proto;controlpbb\x06proto3"
 
 var (
 	file_control_proto_rawDescOnce sync.Once
@@ -454,29 +621,35 @@ func file_control_proto_rawDescGZIP() []byte {
 	return file_control_proto_rawDescData
 }
 
-var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_control_proto_goTypes = []any{
-	(*PingRequest)(nil),       // 0: quiclink.v1.PingRequest
-	(*PingResponse)(nil),      // 1: quiclink.v1.PingResponse
-	(*GetStatusRequest)(nil),  // 2: quiclink.v1.GetStatusRequest
-	(*GetStatusResponse)(nil), // 3: quiclink.v1.GetStatusResponse
-	(*RouteInfo)(nil),         // 4: quiclink.v1.RouteInfo
-	(*AddVhostRequest)(nil),   // 5: quiclink.v1.AddVhostRequest
-	(*AddVhostResponse)(nil),  // 6: quiclink.v1.AddVhostResponse
+	(*PingRequest)(nil),        // 0: quiclink.v1.PingRequest
+	(*PingResponse)(nil),       // 1: quiclink.v1.PingResponse
+	(*GetStatusRequest)(nil),   // 2: quiclink.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),  // 3: quiclink.v1.GetStatusResponse
+	(*RouteInfo)(nil),          // 4: quiclink.v1.RouteInfo
+	(*AddVhostRequest)(nil),    // 5: quiclink.v1.AddVhostRequest
+	(*ListVhostsRequest)(nil),  // 6: quiclink.v1.ListVhostsRequest
+	(*ListVhostsResponse)(nil), // 7: quiclink.v1.ListVhostsResponse
+	(*VhostInfo)(nil),          // 8: quiclink.v1.VhostInfo
+	(*AddVhostResponse)(nil),   // 9: quiclink.v1.AddVhostResponse
 }
 var file_control_proto_depIdxs = []int32{
 	4, // 0: quiclink.v1.GetStatusResponse.routes:type_name -> quiclink.v1.RouteInfo
-	0, // 1: quiclink.v1.Control.Ping:input_type -> quiclink.v1.PingRequest
-	2, // 2: quiclink.v1.Control.GetStatus:input_type -> quiclink.v1.GetStatusRequest
-	5, // 3: quiclink.v1.Control.AddVhost:input_type -> quiclink.v1.AddVhostRequest
-	1, // 4: quiclink.v1.Control.Ping:output_type -> quiclink.v1.PingResponse
-	3, // 5: quiclink.v1.Control.GetStatus:output_type -> quiclink.v1.GetStatusResponse
-	6, // 6: quiclink.v1.Control.AddVhost:output_type -> quiclink.v1.AddVhostResponse
-	4, // [4:7] is the sub-list for method output_type
-	1, // [1:4] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	8, // 1: quiclink.v1.ListVhostsResponse.vhosts:type_name -> quiclink.v1.VhostInfo
+	0, // 2: quiclink.v1.Control.Ping:input_type -> quiclink.v1.PingRequest
+	2, // 3: quiclink.v1.Control.GetStatus:input_type -> quiclink.v1.GetStatusRequest
+	5, // 4: quiclink.v1.Control.AddVhost:input_type -> quiclink.v1.AddVhostRequest
+	6, // 5: quiclink.v1.Control.ListVhosts:input_type -> quiclink.v1.ListVhostsRequest
+	1, // 6: quiclink.v1.Control.Ping:output_type -> quiclink.v1.PingResponse
+	3, // 7: quiclink.v1.Control.GetStatus:output_type -> quiclink.v1.GetStatusResponse
+	9, // 8: quiclink.v1.Control.AddVhost:output_type -> quiclink.v1.AddVhostResponse
+	7, // 9: quiclink.v1.Control.ListVhosts:output_type -> quiclink.v1.ListVhostsResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_control_proto_init() }
@@ -490,7 +663,7 @@ func file_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_control_proto_rawDesc), len(file_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

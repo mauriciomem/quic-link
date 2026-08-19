@@ -85,9 +85,10 @@ func TestMutationPolicy_ChangingNeedsConsentAndSaysSo(t *testing.T) {
 // Only a list a human has to edit can tell them apart, which is why this is
 // duplication on purpose rather than something to derive.
 var methodsSomebodyThoughtAbout = map[string]bool{
-	"Ping":      true,
-	"GetStatus": true,
-	"AddVhost":  true,
+	"Ping":       true,
+	"GetStatus":  true,
+	"AddVhost":   true,
+	"ListVhosts": true,
 }
 
 // TestEveryServedMethodIsClassified requires that every method this agent

@@ -39,6 +39,7 @@ type server struct {
 	peer      PeerIdentity
 	policy    Policy
 	routes    RouteSource
+	vhosts    VhostSource
 	names     VhostPublisher
 	version   string
 	startedAt time.Time
@@ -63,6 +64,10 @@ type ServeOpts struct {
 	// all, so its absence is reported as a refusal rather than treated as
 	// success.
 	Names VhostPublisher
+	// Vhosts supplies the published-name table for a listing. Nil means the
+	// listing reports nothing, for the same reason Routes does: an agent that
+	// publishes no names has an honest answer, which is that there are none.
+	Vhosts VhostSource
 	// Version is reported to a GetStatus caller as the agent's own build
 	// version. Empty means unknown, not a build defect.
 	Version string
@@ -189,6 +194,7 @@ func Serve(ctx context.Context, stream transport.Stream, peer PeerIdentity, poli
 		peer:      peer,
 		policy:    policy,
 		routes:    opt.Routes,
+		vhosts:    opt.Vhosts,
 		names:     opt.Names,
 		version:   opt.Version,
 		startedAt: opt.StartedAt,

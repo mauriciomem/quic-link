@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -202,6 +203,30 @@ func (v *vhosts) resolve(host string) (route, bool) {
 
 // names returns every published hostname, for logging and diagnosis.
 //
+// details reports every published name with where it came from and where it
+// points, sorted so the answer does not depend on map ordering.
+//
+// A pattern entry is rendered with the star it was configured with, because
+// that is the name an operator wrote and the one they will look for. The
+// address is the raw form the entry was built from rather than a reassembled
+// one, so what is reported is what was configured.
+//
+// It reads under the same lock as a lookup does, for the same reason names()
+// does: what matters is that a write may be happening, not how often this runs.
+func (v *vhosts) details() []VhostDetail {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	out := make([]VhostDetail, 0, len(v.exact)+len(v.wildcard))
+	for k, r := range v.exact {
+		out = append(out, VhostDetail{Name: k, Address: r.raw, Provenance: r.prov})
+	}
+	for k, r := range v.wildcard {
+		out = append(out, VhostDetail{Name: "*." + k, Address: r.raw, Provenance: r.prov})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // It reads under the same lock as a lookup does. It is called far less often,
 // but a reader that skipped the lock would be exactly as unsafe as a busy one:
 // what matters is that a write may be happening, not how often this runs.

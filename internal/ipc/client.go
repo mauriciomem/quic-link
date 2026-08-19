@@ -143,6 +143,42 @@ func (c *Client) RoutesJSON(server string) ([]byte, error) {
 	return []byte(resp.Body), nil
 }
 
+// VhostsJSON asks the daemon to relay a published-name listing for one server,
+// on the same terms as RoutesJSON: a *RoutesError carries the daemon's own
+// already-distinguished reason when there is no listing to give, and socket
+// conditions are reported the way every other call on this socket reports them.
+func (c *Client) VhostsJSON(server string) ([]byte, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	req := Request{
+		SocketSchema: SocketSchema,
+		Kind:         "rpc",
+		Method:       "vhosts",
+		Server:       server,
+	}
+	if err := writeRequest(conn, req); err != nil {
+		return nil, fmt.Errorf("ipc: write vhosts request: %w", err)
+	}
+
+	resp, err := readResponse(conn)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: read vhosts response: %w", err)
+	}
+
+	if resp.SocketSchema != SocketSchema {
+		return nil, fmt.Errorf("%w: daemon speaks schema %d, client expects %d",
+			ErrSchemaMismatch, resp.SocketSchema, SocketSchema)
+	}
+	if resp.Status != 0 {
+		return nil, &RoutesError{Status: resp.Status, Msg: resp.Msg}
+	}
+	return []byte(resp.Body), nil
+}
+
 // ExposeJSON asks the daemon to have a named server's agent publish host at
 // port, and returns the raw JSON bytes of the reply (the daemon's
 // ExposeSnapshot shape). Failures are reported exactly as RoutesJSON reports

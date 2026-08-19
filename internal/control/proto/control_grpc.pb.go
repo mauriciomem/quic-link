@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_Ping_FullMethodName      = "/quiclink.v1.Control/Ping"
-	Control_GetStatus_FullMethodName = "/quiclink.v1.Control/GetStatus"
-	Control_AddVhost_FullMethodName  = "/quiclink.v1.Control/AddVhost"
+	Control_Ping_FullMethodName       = "/quiclink.v1.Control/Ping"
+	Control_GetStatus_FullMethodName  = "/quiclink.v1.Control/GetStatus"
+	Control_AddVhost_FullMethodName   = "/quiclink.v1.Control/AddVhost"
+	Control_ListVhosts_FullMethodName = "/quiclink.v1.Control/ListVhosts"
 )
 
 // ControlClient is the client API for Control service.
@@ -45,6 +46,15 @@ type ControlClient interface {
 	// Anything added this way lasts only as long as the process: the name
 	// table is rebuilt from configuration at every start.
 	AddVhost(ctx context.Context, in *AddVhostRequest, opts ...grpc.CallOption) (*AddVhostResponse, error)
+	// ListVhosts reports every name this agent publishes, whether it came from
+	// the operator's configuration or was added while the agent was running.
+	//
+	// It reads and changes nothing, so it needs no consent from the agent's
+	// operator: a caller that is already authenticated may ask what a name table
+	// holds. Until this existed nothing disclosed a published name at all, so an
+	// agent's own log was the only record of one and it went away with the
+	// process.
+	ListVhosts(ctx context.Context, in *ListVhostsRequest, opts ...grpc.CallOption) (*ListVhostsResponse, error)
 }
 
 type controlClient struct {
@@ -85,6 +95,16 @@ func (c *controlClient) AddVhost(ctx context.Context, in *AddVhostRequest, opts 
 	return out, nil
 }
 
+func (c *controlClient) ListVhosts(ctx context.Context, in *ListVhostsRequest, opts ...grpc.CallOption) (*ListVhostsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVhostsResponse)
+	err := c.cc.Invoke(ctx, Control_ListVhosts_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlServer is the server API for Control service.
 // All implementations must embed UnimplementedControlServer
 // for forward compatibility.
@@ -106,6 +126,15 @@ type ControlServer interface {
 	// Anything added this way lasts only as long as the process: the name
 	// table is rebuilt from configuration at every start.
 	AddVhost(context.Context, *AddVhostRequest) (*AddVhostResponse, error)
+	// ListVhosts reports every name this agent publishes, whether it came from
+	// the operator's configuration or was added while the agent was running.
+	//
+	// It reads and changes nothing, so it needs no consent from the agent's
+	// operator: a caller that is already authenticated may ask what a name table
+	// holds. Until this existed nothing disclosed a published name at all, so an
+	// agent's own log was the only record of one and it went away with the
+	// process.
+	ListVhosts(context.Context, *ListVhostsRequest) (*ListVhostsResponse, error)
 	mustEmbedUnimplementedControlServer()
 }
 
@@ -124,6 +153,9 @@ func (UnimplementedControlServer) GetStatus(context.Context, *GetStatusRequest) 
 }
 func (UnimplementedControlServer) AddVhost(context.Context, *AddVhostRequest) (*AddVhostResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AddVhost not implemented")
+}
+func (UnimplementedControlServer) ListVhosts(context.Context, *ListVhostsRequest) (*ListVhostsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListVhosts not implemented")
 }
 func (UnimplementedControlServer) mustEmbedUnimplementedControlServer() {}
 func (UnimplementedControlServer) testEmbeddedByValue()                 {}
@@ -200,6 +232,24 @@ func _Control_AddVhost_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_ListVhosts_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVhostsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).ListVhosts(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_ListVhosts_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).ListVhosts(ctx, req.(*ListVhostsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Control_ServiceDesc is the grpc.ServiceDesc for Control service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -218,6 +268,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "AddVhost",
 			Handler:    _Control_AddVhost_Handler,
+		},
+		{
+			MethodName: "ListVhosts",
+			Handler:    _Control_ListVhosts_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

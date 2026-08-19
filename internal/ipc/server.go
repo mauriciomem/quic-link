@@ -68,6 +68,16 @@ type RoutesProvider interface {
 	RoutesJSON(ctx context.Context, server string) ([]byte, error)
 }
 
+// VhostsProvider relays a live published-name query to a named server's agent
+// and reports the result, on the same terms as RoutesProvider: raw JSON bytes so
+// this package needs no knowledge of the daemon's snapshot type, and a
+// *RoutesError when no listing can be produced right now, naming which of the
+// situations it is. The error type is shared because the ways a live relay can
+// fail do not depend on what was being asked for.
+type VhostsProvider interface {
+	VhostsJSON(ctx context.Context, server string) ([]byte, error)
+}
+
 // ExposeProvider asks a named server's agent to publish a hostname, over the
 // control plane, and reports what happened. Like RoutesProvider it returns raw
 // JSON so this package need not know the daemon's own reply type.
@@ -165,6 +175,7 @@ type Server struct {
 	status    StatusProvider
 	doctor    DoctorProvider
 	routes    RoutesProvider
+	vhosts    VhostsProvider
 	expose    ExposeProvider
 	pool      AttachPool
 	uid       int           // expected peer uid; checked at accept
@@ -463,6 +474,46 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		}
 		_ = writeResponse(conn, okResponse(body))
 
+	case "vhosts":
+		// The read counterpart of publishing a name: a live relay to the agent,
+		// with the server name travelling in req.Server as it does for the route
+		// listing. It holds its connection slot for the whole relay for the same
+		// reason — the call to the agent is bounded, so the hold is bounded too.
+		if s.vhosts == nil {
+			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer published-name requests"))
+			return
+		}
+		if req.Server == "" {
+			_ = writeResponse(conn, errorResponse(1, "vhosts: server name is required"))
+			return
+		}
+		vctx, vcancel := context.WithTimeout(ctx, routesRPCTimeout)
+		vbody, verr := s.vhosts.VhostsJSON(vctx, req.Server)
+		vcancel()
+		if verr != nil {
+			var re *RoutesError
+			if errors.As(verr, &re) {
+				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				return
+			}
+			slog.Warn("ipc: relay vhosts", "role", "daemon", "server", req.Server, "err", verr)
+			_ = writeResponse(conn, errorResponse(1, "internal error relaying published names"))
+			return
+		}
+		// Same reasoning as the route listing: JSON costs more bytes per field
+		// than the protobuf the control call was capped at, so a table that fit
+		// there can still exceed this socket's frame. Checked before the write so
+		// the caller gets a named error rather than a bare socket failure.
+		if len(vbody) > maxFrameSize-routesBodyHeadroom {
+			slog.Warn("ipc: relay vhosts: name table too large for the local socket frame",
+				"role", "daemon", "server", req.Server, "body_bytes", len(vbody))
+			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
+				"server %q publishes too many names to relay over the local socket (%d bytes as JSON); this is a local IPC limit, not a problem with the agent",
+				req.Server, len(vbody))))
+			return
+		}
+		_ = writeResponse(conn, okResponse(vbody))
+
 	case "expose":
 		// A live relay that changes something on the far side, so unlike the
 		// read above it is bounded not only in time but in what it may say:
@@ -634,3 +685,6 @@ func (s *Server) SetExpose(e ExposeProvider) { s.expose = e }
 // one is a working daemon for every other RPC — it simply refuses the
 // "routes" method with a clear message until this is called.
 func (s *Server) SetRoutes(r RoutesProvider) { s.routes = r }
+
+// SetVhosts installs the published-name relay, on the same terms as SetRoutes.
+func (s *Server) SetVhosts(v VhostsProvider) { s.vhosts = v }
