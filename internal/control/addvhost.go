@@ -226,11 +226,12 @@ func publishStatus(err error) error {
 // auditMutation records an attempt to change what this agent publishes.
 //
 // Everything that changes the agent's own behaviour is written down with who
-// asked, what they asked about, and what happened, because a change made
-// remotely is otherwise invisible: nothing this agent reports lists the names
-// it has been asked to publish, and they are gone when it restarts. Only the
-// short form of the caller's identity is recorded — enough to recognise who it
-// was, never the whole credential.
+// asked, what they asked about, and what happened. The names themselves can now
+// be listed, but that says only what is published — not who asked for it, when,
+// or what was refused. A refusal in particular exists nowhere else: it changed
+// nothing, so there is no state left over to notice it by, and it is the record
+// an operator most needs. Only the short form of the caller's identity is
+// recorded — enough to recognise who it was, never the whole credential.
 func (s server) auditMutation(method, name, verdict, reason string) {
 	attrs := []any{
 		"role", "agent",
