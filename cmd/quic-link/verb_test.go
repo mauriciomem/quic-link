@@ -57,8 +57,13 @@ func exitCode(err error) int {
 	return exitCodeForError(err)
 }
 
-// unsetQLEnv removes all QUIC_LINK_* environment variables for the duration of
-// a test so prior env state doesn't bleed in.
+// unsetQLEnvForTest removes the environment variables that name settings, so
+// prior env state does not bleed into a test.
+//
+// It deliberately does not touch the home directory, which is the other way this
+// machine's own configuration reaches a test: doing that needs t.Setenv, which
+// cannot be used by a parallel test. Tests that must see no configuration at all
+// call detachHomeForTest as well.
 func unsetQLEnvForTest(t *testing.T) {
 	t.Helper()
 	for _, e := range os.Environ() {
@@ -70,6 +75,30 @@ func unsetQLEnvForTest(t *testing.T) {
 			t.Cleanup(func() { _ = os.Setenv(kk, old) })
 		}
 	}
+}
+
+// detachHomeForTest points the home directory at an empty temporary one, so a
+// test reads no settings and no key belonging to whoever is running it.
+//
+// This is separate from the variable-clearing above because it cannot be done
+// for every caller: it uses t.Setenv, which the testing package forbids in a
+// parallel test, and some tests here are parallel. Those that depend on there
+// being no configuration call this as well.
+//
+// It matters more than it looks. Settings and the default identity are both
+// found under the invoking user's home, so a test asking for behaviour with
+// neither would silently use the developer's own and report the state of their
+// machine. Two separate groups of tests here were doing exactly that: one
+// expected a complaint about missing authorized clients and instead found a
+// working agent, and four others found a real identity key where they had
+// created none.
+//
+// The replacement is a temporary directory rather than an empty value, because
+// asking for the home directory when there is none is itself an error on some
+// platforms, and the test would then exercise that instead of its subject.
+func detachHomeForTest(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 }
 
 // ---- enabledServers helper --------------------------------------------------

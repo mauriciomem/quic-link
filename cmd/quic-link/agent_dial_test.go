@@ -52,6 +52,9 @@ func TestAgentDialAndListen_MutuallyExclusive_Exit2(t *testing.T) {
 // failure shape a previous flag addition shipped with.
 func TestAgentDialAlone_ReportsTheRealProblem(t *testing.T) {
 	unsetQLEnvForTest(t)
+	// This asserts what happens with no configuration, so it must not find the
+	// configuration of whoever is running it.
+	detachHomeForTest(t)
 
 	err := runAgentBriefly(t, "agent", "--dial", "127.0.0.1:59999")
 	if err == nil {

@@ -21,8 +21,16 @@ import (
 func reverseServerConfig(t *testing.T, listen string) string {
 	t.Helper()
 	pin := mustTestPin(t)
+	// The identity is named explicitly rather than left to the default path
+	// under the invoking user's home. Without it these tests found whatever key
+	// the machine they ran on happened to have, and reported the state of that
+	// machine's setup instead of the thing they were written to check — a
+	// developer with no key saw them fail for a reason unrelated to any of them.
+	key := writeTestKey(t)
 	return writeTestConfig(t, `
 schema = 1
+[identity]
+key_file = "`+key+`"
 [servers.rev]
 listen = "`+listen+`"
 pin    = "`+pin+`"
