@@ -29,6 +29,18 @@ var (
 	// a name that is not a hostname, a wildcard, or a port outside the
 	// usable range.
 	ErrVhostRejected = errors.New("router: the name or port was refused")
+	// ErrVhostAbsent reports that a name asked to be withdrawn is not
+	// published. Distinct from the refusal below because the remedies differ:
+	// one means there is nothing to do, the other means the name belongs to
+	// somebody else.
+	ErrVhostAbsent = errors.New("router: that name is not published")
+	// ErrVhostImmutable reports that a name exists but was not published over
+	// the control plane, so a caller there may not take it away. It is kept
+	// separate from an authorization failure on purpose: no permission an
+	// operator could grant makes their own configuration remotely removable, so
+	// telling a caller to ask for permission would send them to change a setting
+	// that cannot help.
+	ErrVhostImmutable = errors.New("router: that name was not published over this connection")
 )
 
 // Provenance records where a route table entry came from. It answers "who
@@ -207,10 +219,12 @@ func (r *Router) Vhosts() []string {
 // that; letting one in would mean a name that resolves at lookup time and only
 // then turns out to go nowhere.
 func (r *Router) AddVhost(host string, port int) error {
-	// A star would claim every name nobody has claimed yet under whatever it
-	// covers, and there is no way to withdraw a published name yet, so it
-	// could not be taken back without restarting the agent. Publishing one
-	// name is what this is for.
+	// A star would claim every name nobody has claimed yet underneath it,
+	// including names this agent's operator has not chosen yet and may want to
+	// configure later — and a configured name cannot displace one already
+	// published, so they would find their own name shadowed by a caller's
+	// pattern, at a port the caller picked. Publishing one name is what this is
+	// for.
 	if strings.HasPrefix(host, "*") {
 		return fmt.Errorf("%w: %q covers more than one name; publish a single name",
 			ErrVhostRejected, host)
@@ -279,6 +293,25 @@ type RouteDetail struct {
 	// set of values as open and not assume the three they know are all
 	// there will ever be.
 	Provenance Provenance
+}
+
+// RemoveVhost withdraws a name that was published while this agent was running.
+//
+// It reports the pattern that resumes serving the name when one covers it, so a
+// caller is never told a name was withdrawn while it still answers. Only a name
+// published over the control plane may be withdrawn; anything from the operator's
+// configuration is refused, naming what is in the way.
+func (r *Router) RemoveVhost(host string) (shadowedBy string, err error) {
+	if r.vhosts == nil {
+		return "", fmt.Errorf("%w: %q is not published here", ErrVhostAbsent, host)
+	}
+	// Validated on the way in for the same reason a publish is: a name that
+	// could never have been published cannot be present, and saying so as a
+	// rejected request is more use than reporting it as merely absent.
+	if err := ValidateVhostKey(host); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrVhostRejected, err)
+	}
+	return r.vhosts.remove(host)
 }
 
 // VhostDetail is one published name, with where it came from and where it

@@ -90,6 +90,14 @@ type ExposeProvider interface {
 	ExposeJSON(ctx context.Context, server, host string, port int) ([]byte, error)
 }
 
+// WithdrawProvider relays a request to take back a published name, on the same
+// terms as ExposeProvider: it changes the far side, so it is bounded in time and
+// in what it may say, and every way it can fail short of success arrives as a
+// *RoutesError naming which situation it is.
+type WithdrawProvider interface {
+	WithdrawJSON(ctx context.Context, server, host string) ([]byte, error)
+}
+
 // RoutesError is a RoutesProvider's way of saying "I already know exactly
 // why, and exactly what process-exit-style status that reason belongs to."
 // handleRPC relays Status and Msg verbatim when it sees this type, in place
@@ -177,6 +185,7 @@ type Server struct {
 	routes    RoutesProvider
 	vhosts    VhostsProvider
 	expose    ExposeProvider
+	withdraw  WithdrawProvider
 	pool      AttachPool
 	uid       int           // expected peer uid; checked at accept
 	connSem   chan struct{} // semaphore bounding concurrent connections
@@ -514,6 +523,38 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		}
 		_ = writeResponse(conn, okResponse(vbody))
 
+	case "withdraw":
+		// Changes the far side, so like publishing it is bounded in time and the
+		// name is checked for shape here, before anything is asked of the agent:
+		// a local mistake is answered locally.
+		if s.withdraw == nil {
+			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer withdraw requests"))
+			return
+		}
+		if req.Server == "" {
+			_ = writeResponse(conn, errorResponse(1, "withdraw: server name is required"))
+			return
+		}
+		whost := req.Meta["host"]
+		if whost == "" {
+			_ = writeResponse(conn, errorResponse(1, "withdraw: name is required"))
+			return
+		}
+		wctx, wcancel := context.WithTimeout(ctx, routesRPCTimeout)
+		wbody, werr := s.withdraw.WithdrawJSON(wctx, req.Server, whost)
+		wcancel()
+		if werr != nil {
+			var re *RoutesError
+			if errors.As(werr, &re) {
+				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				return
+			}
+			slog.Warn("ipc: relay withdraw", "role", "daemon", "server", req.Server, "err", werr)
+			_ = writeResponse(conn, errorResponse(1, "internal error withdrawing a name"))
+			return
+		}
+		_ = writeResponse(conn, okResponse(wbody))
+
 	case "expose":
 		// A live relay that changes something on the far side, so unlike the
 		// read above it is bounded not only in time but in what it may say:
@@ -679,6 +720,9 @@ func (s *Server) SetDoctor(d DoctorProvider) { s.doctor = d }
 // reason SetRoutes is: a daemon without one answers every other method
 // perfectly well and refuses this one by name.
 func (s *Server) SetExpose(e ExposeProvider) { s.expose = e }
+
+// SetWithdraw installs the name-withdrawal relay, on the same terms as SetExpose.
+func (s *Server) SetWithdraw(w WithdrawProvider) { s.withdraw = w }
 
 // SetRoutes supplies the route-relay provider. Like SetDoctor, it is set
 // separately rather than passed to the constructor because a daemon without

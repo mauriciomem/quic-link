@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Control_Ping_FullMethodName       = "/quiclink.v1.Control/Ping"
-	Control_GetStatus_FullMethodName  = "/quiclink.v1.Control/GetStatus"
-	Control_AddVhost_FullMethodName   = "/quiclink.v1.Control/AddVhost"
-	Control_ListVhosts_FullMethodName = "/quiclink.v1.Control/ListVhosts"
+	Control_Ping_FullMethodName        = "/quiclink.v1.Control/Ping"
+	Control_GetStatus_FullMethodName   = "/quiclink.v1.Control/GetStatus"
+	Control_AddVhost_FullMethodName    = "/quiclink.v1.Control/AddVhost"
+	Control_ListVhosts_FullMethodName  = "/quiclink.v1.Control/ListVhosts"
+	Control_RemoveVhost_FullMethodName = "/quiclink.v1.Control/RemoveVhost"
 )
 
 // ControlClient is the client API for Control service.
@@ -55,6 +56,16 @@ type ControlClient interface {
 	// agent's own log was the only record of one and it went away with the
 	// process.
 	ListVhosts(ctx context.Context, in *ListVhostsRequest, opts ...grpc.CallOption) (*ListVhostsResponse, error)
+	// RemoveVhost takes back a name that was published over this connection while
+	// the agent was running. It changes what the agent serves, so like publishing
+	// it is refused unless the agent's operator allowed remote changes.
+	//
+	// A name from the operator's configuration is refused whatever the setting
+	// says: no permission makes somebody's own configuration remotely removable.
+	// That refusal is deliberately not a permission error, because telling a
+	// caller to ask for permission would send them to change a setting that
+	// cannot help.
+	RemoveVhost(ctx context.Context, in *RemoveVhostRequest, opts ...grpc.CallOption) (*RemoveVhostResponse, error)
 }
 
 type controlClient struct {
@@ -105,6 +116,16 @@ func (c *controlClient) ListVhosts(ctx context.Context, in *ListVhostsRequest, o
 	return out, nil
 }
 
+func (c *controlClient) RemoveVhost(ctx context.Context, in *RemoveVhostRequest, opts ...grpc.CallOption) (*RemoveVhostResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveVhostResponse)
+	err := c.cc.Invoke(ctx, Control_RemoveVhost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlServer is the server API for Control service.
 // All implementations must embed UnimplementedControlServer
 // for forward compatibility.
@@ -135,6 +156,16 @@ type ControlServer interface {
 	// agent's own log was the only record of one and it went away with the
 	// process.
 	ListVhosts(context.Context, *ListVhostsRequest) (*ListVhostsResponse, error)
+	// RemoveVhost takes back a name that was published over this connection while
+	// the agent was running. It changes what the agent serves, so like publishing
+	// it is refused unless the agent's operator allowed remote changes.
+	//
+	// A name from the operator's configuration is refused whatever the setting
+	// says: no permission makes somebody's own configuration remotely removable.
+	// That refusal is deliberately not a permission error, because telling a
+	// caller to ask for permission would send them to change a setting that
+	// cannot help.
+	RemoveVhost(context.Context, *RemoveVhostRequest) (*RemoveVhostResponse, error)
 	mustEmbedUnimplementedControlServer()
 }
 
@@ -156,6 +187,9 @@ func (UnimplementedControlServer) AddVhost(context.Context, *AddVhostRequest) (*
 }
 func (UnimplementedControlServer) ListVhosts(context.Context, *ListVhostsRequest) (*ListVhostsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListVhosts not implemented")
+}
+func (UnimplementedControlServer) RemoveVhost(context.Context, *RemoveVhostRequest) (*RemoveVhostResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveVhost not implemented")
 }
 func (UnimplementedControlServer) mustEmbedUnimplementedControlServer() {}
 func (UnimplementedControlServer) testEmbeddedByValue()                 {}
@@ -250,6 +284,24 @@ func _Control_ListVhosts_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Control_RemoveVhost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveVhostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlServer).RemoveVhost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Control_RemoveVhost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlServer).RemoveVhost(ctx, req.(*RemoveVhostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Control_ServiceDesc is the grpc.ServiceDesc for Control service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -272,6 +324,10 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListVhosts",
 			Handler:    _Control_ListVhosts_Handler,
+		},
+		{
+			MethodName: "RemoveVhost",
+			Handler:    _Control_RemoveVhost_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

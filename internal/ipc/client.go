@@ -179,6 +179,42 @@ func (c *Client) VhostsJSON(server string) ([]byte, error) {
 	return []byte(resp.Body), nil
 }
 
+// WithdrawJSON asks the daemon to relay a request that takes a published name
+// back, on the same terms as ExposeJSON: the daemon's own already-distinguished
+// reason arrives as a *RoutesError when the request could not be carried out.
+func (c *Client) WithdrawJSON(server, host string) ([]byte, error) {
+	conn, err := c.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	req := Request{
+		SocketSchema: SocketSchema,
+		Kind:         "rpc",
+		Method:       "withdraw",
+		Server:       server,
+		Meta:         map[string]string{"host": host},
+	}
+	if err := writeRequest(conn, req); err != nil {
+		return nil, fmt.Errorf("ipc: write withdraw request: %w", err)
+	}
+
+	resp, err := readResponse(conn)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: read withdraw response: %w", err)
+	}
+
+	if resp.SocketSchema != SocketSchema {
+		return nil, fmt.Errorf("%w: daemon speaks schema %d, client expects %d",
+			ErrSchemaMismatch, resp.SocketSchema, SocketSchema)
+	}
+	if resp.Status != 0 {
+		return nil, &RoutesError{Status: resp.Status, Msg: resp.Msg}
+	}
+	return []byte(resp.Body), nil
+}
+
 // ExposeJSON asks the daemon to have a named server's agent publish host at
 // port, and returns the raw JSON bytes of the reply (the daemon's
 // ExposeSnapshot shape). Failures are reported exactly as RoutesJSON reports

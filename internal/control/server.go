@@ -41,6 +41,7 @@ type server struct {
 	routes    RouteSource
 	vhosts    VhostSource
 	names     VhostPublisher
+	withdraw  VhostWithdrawer
 	version   string
 	startedAt time.Time
 }
@@ -64,6 +65,11 @@ type ServeOpts struct {
 	// all, so its absence is reported as a refusal rather than treated as
 	// success.
 	Names VhostPublisher
+	// Withdraw supplies the ability to take a published name back. Nil means the
+	// agent cannot, and says so — the same asymmetry Names has, and for the same
+	// reason: being asked to change something and quietly not changing it has no
+	// honest answer.
+	Withdraw VhostWithdrawer
 	// Vhosts supplies the published-name table for a listing. Nil means the
 	// listing reports nothing, for the same reason Routes does: an agent that
 	// publishes no names has an honest answer, which is that there are none.
@@ -196,6 +202,7 @@ func Serve(ctx context.Context, stream transport.Stream, peer PeerIdentity, poli
 		routes:    opt.Routes,
 		vhosts:    opt.Vhosts,
 		names:     opt.Names,
+		withdraw:  opt.Withdraw,
 		version:   opt.Version,
 		startedAt: opt.StartedAt,
 	}

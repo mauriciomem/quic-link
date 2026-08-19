@@ -30,6 +30,16 @@ service Control {
   // agent's own log was the only record of one and it went away with the
   // process.
   rpc ListVhosts(ListVhostsRequest) returns (ListVhostsResponse);
+  // RemoveVhost takes back a name that was published over this connection while
+  // the agent was running. It changes what the agent serves, so like publishing
+  // it is refused unless the agent's operator allowed remote changes.
+  //
+  // A name from the operator's configuration is refused whatever the setting
+  // says: no permission makes somebody's own configuration remotely removable.
+  // That refusal is deliberately not a permission error, because telling a
+  // caller to ask for permission would send them to change a setting that
+  // cannot help.
+  rpc RemoveVhost(RemoveVhostRequest) returns (RemoveVhostResponse);
 }
 
 message PingRequest {
@@ -80,6 +90,21 @@ message AddVhostRequest {
   // names is precisely what the route table exists to prevent. A field that
   // cannot express a destination has no edge case a validator could miss.
   uint32 port = 2;
+}
+
+message RemoveVhostRequest {
+  // host is the whole name to withdraw, as it was published.
+  string host = 1;
+}
+
+message RemoveVhostResponse {
+  // host echoes the name that was withdrawn.
+  string host = 1;
+  // shadowed_by names a pattern that resumes serving the name now the exact
+  // entry is gone, and is empty when nothing does. A withdrawal can be true and
+  // still leave the name answered, at a different address, and a caller told
+  // only "done" would have no way to know.
+  string shadowed_by = 2;
 }
 
 message ListVhostsRequest {}

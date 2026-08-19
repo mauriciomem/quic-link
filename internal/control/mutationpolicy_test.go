@@ -89,6 +89,9 @@ var methodsSomebodyThoughtAbout = map[string]bool{
 	"GetStatus":  true,
 	"AddVhost":   true,
 	"ListVhosts": true,
+	// Changes the agent, so it is deliberately NOT in readOnlyMethods: it is
+	// refused unless the operator allowed remote changes.
+	"RemoveVhost": true,
 }
 
 // TestEveryServedMethodIsClassified requires that every method this agent

@@ -156,6 +156,7 @@ func Run(
 	// session pool, not on the naming layer (unlike doctor, just below).
 	srv.SetRoutes(NewRoutesProvider(pool))
 	srv.SetVhosts(NewVhostsProvider(pool))
+	srv.SetWithdraw(NewWithdrawProvider(pool))
 	// The publish relay is wired unconditionally too, even though it needs the
 	// naming layer: whether this machine is answering names is a question it
 	// answers for itself, at the moment it is asked, and refusing with that

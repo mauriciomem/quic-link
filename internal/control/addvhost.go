@@ -26,6 +26,15 @@ var (
 	// ErrNameRejected reports that the request itself was not acceptable. The
 	// remedy is to fix what was asked for.
 	ErrNameRejected = errors.New("control: the name or port was refused")
+	// ErrNameAbsent reports that a name asked to be withdrawn is not published.
+	// The remedy is nothing: the state the caller wanted already holds.
+	ErrNameAbsent = errors.New("control: that name is not published")
+	// ErrNameNotOurs reports that a name exists but was not published over the
+	// control plane, so a caller there may not take it away. Kept separate from
+	// a permission failure because no setting an operator could change makes
+	// their own configuration remotely removable — telling a caller to ask for
+	// permission would send them somewhere that cannot help.
+	ErrNameNotOurs = errors.New("control: that name was not published over this connection")
 )
 
 // VhostPublisher publishes one hostname on this agent while it runs.
@@ -37,6 +46,20 @@ var (
 // destination has no edge case a validator could miss.
 type VhostPublisher interface {
 	AddVhost(host string, port int) error
+}
+
+// VhostWithdrawer takes back a name that was published over this connection.
+//
+// It is a separate interface from the publisher so that a caller supplying one
+// is not forced to supply the other, and so a test can provide either alone. The
+// two are withheld together in practice, because an agent that may not be added
+// to has nothing a caller could take away.
+//
+// The returned string names a pattern that resumes serving the name once the
+// exact entry is gone, and is empty when nothing does. Reporting it is what
+// keeps a successful withdrawal from implying more than happened.
+type VhostWithdrawer interface {
+	RemoveVhost(host string) (shadowedBy string, err error)
 }
 
 // changesTheAgent reports whether a method changes what this agent does, as
@@ -109,7 +132,10 @@ func auditName(s string) string {
 // reports nothing rather than guessing. A missing name in a log line is a
 // question; a wrong one is a wrong answer.
 func auditedName(req any) string {
-	if r, ok := req.(*controlpb.AddVhostRequest); ok {
+	switch r := req.(type) {
+	case *controlpb.AddVhostRequest:
+		return auditName(r.GetHost())
+	case *controlpb.RemoveVhostRequest:
 		return auditName(r.GetHost())
 	}
 	return ""

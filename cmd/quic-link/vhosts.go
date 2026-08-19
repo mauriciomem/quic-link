@@ -112,7 +112,122 @@ holds is not the same as changing it, so no permission is needed for it.`,
 		},
 	}
 	cmd.Flags().BoolVar(&jsonFlag, "json", false, "print the machine-readable shape")
+	cmd.AddCommand(newVhostsRmCmd(a))
 	return cmd
+}
+
+func newVhostsRmCmd(a *app) *cobra.Command {
+	var jsonFlag bool
+	cmd := &cobra.Command{
+		Use:   "rm NAME [SERVER]",
+		Short: "Take back a name that was published while a server was running",
+		Long: `Withdraw a hostname that was published on a running agent.
+
+Only a name published this way can be withdrawn. A name from the agent's own
+configuration belongs to whoever runs that agent, and no setting makes it
+removable from here — the refusal says which kind is in the way.
+
+Withdrawing changes what the agent serves, so like publishing it is refused
+unless that agent's operator allowed remote changes.
+
+If a pattern in the agent's configuration covers the name, the name still
+resolves after the exact entry is gone, at whatever address that pattern points
+to. When that happens it is reported, because a withdrawal that leaves a name
+answered is not what "withdrawn" sounds like.
+
+SERVER may be omitted when exactly one server is enabled.
+
+--json prints the frozen machine-readable shape to stdout (CONTRACT):
+  {"schema":1,"server":"...","host":"...","shadowed_by":"*..."}
+shadowed_by is absent unless a pattern took over.`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runVhostsRm(cmd, a, args, jsonFlag)
+		},
+	}
+	cmd.Flags().BoolVar(&jsonFlag, "json", false, "print the machine-readable shape")
+	return cmd
+}
+
+// runVhostsRm relays a withdrawal through the daemon. Every way it can fail has
+// already been given its message and status by the daemon's provider; both are
+// relayed rather than re-worded here.
+func runVhostsRm(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error {
+	host := args[0]
+	if host == "" {
+		return usageErrorf("a name to withdraw is required")
+	}
+
+	serverName, err := autoSelectServer(a, args[1:])
+	if err != nil {
+		return err
+	}
+	if err := requireKnownServer(a, serverName); err != nil {
+		return err
+	}
+
+	sock, err := daemonSocketPath(a.cfg)
+	if err != nil {
+		return fmt.Errorf("resolve socket path: %w", err)
+	}
+
+	raw, err := ipc.NewClient(sock).WithdrawJSON(serverName, host)
+	if err != nil {
+		if errors.Is(err, ipc.ErrDaemonAbsent) {
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"daemon is not running; start it with: quic-link daemon")
+			return err
+		}
+		if errors.Is(err, ipc.ErrSchemaMismatch) {
+			fmt.Fprintln(cmd.ErrOrStderr(),
+				"daemon is a stale version; restart it with: quic-link daemon")
+			return err
+		}
+		var re *ipc.RoutesError
+		if errors.As(err, &re) {
+			fmt.Fprintln(cmd.ErrOrStderr(), re.Msg)
+			return &errFinalExitCode{code: int(re.Status), msg: re.Msg}
+		}
+		return fmt.Errorf("withdraw: %w", err)
+	}
+
+	var snap daemon.WithdrawSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return fmt.Errorf("parse withdraw response: %w", err)
+	}
+
+	if jsonFlag {
+		out := withdrawJSONOutput{
+			Schema:     snap.Schema,
+			Server:     snap.Server,
+			Host:       sanitizeAgentString(snap.Host),
+			ShadowedBy: sanitizeAgentString(snap.ShadowedBy),
+		}
+		b, merr := json.Marshal(out)
+		if merr != nil {
+			return fmt.Errorf("marshal withdraw output: %w", merr)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\n", b)
+		return nil
+	}
+
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "withdrawn: %s\n", sanitizeAgentString(snap.Host))
+	if snap.ShadowedBy != "" {
+		// The name is gone and still answers. Saying only "withdrawn" here would
+		// be true and would still mislead.
+		fmt.Fprintf(w, "  still answered by %s in that agent's configuration\n",
+			sanitizeAgentString(snap.ShadowedBy))
+	}
+	return nil
+}
+
+// withdrawJSONOutput is the --json shape, carrying only sanitised fields.
+type withdrawJSONOutput struct {
+	Schema     int    `json:"schema"`
+	Server     string `json:"server"`
+	Host       string `json:"host"`
+	ShadowedBy string `json:"shadowed_by,omitempty"`
 }
 
 // runVhosts relays a listing request through the daemon and prints the result.

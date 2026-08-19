@@ -91,6 +91,9 @@ type controlPlane struct {
 	// names publishes a hostname while the agent runs. A nil value means this
 	// agent cannot, and is what the operator's default produces.
 	names control.VhostPublisher
+	// withdraw sits beside names and not beside the readers above: taking a
+	// name back changes what the agent serves.
+	withdraw control.VhostWithdrawer
 }
 
 // controlRouteSource adapts *router.Router to control.RouteSource,
@@ -151,6 +154,36 @@ type controlVhostPublisher struct {
 
 func (p controlVhostPublisher) AddVhost(host string, port int) error {
 	return publishError(p.rtr.AddVhost(host, port))
+}
+
+// controlVhostWithdrawer adapts the route table to control.VhostWithdrawer, at
+// the same boundary and for the same reason as the publisher above.
+type controlVhostWithdrawer struct {
+	rtr *router.Router
+}
+
+func (w controlVhostWithdrawer) RemoveVhost(host string) (string, error) {
+	shadowedBy, err := w.rtr.RemoveVhost(host)
+	return shadowedBy, withdrawError(err)
+}
+
+// withdrawError translates a withdrawal failure into the vocabulary a
+// control-plane caller is answered in, on the same terms as publishError: the
+// condition is taken from the error's structure rather than from its words.
+func withdrawError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, router.ErrVhostAbsent):
+		return fmt.Errorf("%w%s", control.ErrNameAbsent, explanationOf(err, router.ErrVhostAbsent))
+	case errors.Is(err, router.ErrVhostImmutable):
+		return fmt.Errorf("%w%s", control.ErrNameNotOurs, explanationOf(err, router.ErrVhostImmutable))
+	case errors.Is(err, router.ErrVhostRejected):
+		return fmt.Errorf("%w%s", control.ErrNameRejected, explanationOf(err, router.ErrVhostRejected))
+	default:
+		return err
+	}
 }
 
 // publishError translates a route-table failure into the vocabulary a
@@ -321,6 +354,9 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 		// were wrong.
 		if opt.AllowRemoteRouteMutation {
 			cp.names = controlVhostPublisher{rtr: rtr}
+			// Withheld under the same condition, because an agent that may not
+			// be added to has nothing a caller could take away.
+			cp.withdraw = controlVhostWithdrawer{rtr: rtr}
 			if opt.ControlNames != nil {
 				cp.names = opt.ControlNames
 			}
@@ -499,6 +535,7 @@ func serveControl(
 		Routes:    cp.routes,
 		Vhosts:    cp.vhosts,
 		Names:     cp.names,
+		Withdraw:  cp.withdraw,
 		Version:   opt.Version,
 		StartedAt: opt.StartedAt,
 	}

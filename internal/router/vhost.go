@@ -147,12 +147,15 @@ func newVhosts(entries map[string]string) (*vhosts, error) {
 // add publishes one already-validated entry.
 //
 // It refuses to displace anything already there. Repeating a request that has
-// already been carried out is not a refusal though: if the name is present,
-// was published this same way, and points at the same place, the caller asked
-// for a state that already holds, so it is told yes and nothing changes. That
-// makes publishing a name safe to retry, which matters because there is no way
-// to unpublish one yet — without it, a repeated command would be a dead end
-// with an agent restart as the only way out.
+// already been carried out is not a refusal though: if the name is present, was
+// published this same way, and points at the same place, the caller asked for a
+// state that already holds, so it is told yes and nothing changes.
+//
+// That makes publishing safe to retry, which is what a caller needs when a
+// request may have succeeded without its reply arriving. Such a call is bounded
+// by a short deadline and the connection can drop inside it, so a caller cannot
+// always tell a lost reply from a request that never ran. Retrying must not turn
+// a success into an error.
 //
 // Anything else is refused and says which kind of entry is in the way: a
 // caller must not be able to take over a name the operator configured, or one
@@ -169,6 +172,55 @@ func (v *vhosts) add(key string, r route) error {
 	}
 	v.exact[key] = r
 	return nil
+}
+
+// remove withdraws a name that was published while the agent was running, and
+// reports the pattern that takes over serving it, if one does.
+//
+// The check and the deletion happen under one lock. Reading the entry, deciding
+// it is safe to remove, releasing, and then deleting would leave a window in
+// which what was checked is not what is deleted.
+//
+// Only a name published this way may be withdrawn. One from the operator's
+// configuration is theirs, and a caller that could take it away over the network
+// could silently stop serving something the operator set up. The refusal says
+// which kind is in the way rather than only that it refused.
+//
+// The second return value is the reason a withdrawal can be true and still not
+// leave the name unanswered: a pattern in the configuration may cover it, and
+// with the exact entry gone that pattern resumes serving the name, at whatever
+// address it points to. Saying so is the difference between reporting what
+// happened and implying something that did not.
+func (v *vhosts) remove(key string) (shadowedBy string, err error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	existing, ok := v.exact[key]
+	if !ok {
+		return "", fmt.Errorf("%w: %q is not published here", ErrVhostAbsent, key)
+	}
+	if existing.prov != ProvenanceRuntime {
+		return "", fmt.Errorf("%w: %q is %s and points at %s",
+			ErrVhostImmutable, key, existing.prov.describe(), existing.raw)
+	}
+	delete(v.exact, key)
+
+	// Ask the same question a request would ask, now that the entry is gone.
+	// A pattern answering here means the name still resolves.
+	rest := key
+	for {
+		i := strings.Index(rest, ".")
+		if i < 0 {
+			return "", nil
+		}
+		rest = rest[i+1:]
+		if rest == "" {
+			return "", nil
+		}
+		if _, covered := v.wildcard[rest]; covered {
+			return "*." + rest, nil
+		}
+	}
 }
 
 // resolve finds the entry for a hostname: an exact name first, then the most
