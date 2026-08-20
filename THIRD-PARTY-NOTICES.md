@@ -56,7 +56,8 @@ files were modified. **quic-link modifies none of these modules.**
 
 | Module | Version | Ships a `NOTICE` file? |
 |---|---|---|
-| `google.golang.org/grpc` | v1.82.0 | **Yes — `NOTICE.txt`** |
+| `google.golang.org/grpc` | v1.82.1 | **Yes — `NOTICE.txt`** |
+| `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260414002931-afd174a4e478 | No |
 | `github.com/spf13/cobra` | v1.10.2 | No |
 | `github.com/inconshreveable/mousetrap` | v1.1.0 | No |
 
@@ -91,6 +92,16 @@ licences actually attach to. It deliberately does not enumerate the wider module
 (`go list -m all`), which includes modules used only for testing or tooling and never shipped.
 
 ## Changelog
+
+- 2026-08-21: **`google.golang.org/genproto/googleapis/rpc` added; it was missing.** It is a
+  transitive requirement of `google.golang.org/grpc` and is genuinely in the build closure
+  (`grpc/status` and `grpc/internal/status` import it), so the obligation applied from the day
+  grpc did. It is Apache-2.0 and ships no `NOTICE` file, so §4(d) is not engaged. Found by
+  comparing the closure against this file's own tables rather than by reading them, which is
+  the check worth automating: this file states that a dependency added without updating it is a
+  licence violation, and it drifted anyway. Also updated `google.golang.org/grpc` from v1.82.0
+  to **v1.82.1**, which a security fix moved in the same change — a reminder that a version
+  bump makes this file stale even when the module set does not change.
 
 - 2026-08-13: Created. The obligation is **pre-existing** — it arrived with the first shipped
   binary embedding these libraries, not with any later decision — and had not previously been
