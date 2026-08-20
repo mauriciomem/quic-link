@@ -1,5 +1,19 @@
 //go:build darwin || freebsd
 
+// This file must not be named with an operating-system suffix. Go treats a
+// trailing _darwin, _freebsd and so on in a filename as a build constraint in
+// its own right and combines it with the one above using AND, so calling this
+// peercred_darwin.go silently narrowed it to darwin alone: FreeBSD matched the
+// line above, lost on the filename, was excluded from the fallback file by its
+// own constraint, and ended up with no implementation at all. The package then
+// failed to compile there, which is how the mistake was eventually found.
+//
+// Both platforms are served by the same code because they share the mechanism:
+// the LOCAL_PEERCRED socket option under SOL_LOCAL, returning an Xucred whose
+// first useful field is the peer's effective uid. Neither OpenBSD nor NetBSD
+// has any of the three, so they are deliberately not listed and fall through to
+// the refusing fallback.
+
 package ipc
 
 import (
