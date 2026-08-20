@@ -303,19 +303,21 @@ type RouteDetail struct {
 
 // RemoveVhost withdraws a name that was published while this agent was running.
 //
-// It reports the pattern that resumes serving the name when one covers it, so a
-// caller is never told a name was withdrawn while it still answers. Only a name
-// published over the control plane may be withdrawn; anything from the operator's
-// configuration is refused, naming what is in the way.
-func (r *Router) RemoveVhost(host string) (shadowedBy string, err error) {
+// It reports the pattern that resumes serving the name when one covers it, and
+// the address that pattern points at, so a caller is never told a name was
+// withdrawn while it still answers, and never told it still answers without
+// being told where. The two are empty together. Only a name published over the
+// control plane may be withdrawn; anything from the operator's configuration is
+// refused, naming what is in the way.
+func (r *Router) RemoveVhost(host string) (shadowedBy, shadowedByAddress string, err error) {
 	if r.vhosts == nil {
-		return "", fmt.Errorf("%w: %q is not published here", ErrVhostAbsent, host)
+		return "", "", fmt.Errorf("%w: %q is not published here", ErrVhostAbsent, host)
 	}
 	// Validated on the way in for the same reason a publish is: a name that
 	// could never have been published cannot be present, and saying so as a
 	// rejected request is more use than reporting it as merely absent.
 	if err := ValidateVhostKey(host); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrVhostRejected, err)
+		return "", "", fmt.Errorf("%w: %v", ErrVhostRejected, err)
 	}
 	return r.vhosts.remove(host)
 }

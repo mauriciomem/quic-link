@@ -162,9 +162,9 @@ type controlVhostWithdrawer struct {
 	rtr *router.Router
 }
 
-func (w controlVhostWithdrawer) RemoveVhost(host string) (string, error) {
-	shadowedBy, err := w.rtr.RemoveVhost(host)
-	return shadowedBy, withdrawError(err)
+func (w controlVhostWithdrawer) RemoveVhost(host string) (string, string, error) {
+	shadowedBy, shadowedByAddress, err := w.rtr.RemoveVhost(host)
+	return shadowedBy, shadowedByAddress, withdrawError(err)
 }
 
 // withdrawError translates a withdrawal failure into the vocabulary a

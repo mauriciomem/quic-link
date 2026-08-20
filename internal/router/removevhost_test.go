@@ -22,12 +22,18 @@ func TestRemoveVhostWithdrawsANamePublishedWhileRunning(t *testing.T) {
 		t.Fatalf("AddVhost: %v", err)
 	}
 
-	shadowedBy, err := r.RemoveVhost("rt.s.internal")
+	shadowedBy, shadowedByAddress, err := r.RemoveVhost("rt.s.internal")
 	if err != nil {
 		t.Fatalf("RemoveVhost: %v", err)
 	}
 	if shadowedBy != "" {
 		t.Errorf("nothing covers the name, but a pattern was reported: %q", shadowedBy)
+	}
+	// The address is empty whenever the pattern is. An address reported without
+	// a pattern would tell a caller the name is answered somewhere while naming
+	// nothing that answers it.
+	if shadowedByAddress != "" {
+		t.Errorf("nothing covers the name, but an address was reported: %q", shadowedByAddress)
 	}
 	for _, d := range r.VhostDetails() {
 		if d.Name == "rt.s.internal" {
@@ -46,7 +52,7 @@ func TestRemoveVhostRefusesAConfiguredNameAndSaysWhich(t *testing.T) {
 		t.Fatalf("NewWithVhosts: %v", err)
 	}
 
-	_, err = r.RemoveVhost("cfg.s.internal")
+	_, _, err = r.RemoveVhost("cfg.s.internal")
 	if err == nil {
 		t.Fatal("a name from the agent's configuration was withdrawn by a caller")
 	}
@@ -78,7 +84,7 @@ func TestRemoveVhostSaysWhenThereWasNothingToWithdraw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = r.RemoveVhost("nope.s.internal")
+	_, _, err = r.RemoveVhost("nope.s.internal")
 	if !errors.Is(err, router.ErrVhostAbsent) {
 		t.Errorf("withdrawing a name nothing published reports %v, want the absent case", err)
 	}
@@ -100,13 +106,86 @@ func TestRemoveVhostReportsAPatternThatResumesServing(t *testing.T) {
 		t.Fatalf("AddVhost: %v", err)
 	}
 
-	shadowedBy, err := r.RemoveVhost("rt.s.internal")
+	shadowedBy, shadowedByAddress, err := r.RemoveVhost("rt.s.internal")
 	if err != nil {
 		t.Fatalf("RemoveVhost: %v", err)
 	}
 	if shadowedBy != "*.s.internal" {
 		t.Errorf("the pattern that resumed serving the name was reported as %q, want %q; a "+
 			"withdrawal that leaves the name answered has to say so", shadowedBy, "*.s.internal")
+	}
+	// And where it now points. The pattern's address is almost always a
+	// different service than the entry just withdrawn, so "still answered" on
+	// its own raises the caller's next question without answering it.
+	if shadowedByAddress != "tcp://127.0.0.1:3000" {
+		t.Errorf("the address the pattern points at was reported as %q, want %q; naming the "+
+			"pattern without its destination stops one question short",
+			shadowedByAddress, "tcp://127.0.0.1:3000")
+	}
+}
+
+// TestTheShadowAddressIsTheConfiguredFormNotARebuiltOne pins the rule that keeps
+// this surface and the listing agreeing: both report the address as the operator
+// wrote it. A reassembled form would render the same entry two ways, and a
+// reader comparing them would think the name had moved.
+func TestTheShadowAddressIsTheConfiguredFormNotARebuiltOne(t *testing.T) {
+	// A form nothing would reproduce by joining a parsed network and address
+	// back together: a named host rather than a literal, and no default port
+	// anywhere to reinsert.
+	const configured = "tcp://localhost:8080"
+	r, err := router.NewWithVhosts(nil, map[string]string{"*.s.internal": configured}, nil)
+	if err != nil {
+		t.Fatalf("NewWithVhosts: %v", err)
+	}
+	if err := r.AddVhost("rt.s.internal", 4000); err != nil {
+		t.Fatalf("AddVhost: %v", err)
+	}
+
+	_, shadowedByAddress, err := r.RemoveVhost("rt.s.internal")
+	if err != nil {
+		t.Fatalf("RemoveVhost: %v", err)
+	}
+	if shadowedByAddress != configured {
+		t.Errorf("the shadow address is %q, want the configured form %q", shadowedByAddress, configured)
+	}
+
+	// And it is the same string the listing reports for that entry, which is the
+	// property worth having rather than the literal above.
+	var listed string
+	for _, d := range r.VhostDetails() {
+		if d.Name == "*.s.internal" {
+			listed = d.Address
+		}
+	}
+	if listed != shadowedByAddress {
+		t.Errorf("the withdrawal reports %q for the pattern and the listing reports %q; two "+
+			"surfaces describing one entry differently is how a reader concludes it moved",
+			shadowedByAddress, listed)
+	}
+}
+
+// TestTheShadowAddressBelongsToTheCoveringPatternNotTheWithdrawnName is the
+// mistake this is one line away from: reporting the address of the entry that
+// was just deleted. That reads plausibly — it is an address, about the right
+// name, at the right moment — and it tells the caller the name still answers
+// exactly where it used to, which is the opposite of what happened.
+func TestTheShadowAddressBelongsToTheCoveringPatternNotTheWithdrawnName(t *testing.T) {
+	r, err := router.NewWithVhosts(nil, map[string]string{"*.s.internal": "tcp://127.0.0.1:3000"}, nil)
+	if err != nil {
+		t.Fatalf("NewWithVhosts: %v", err)
+	}
+	// Deliberately a different port from the pattern's.
+	if err := r.AddVhost("rt.s.internal", 4000); err != nil {
+		t.Fatalf("AddVhost: %v", err)
+	}
+
+	_, shadowedByAddress, err := r.RemoveVhost("rt.s.internal")
+	if err != nil {
+		t.Fatalf("RemoveVhost: %v", err)
+	}
+	if strings.Contains(shadowedByAddress, "4000") {
+		t.Errorf("the reported address %q is the withdrawn entry's own, so the caller is told "+
+			"the name still answers where it always did", shadowedByAddress)
 	}
 }
 
@@ -118,7 +197,7 @@ func TestRemoveVhostNeverTakesAPattern(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWithVhosts: %v", err)
 	}
-	if _, err := r.RemoveVhost("*.s.internal"); err == nil {
+	if _, _, err := r.RemoveVhost("*.s.internal"); err == nil {
 		t.Fatal("a pattern was withdrawn by a caller")
 	}
 	var still bool
@@ -146,7 +225,7 @@ func TestWithdrawingAnExactNameLeavesPatternsAlone(t *testing.T) {
 		t.Fatalf("AddVhost: %v", err)
 	}
 
-	if _, err := r.RemoveVhost("rt.s.internal"); err != nil {
+	if _, _, err := r.RemoveVhost("rt.s.internal"); err != nil {
 		t.Fatalf("RemoveVhost: %v", err)
 	}
 
@@ -189,7 +268,7 @@ func TestRemoveVhostChecksAndDeletesUnderOneLock(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
 			_ = r.AddVhost("churn.s.internal", 4000)
-			_, _ = r.RemoveVhost("churn.s.internal")
+			_, _, _ = r.RemoveVhost("churn.s.internal")
 		}
 	}()
 	wg.Wait()

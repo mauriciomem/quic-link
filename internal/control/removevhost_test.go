@@ -18,14 +18,15 @@ import (
 )
 
 type fakeWithdrawer struct {
-	shadowedBy string
-	err        error
-	called     string
+	shadowedBy        string
+	shadowedByAddress string
+	err               error
+	called            string
 }
 
-func (f *fakeWithdrawer) RemoveVhost(host string) (string, error) {
+func (f *fakeWithdrawer) RemoveVhost(host string) (string, string, error) {
 	f.called = host
-	return f.shadowedBy, f.err
+	return f.shadowedBy, f.shadowedByAddress, f.err
 }
 
 func TestWithdrawingNeedsTheOperatorsConsent(t *testing.T) {
@@ -55,7 +56,7 @@ func TestWithdrawingWithoutTheCapabilityIsUnimplemented(t *testing.T) {
 }
 
 func TestWithdrawingReportsThePatternThatResumesServing(t *testing.T) {
-	f := &fakeWithdrawer{shadowedBy: "*.s.internal"}
+	f := &fakeWithdrawer{shadowedBy: "*.s.internal", shadowedByAddress: "tcp://127.0.0.1:3000"}
 	s := server{withdraw: f}
 
 	resp, err := s.RemoveVhost(context.Background(), &controlpb.RemoveVhostRequest{Host: "rt.s.internal"})
@@ -67,6 +68,29 @@ func TestWithdrawingReportsThePatternThatResumesServing(t *testing.T) {
 	}
 	if resp.GetShadowedBy() != "*.s.internal" {
 		t.Errorf("the pattern that took over is reported as %q", resp.GetShadowedBy())
+	}
+	// The address the withdrawer supplied has to reach the reply. A handler that
+	// builds it from the pattern alone would drop this silently: the reply still
+	// says the name answers, and says nothing about where.
+	if resp.GetShadowedByAddress() != "tcp://127.0.0.1:3000" {
+		t.Errorf("the address the pattern points at is reported as %q, want %q",
+			resp.GetShadowedByAddress(), "tcp://127.0.0.1:3000")
+	}
+}
+
+// TestNothingTakingOverLeavesBothShadowFieldsEmpty is the pair's other half. The
+// two are one answer, so a reply carrying an address with no pattern — or the
+// reverse — is a shape no reader is built to interpret.
+func TestNothingTakingOverLeavesBothShadowFieldsEmpty(t *testing.T) {
+	s := server{withdraw: &fakeWithdrawer{}}
+
+	resp, err := s.RemoveVhost(context.Background(), &controlpb.RemoveVhostRequest{Host: "rt.s.internal"})
+	if err != nil {
+		t.Fatalf("RemoveVhost: %v", err)
+	}
+	if resp.GetShadowedBy() != "" || resp.GetShadowedByAddress() != "" {
+		t.Errorf("nothing took over, but the reply names pattern %q at address %q",
+			resp.GetShadowedBy(), resp.GetShadowedByAddress())
 	}
 }
 

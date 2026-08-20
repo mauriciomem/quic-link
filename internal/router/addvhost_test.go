@@ -68,7 +68,7 @@ func TestAddVhost_ConcurrentWithLiveLookups(t *testing.T) {
 		if i < MaxVhosts-2 {
 			continue
 		}
-		if _, err := r.RemoveVhost(host); err != nil {
+		if _, _, err := r.RemoveVhost(host); err != nil {
 			t.Fatalf("RemoveVhost(%d): %v", i, err)
 		}
 	}

@@ -59,11 +59,20 @@ type VhostPublisher interface {
 // two are withheld together in practice, because an agent that may not be added
 // to has nothing a caller could take away.
 //
-// The returned string names a pattern that resumes serving the name once the
-// exact entry is gone, and is empty when nothing does. Reporting it is what
-// keeps a successful withdrawal from implying more than happened.
+// The first returned string names a pattern that resumes serving the name once
+// the exact entry is gone, and the second is the address that pattern points
+// at. Both are empty when nothing takes over. Reporting them is what keeps a
+// successful withdrawal from implying more than happened — and reporting the
+// address alongside the pattern is what keeps it from raising a question it
+// then refuses to answer, since where the name is served now is what a caller
+// asks next.
+//
+// The address is supplied here rather than fetched by a follow-up listing
+// because whatever implements this holds the covering entry at the moment of
+// the deletion, so what it returns describes the table as it then is. A second
+// call is a second round trip that could reach a different process.
 type VhostWithdrawer interface {
-	RemoveVhost(host string) (shadowedBy string, err error)
+	RemoveVhost(host string) (shadowedBy, shadowedByAddress string, err error)
 }
 
 // changesTheAgent reports whether a method changes what this agent does, as

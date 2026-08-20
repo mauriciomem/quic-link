@@ -24,6 +24,12 @@ type WithdrawSnapshot struct {
 	// and still leave the name answered, at a different address; a caller told
 	// only that it succeeded would have no way to find that out.
 	ShadowedBy string `json:"shadowed_by,omitempty"`
+	// ShadowedByAddress is where that pattern points, and is absent exactly when
+	// ShadowedBy is. The two are one answer in two fields: saying the name is
+	// still answered without saying where raises the caller's next question and
+	// then declines to answer it, and the address usually belongs to a different
+	// service than the entry that was just removed.
+	ShadowedByAddress string `json:"shadowed_by_address,omitempty"`
 }
 
 type withdrawProvider struct {
@@ -60,10 +66,11 @@ func (p *withdrawProvider) WithdrawJSON(ctx context.Context, server, host string
 	}
 
 	snap := WithdrawSnapshot{
-		Schema:     1,
-		Server:     server,
-		Host:       resp.GetHost(),
-		ShadowedBy: resp.GetShadowedBy(),
+		Schema:            1,
+		Server:            server,
+		Host:              resp.GetHost(),
+		ShadowedBy:        resp.GetShadowedBy(),
+		ShadowedByAddress: resp.GetShadowedByAddress(),
 	}
 	b, err := json.Marshal(snap)
 	if err != nil {

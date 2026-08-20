@@ -105,6 +105,20 @@ message RemoveVhostResponse {
   // still leave the name answered, at a different address, and a caller told
   // only "done" would have no way to know.
   string shadowed_by = 2;
+  // shadowed_by_address is where that pattern points, and is empty exactly when
+  // shadowed_by is. Naming the pattern without its destination stops one
+  // question short of the one a reader has next, which is where the name is now
+  // answered — usually a different service than the entry that was removed.
+  //
+  // It is carried here rather than left to a follow-up listing because the
+  // covering entry is already in hand at the moment of the deletion, so this
+  // describes the table as it now is. A second call is a second round trip that
+  // may reach a different process and answer about a different table.
+  //
+  // It is the address as the agent's operator configured it, not one rebuilt
+  // from its parsed parts, so it matches the listing's address for the same
+  // entry by rule rather than by two renderers agreeing on accident.
+  string shadowed_by_address = 3;
 }
 
 message ListVhostsRequest {}

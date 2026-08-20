@@ -28,14 +28,22 @@ func (s server) RemoveVhost(_ context.Context, req *controlpb.RemoveVhostRequest
 	}
 
 	host := req.GetHost()
-	shadowedBy, err := s.withdraw.RemoveVhost(host)
+	shadowedBy, shadowedByAddress, err := s.withdraw.RemoveVhost(host)
 	if err != nil {
 		s.auditMutation("RemoveVhost", auditName(host), verdictRefused, withdrawReason(err))
 		return nil, withdrawStatus(err)
 	}
 
 	s.auditMutation("RemoveVhost", auditName(host), verdictAllowed, "")
-	return &controlpb.RemoveVhostResponse{Host: host, ShadowedBy: shadowedBy}, nil
+	// The address travels with the pattern rather than being left for a
+	// follow-up listing. It costs this reply one field, and it means the caller
+	// is told where the name is answered now by the same answer that told them
+	// it still is.
+	return &controlpb.RemoveVhostResponse{
+		Host:              host,
+		ShadowedBy:        shadowedBy,
+		ShadowedByAddress: shadowedByAddress,
+	}, nil
 }
 
 // withdrawReason names why a withdrawal was refused, from a fixed vocabulary, so

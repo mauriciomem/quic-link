@@ -11,10 +11,12 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/mauriciomem/quic-link/internal/control"
+	controlpb "github.com/mauriciomem/quic-link/internal/control/proto"
 	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 )
@@ -106,6 +108,85 @@ func TestASuccessfulWithdrawalSaysWhenTheNameStillAnswers(t *testing.T) {
 	// a reader should not have to distinguish "" from "no pattern".
 	if strings.Contains(string(raw), "shadowed_by") {
 		t.Errorf("the document names a pattern when none took over: %s", raw)
+	}
+	// Same for the address, and asserted on the bytes for the same reason: a
+	// struct field reads as "" whether the key was absent or present-and-empty,
+	// so decoding first would hide exactly the difference under test. The
+	// substring above happens to cover this one, which is why it is spelled out
+	// separately — a later rename of either key must not silently stop checking
+	// the other.
+	if strings.Contains(string(raw), "shadowed_by_address") {
+		t.Errorf("the document names an address when nothing took over: %s", raw)
+	}
+}
+
+// shadowingAgentServer answers a withdrawal the way an agent does when a
+// configured pattern covers the name that was just taken back.
+type shadowingAgentServer struct {
+	controlpb.UnimplementedControlServer
+}
+
+func (shadowingAgentServer) RemoveVhost(_ context.Context, req *controlpb.RemoveVhostRequest) (*controlpb.RemoveVhostResponse, error) {
+	return &controlpb.RemoveVhostResponse{
+		Host:              req.GetHost(),
+		ShadowedBy:        "*.srv.internal",
+		ShadowedByAddress: "tcp://127.0.0.1:3000",
+	}, nil
+}
+
+// newShadowingAgentClient builds a real *control.Client against a real gRPC
+// server that reports a pattern and its address, using the same in-memory stream
+// pairing the stale-agent client in routes_test.go does.
+func newShadowingAgentClient(t *testing.T) *control.Client {
+	t.Helper()
+	cliStream, srvStream := pairControlStreams(t, "withdraw-shadow")
+
+	gs := grpc.NewServer()
+	controlpb.RegisterControlServer(gs, shadowingAgentServer{})
+	ln := control.NewSingleConnListener(control.NewConn(srvStream))
+	go gs.Serve(ln) //nolint:errcheck
+	t.Cleanup(gs.Stop)
+
+	client, err := control.NewClient(cliStream)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	t.Cleanup(func() { client.Close() })
+	return client
+}
+
+// TestWithdrawJSONCarriesWhereTheNameIsAnsweredNow drives the provider against a
+// real client and a real reply, so the field has to be read off the reply rather
+// than merely exist on the document type. A provider that declared the field and
+// never populated it would satisfy a struct-level test and produce a document
+// that says the name still answers and never says where.
+func TestWithdrawJSONCarriesWhereTheNameIsAnsweredNow(t *testing.T) {
+	agent := newShadowingAgentClient(t)
+	p := daemon.NewWithdrawProvider(&fakeRoutesPool{
+		state: "connected",
+		controlFn: func(ctx context.Context, fn func(context.Context, *control.Client) error) error {
+			return fn(ctx, agent)
+		},
+	})
+
+	raw, err := p.WithdrawJSON(context.Background(), "srv", "n.srv.internal")
+	if err != nil {
+		t.Fatalf("WithdrawJSON: %v", err)
+	}
+	var snap daemon.WithdrawSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if snap.ShadowedBy != "*.srv.internal" {
+		t.Errorf("the pattern that took over is reported as %q", snap.ShadowedBy)
+	}
+	if snap.ShadowedByAddress != "tcp://127.0.0.1:3000" {
+		t.Errorf("the address the pattern points at is reported as %q, want %q",
+			snap.ShadowedByAddress, "tcp://127.0.0.1:3000")
+	}
+	// The key a script reads, not just the Go field name behind it.
+	if !strings.Contains(string(raw), `"shadowed_by_address":"tcp://127.0.0.1:3000"`) {
+		t.Errorf("the document does not carry the agreed key and value: %s", raw)
 	}
 }
 

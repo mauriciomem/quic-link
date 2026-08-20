@@ -242,16 +242,30 @@ func (v *vhosts) add(key string, r route) error {
 // and with the exact entry gone that pattern resumes serving the name, at
 // whatever address it points to. Saying so is the difference between reporting
 // what happened and implying something that did not.
-func (v *vhosts) remove(key string) (shadowedBy string, err error) {
+//
+// The pattern is reported with the address it points at, because naming the
+// pattern alone stops one question short of the one a caller has next, which is
+// where the name is answered now. The address costs nothing to report: the
+// covering entry is already in hand here, inside the lock the deletion was made
+// under, so the answer describes the table as it now is. Making the caller ask
+// again would be a second lookup that could see a different table.
+//
+// The address is the raw form the entry was configured with rather than one
+// rebuilt from its parsed parts, so it is the same string the listing reports
+// for that entry — by rule, not by two renderers happening to agree.
+//
+// Both are empty together. A pattern with no address, or an address with no
+// pattern, is not a state this can produce.
+func (v *vhosts) remove(key string) (shadowedBy, shadowedByAddress string, err error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
 	existing, ok := v.exact[key]
 	if !ok {
-		return "", fmt.Errorf("%w: %q is not published here", ErrVhostAbsent, key)
+		return "", "", fmt.Errorf("%w: %q is not published here", ErrVhostAbsent, key)
 	}
 	if existing.prov != ProvenanceRuntime {
-		return "", fmt.Errorf("%w: %q is %s and points at %s",
+		return "", "", fmt.Errorf("%w: %q is %s and points at %s",
 			ErrVhostImmutable, key, existing.prov.describe(), existing.raw)
 	}
 	delete(v.exact, key)
@@ -262,14 +276,14 @@ func (v *vhosts) remove(key string) (shadowedBy string, err error) {
 	for {
 		i := strings.Index(rest, ".")
 		if i < 0 {
-			return "", nil
+			return "", "", nil
 		}
 		rest = rest[i+1:]
 		if rest == "" {
-			return "", nil
+			return "", "", nil
 		}
-		if _, covered := v.wildcard[rest]; covered {
-			return "*." + rest, nil
+		if covering, covered := v.wildcard[rest]; covered {
+			return "*." + rest, covering.raw, nil
 		}
 	}
 }

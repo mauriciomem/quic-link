@@ -407,9 +407,23 @@ type RemoveVhostResponse struct {
 	// entry is gone, and is empty when nothing does. A withdrawal can be true and
 	// still leave the name answered, at a different address, and a caller told
 	// only "done" would have no way to know.
-	ShadowedBy    string `protobuf:"bytes,2,opt,name=shadowed_by,json=shadowedBy,proto3" json:"shadowed_by,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ShadowedBy string `protobuf:"bytes,2,opt,name=shadowed_by,json=shadowedBy,proto3" json:"shadowed_by,omitempty"`
+	// shadowed_by_address is where that pattern points, and is empty exactly when
+	// shadowed_by is. Naming the pattern without its destination stops one
+	// question short of the one a reader has next, which is where the name is now
+	// answered — usually a different service than the entry that was removed.
+	//
+	// It is carried here rather than left to a follow-up listing because the
+	// covering entry is already in hand at the moment of the deletion, so this
+	// describes the table as it now is. A second call is a second round trip that
+	// may reach a different process and answer about a different table.
+	//
+	// It is the address as the agent's operator configured it, not one rebuilt
+	// from its parsed parts, so it matches the listing's address for the same
+	// entry by rule rather than by two renderers agreeing on accident.
+	ShadowedByAddress string `protobuf:"bytes,3,opt,name=shadowed_by_address,json=shadowedByAddress,proto3" json:"shadowed_by_address,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RemoveVhostResponse) Reset() {
@@ -452,6 +466,13 @@ func (x *RemoveVhostResponse) GetHost() string {
 func (x *RemoveVhostResponse) GetShadowedBy() string {
 	if x != nil {
 		return x.ShadowedBy
+	}
+	return ""
+}
+
+func (x *RemoveVhostResponse) GetShadowedByAddress() string {
+	if x != nil {
+		return x.ShadowedByAddress
 	}
 	return ""
 }
@@ -692,11 +713,12 @@ const file_control_proto_rawDesc = "" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x12\n" +
 	"\x04port\x18\x02 \x01(\rR\x04port\"(\n" +
 	"\x12RemoveVhostRequest\x12\x12\n" +
-	"\x04host\x18\x01 \x01(\tR\x04host\"J\n" +
+	"\x04host\x18\x01 \x01(\tR\x04host\"z\n" +
 	"\x13RemoveVhostResponse\x12\x12\n" +
 	"\x04host\x18\x01 \x01(\tR\x04host\x12\x1f\n" +
 	"\vshadowed_by\x18\x02 \x01(\tR\n" +
-	"shadowedBy\"\x13\n" +
+	"shadowedBy\x12.\n" +
+	"\x13shadowed_by_address\x18\x03 \x01(\tR\x11shadowedByAddress\"\x13\n" +
 	"\x11ListVhostsRequest\"D\n" +
 	"\x12ListVhostsResponse\x12.\n" +
 	"\x06vhosts\x18\x01 \x03(\v2\x16.quiclink.v1.VhostInfoR\x06vhosts\"s\n" +

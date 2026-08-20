@@ -132,14 +132,16 @@ unless that agent's operator allowed remote changes.
 
 If a pattern in the agent's configuration covers the name, the name still
 resolves after the exact entry is gone, at whatever address that pattern points
-to. When that happens it is reported, because a withdrawal that leaves a name
-answered is not what "withdrawn" sounds like.
+to. When that happens both the pattern and that address are reported, because a
+withdrawal that leaves a name answered is not what "withdrawn" sounds like, and
+knowing it still answers is only half of what a reader needs.
 
 SERVER may be omitted when exactly one server is enabled.
 
 --json prints the frozen machine-readable shape to stdout (CONTRACT):
-  {"schema":1,"server":"...","host":"...","shadowed_by":"*..."}
-shadowed_by is absent unless a pattern took over.`,
+  {"schema":1,"server":"...","host":"...","shadowed_by":"*...",
+   "shadowed_by_address":"tcp://127.0.0.1:3000"}
+Both shadow fields are absent unless a pattern took over, and absent together.`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runVhostsRm(cmd, a, args, jsonFlag)
@@ -198,10 +200,11 @@ func runVhostsRm(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error
 
 	if jsonFlag {
 		out := withdrawJSONOutput{
-			Schema:     snap.Schema,
-			Server:     snap.Server,
-			Host:       sanitizeAgentString(snap.Host),
-			ShadowedBy: sanitizeAgentString(snap.ShadowedBy),
+			Schema:            snap.Schema,
+			Server:            snap.Server,
+			Host:              sanitizeAgentString(snap.Host),
+			ShadowedBy:        sanitizeAgentString(snap.ShadowedBy),
+			ShadowedByAddress: sanitizeAgentString(snap.ShadowedByAddress),
 		}
 		b, merr := json.Marshal(out)
 		if merr != nil {
@@ -215,19 +218,27 @@ func runVhostsRm(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error
 	fmt.Fprintf(w, "withdrawn: %s\n", sanitizeAgentString(snap.Host))
 	if snap.ShadowedBy != "" {
 		// The name is gone and still answers. Saying only "withdrawn" here would
-		// be true and would still mislead.
-		fmt.Fprintf(w, "  still answered by %s in that agent's configuration\n",
-			sanitizeAgentString(snap.ShadowedBy))
+		// be true and would still mislead — and naming the pattern without where
+		// it points would raise the reader's next question without answering it,
+		// since the address is usually a different service than the one just
+		// withdrawn.
+		fmt.Fprintf(w, "  still answered by %s in that agent's configuration, which points at %s\n",
+			sanitizeAgentString(snap.ShadowedBy), sanitizeAgentString(snap.ShadowedByAddress))
 	}
 	return nil
 }
 
 // withdrawJSONOutput is the --json shape, carrying only sanitised fields.
+//
+// The two shadow fields are absent together: a pattern with no address, or an
+// address with no pattern, is not a document this produces, so a reader has one
+// condition to test rather than two that could disagree.
 type withdrawJSONOutput struct {
-	Schema     int    `json:"schema"`
-	Server     string `json:"server"`
-	Host       string `json:"host"`
-	ShadowedBy string `json:"shadowed_by,omitempty"`
+	Schema            int    `json:"schema"`
+	Server            string `json:"server"`
+	Host              string `json:"host"`
+	ShadowedBy        string `json:"shadowed_by,omitempty"`
+	ShadowedByAddress string `json:"shadowed_by_address,omitempty"`
 }
 
 // runVhosts relays a listing request through the daemon and prints the result.
