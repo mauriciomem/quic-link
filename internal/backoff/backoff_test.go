@@ -141,7 +141,40 @@ func TestDefault_ParametersUnchanged(t *testing.T) {
 		t.Errorf("StableAfter() = %v, want 60s", p.StableAfter())
 	}
 
-	if p.Backoff(4) == p.Backoff(4) && p.Backoff(4) == p.Backoff(4) {
-		t.Error("Default produces a constant wait; jitter is not wired up")
+	// Default must apply jitter, so repeated calls for the same attempt must
+	// not all return the same wait: every client retrying in lockstep is what
+	// jitter exists to prevent. Twenty draws is far more than needed to see
+	// variation from a working generator, and it lets the failure say which
+	// property broke rather than only that two calls matched.
+	const draws = 20
+	seen := make(map[time.Duration]struct{}, draws)
+	for i := 0; i < draws; i++ {
+		seen[p.Backoff(4)] = struct{}{}
+	}
+	if len(seen) == 1 {
+		for d := range seen {
+			t.Errorf("Default returned %v on all %d draws for attempt 4; jitter is not wired up", d, draws)
+		}
+	}
+}
+
+// TestExponential_JitterScalesTheCeiling pins the arithmetic the previous
+// check could only infer. With the draw fixed, the wait is exactly the drawn
+// fraction of the ceiling, so a change to either the ceiling or the way the
+// draw is applied fails here with the numbers in the message.
+func TestExponential_JitterScalesTheCeiling(t *testing.T) {
+	p := backoff.Exponential{
+		Base:   250 * time.Millisecond,
+		Factor: 2,
+		Cap:    15 * time.Second,
+		Rand:   func() float64 { return 0.5 },
+	}
+	// attempt 4 -> 250ms * 2^4 = 4s, uncapped; half of it is 2s.
+	if got, want := p.Backoff(4), 2*time.Second; got != want {
+		t.Errorf("Backoff(4) with a fixed 0.5 draw = %v, want %v (half of the 4s ceiling)", got, want)
+	}
+	// A high attempt clamps to Cap first, so half of 15s is 7.5s.
+	if got, want := p.Backoff(30), 7500*time.Millisecond; got != want {
+		t.Errorf("Backoff(30) with a fixed 0.5 draw = %v, want %v (half of the 15s cap)", got, want)
 	}
 }

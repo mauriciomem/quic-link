@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,20 @@ type reverseRig struct {
 	agentT   func() transport.Transport // a fresh agent-side transport per dial
 	listenAt string
 	cancel   context.CancelFunc
+
+	// mu guards agentPins, which the agentT closure appends to from the
+	// goroutine that dials while a test reads it after the dial returns.
+	mu        sync.Mutex
+	agentPins []string
+}
+
+// AgentPins returns the full pins of every agent identity minted so far. A
+// test uses them to prove a log line carries no full pin: comparing against
+// the real value cannot be fooled, where a length heuristic can.
+func (r *reverseRig) AgentPins() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.agentPins...)
 }
 
 func newReverseRig(t *testing.T) *reverseRig {
@@ -71,17 +86,22 @@ func newReverseRigWithClock(t *testing.T, clock daemon.Clock) *reverseRig {
 	}
 	t.Cleanup(func() { pool.Close(); cancel() })
 
+	rig := &reverseRig{pool: pool, hub: hub, listenAt: listenAt, cancel: cancel}
+
 	n := 0
-	agentT := func() transport.Transport {
+	rig.agentT = func() transport.Transport {
 		n++
-		leaf, _, ierr := mem.NewIdentity()
+		leaf, pin, ierr := mem.NewIdentity()
 		if ierr != nil {
 			t.Fatalf("NewIdentity: %v", ierr)
 		}
+		rig.mu.Lock()
+		rig.agentPins = append(rig.agentPins, pin)
+		rig.mu.Unlock()
 		return hub.Transport("reverse-agent:"+string(rune('a'+n)), mem.WithCert(leaf))
 	}
 
-	return &reverseRig{pool: pool, hub: hub, agentT: agentT, listenAt: listenAt, cancel: cancel}
+	return rig
 }
 
 // connectAgent dials into the waiting daemon and serves the connection the way
@@ -301,14 +321,29 @@ func TestListenEntry_ReplacementLogNeverCarriesAFullPin(t *testing.T) {
 	if !strings.Contains(out, "session replaced") {
 		t.Errorf("no replacement event logged; got:\n%s", out)
 	}
-	for _, line := range strings.Split(out, "\n") {
-		for _, field := range strings.Fields(line) {
-			// A pin is 44 base64 characters. Anything that long in a log line
-			// is the thing we promised never to print.
-			if len(strings.Trim(field, `"peer=`)) >= 44 {
-				t.Errorf("log line looks like it carries a full pin: %q", line)
-			}
+	// Compare against the real pins rather than guessing from a field's
+	// length. A length test has to strip the surrounding key and quoting
+	// first, and getting that wrong makes the check silently unable to fire:
+	// the previous version used a cutset that included "=", which is base64
+	// padding, so every real pin was shortened by one character and slipped
+	// under the threshold it was measured against.
+	pins := r.AgentPins()
+	if len(pins) < 2 {
+		t.Fatalf("rig minted %d agent identities; the test needs at least 2 to have replaced one", len(pins))
+	}
+	for _, pin := range pins {
+		if strings.Contains(out, pin) {
+			t.Errorf("a full pin reached the log; only the short prefix may be printed.\npin=%s\nlog:\n%s", pin, out)
 		}
+	}
+	// The short prefix MUST still appear, or the assertion above would pass
+	// simply because nothing identifying was logged at all.
+	shortest := pins[0]
+	if len(shortest) < 8 {
+		t.Fatalf("pin %q is shorter than the 8-character prefix the log is expected to carry", shortest)
+	}
+	if prefix := shortest[:8]; !strings.Contains(out, prefix) {
+		t.Errorf("the 8-character pin prefix %q is absent, so this test proves nothing about redaction.\nlog:\n%s", prefix, out)
 	}
 }
 
