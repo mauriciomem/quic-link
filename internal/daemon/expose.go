@@ -138,6 +138,15 @@ func exposeFailure(server string, err error) error {
 			"server %q already publishes that name: %s", server, status.Convert(err).Message())}
 	case codes.InvalidArgument:
 		return &ipc.RoutesError{Status: 2, Msg: status.Convert(err).Message()}
+	case codes.ResourceExhausted:
+		// The request was fine and there was no room for it, which is neither a
+		// mistake to correct nor a connection to wait out. The number is
+		// deliberately not repeated here: it belongs to the agent's build,
+		// which need not be this one's, and the listing is both authoritative
+		// and already available.
+		return &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
+			"the agent at server %q is holding as many published names as it will; "+
+				"see them with: quic-link vhosts %s", server, server)}
 	default:
 		slog.Debug("expose: control call failed; reporting as reconnecting",
 			"role", "daemon", "session", server, "err", err)

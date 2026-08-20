@@ -127,6 +127,28 @@ func TestPublishError_KeepsTheExplanationAnOperatorNeeds(t *testing.T) {
 	}
 }
 
+// TestPublishError_AFullTableIsItsOwnCondition covers the one refusal whose
+// remedy is neither "choose another name" nor "fix the request".
+//
+// It has to arrive at the caller as its own condition, because every layer
+// between here and them chooses what to say by asking which condition this is.
+// Left untranslated it falls to the arm that handles a failure nobody
+// recognized, and the caller is told the agent had an internal problem — which
+// then gets explained to an operator as a connection that will come back.
+func TestPublishError_AFullTableIsItsOwnCondition(t *testing.T) {
+	got := publishError(fmt.Errorf("%w", router.ErrVhostLimit))
+	if !errors.Is(got, control.ErrNameLimit) {
+		t.Fatalf("a full table translated to %v, want it to carry %v", got, control.ErrNameLimit)
+	}
+	if strings.Contains(got.Error(), router.ErrVhostLimit.Error()) {
+		t.Errorf("the message states the condition in the route table's vocabulary as well "+
+			"as the caller's: %q", got.Error())
+	}
+	if n := strings.Count(got.Error(), control.ErrNameLimit.Error()); n != 1 {
+		t.Errorf("the message names the condition %d times, want exactly once: %q", n, got.Error())
+	}
+}
+
 // TestPublishError_AnUnrecognizedFailureIsNotReshaped keeps the translation from
 // claiming to understand something it does not. A failure with no known
 // condition must pass through, so it reaches the layer that decides what an

@@ -114,6 +114,17 @@ func (p *routesProvider) RoutesJSON(ctx context.Context, server string) ([]byte,
 			return nil, &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
 				"the agent at server %q is running a version that does not report its routes; rebuild both ends", server)}
 		}
+		if status.Code(callErr) == codes.ResourceExhausted {
+			// The reply did not fit in one message, so none of it arrived.
+			// Nothing bounds a route table, and the size that decides this is
+			// a limit held here rather than a condition of the far end or of
+			// the network — so it must not be reported as a reconnection,
+			// which invites an operator to wait for something that will not
+			// change by itself.
+			return nil, &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
+				"server %q sent a larger route table than this daemon will accept in one reply; "+
+					"this is a limit on this machine, not a fault on the network", server)}
+		}
 		// Any other failure at this point means the session looked
 		// "connected" a moment ago but the call itself did not complete —
 		// a mid-call drop, or (in reverse mode) a displacement by a newer

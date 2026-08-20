@@ -204,6 +204,8 @@ func publishError(err error) error {
 		return fmt.Errorf("%w%s", control.ErrNameTaken, explanationOf(err, router.ErrVhostExists))
 	case errors.Is(err, router.ErrVhostRejected):
 		return fmt.Errorf("%w%s", control.ErrNameRejected, explanationOf(err, router.ErrVhostRejected))
+	case errors.Is(err, router.ErrVhostLimit):
+		return fmt.Errorf("%w%s", control.ErrNameLimit, explanationOf(err, router.ErrVhostLimit))
 	default:
 		// Not a condition this side knows how to describe. Passed on whole, so
 		// the layer that decides what an unrecognized failure means sees the

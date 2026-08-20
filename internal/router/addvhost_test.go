@@ -54,9 +54,22 @@ func TestAddVhost_ConcurrentWithLiveLookups(t *testing.T) {
 		}()
 	}
 
+	// The table is bounded, so the writer cannot simply grow it four hundred
+	// times. What this test needs is a stream of writes running against live
+	// readers, not a large table — so once the table is nearly full each new
+	// name is taken back straight after it is published. Every name is still
+	// distinct, so no write is turned into the repeat case, which does not
+	// touch the map at all and would quietly stop exercising anything.
 	for i := 0; i < 400; i++ {
-		if err := r.AddVhost(fmt.Sprintf("svc%d.server1.internal", i), 3000+i%100); err != nil {
+		host := fmt.Sprintf("svc%d.server1.internal", i)
+		if err := r.AddVhost(host, 3000+i%100); err != nil {
 			t.Fatalf("AddVhost(%d): %v", i, err)
+		}
+		if i < MaxVhosts-2 {
+			continue
+		}
+		if _, err := r.RemoveVhost(host); err != nil {
+			t.Fatalf("RemoveVhost(%d): %v", i, err)
 		}
 	}
 	close(stop)

@@ -35,6 +35,10 @@ var (
 	// their own configuration remotely removable — telling a caller to ask for
 	// permission would send them somewhere that cannot help.
 	ErrNameNotOurs = errors.New("control: that name was not published over this connection")
+	// ErrNameLimit reports that the agent already holds as many published names
+	// as it will. The remedy is not another name: something has to be withdrawn
+	// first, or the agent restarted by whoever runs it.
+	ErrNameLimit = errors.New("control: this agent holds as many published names as it will")
 )
 
 // VhostPublisher publishes one hostname on this agent while it runs.
@@ -204,6 +208,8 @@ func publishReason(err error) string {
 		return "the name is already published"
 	case errors.Is(err, ErrNameRejected):
 		return "the name or port was refused"
+	case errors.Is(err, ErrNameLimit):
+		return "the agent holds as many names as it will"
 	default:
 		return "the name could not be published"
 	}
@@ -211,13 +217,16 @@ func publishReason(err error) string {
 
 // publishStatus maps a publish failure to what the caller is told. The
 // distinction is kept because the remedies differ: choose another name, fix the
-// request, or nothing the caller can do.
+// request, take a name back or ask the agent's operator to restart it, or
+// nothing the caller can do.
 func publishStatus(err error) error {
 	switch {
 	case errors.Is(err, ErrNameTaken):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, ErrNameRejected):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, ErrNameLimit):
+		return status.Error(codes.ResourceExhausted, err.Error())
 	default:
 		return status.Error(codes.Internal, "the name could not be published")
 	}

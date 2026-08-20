@@ -84,6 +84,18 @@ func (p *vhostsProvider) VhostsJSON(ctx context.Context, server string) ([]byte,
 			return nil, &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
 				"the agent at server %q is running a version that does not report its published names; rebuild both ends", server)}
 		}
+		if status.Code(callErr) == codes.ResourceExhausted {
+			// The reply was larger than this daemon accepts in one message, so
+			// nothing arrived to report. An agent bounds how many names it
+			// holds, but that bound belongs to its own build: an older one, a
+			// modified one, or a later one whose listing carries more per name
+			// can all produce a reply that does not fit here. Describing it as
+			// a reconnection would send an operator to wait for something that
+			// will not change on its own.
+			return nil, &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
+				"server %q sent more about what it publishes than this daemon will accept in one reply; "+
+					"this is a limit on this machine, not a fault on the network", server)}
+		}
 		// The session looked connected a moment ago and the call did not
 		// complete: a mid-call drop, or a displacement by a newer authenticated
 		// peer. Both are ordinary textures of a live network call. The real

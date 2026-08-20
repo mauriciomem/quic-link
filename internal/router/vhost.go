@@ -118,7 +118,45 @@ type vhosts struct {
 	wildcard map[string]route // keyed on what follows the star
 }
 
+// MaxVhosts bounds how many names one agent holds at once, counting both the
+// ones its operator configured and the ones published while it was running.
+//
+// It is exported so the configuration validator can refuse an over-large file
+// with the same number this table enforces, rather than keeping a second copy
+// that could drift away from it.
+//
+// Without a bound a caller allowed to publish can publish without end:
+// authentication decides who may ask, and nothing decided how often. The table
+// grows for as long as the process lives, and every entry also enlarges the
+// reply that lists it — so a large enough table stops being readable, which
+// disables the surface that would have shown what was happening.
+//
+// The number comes from that reply rather than from memory, which is the
+// weaker worry: tens of thousands of entries are only a few megabytes. Encoded
+// as JSON for the local socket a worst-case entry — the longest hostname a name
+// is allowed to have — costs about 338 bytes against a budget of roughly 65000,
+// so the listing stops fitting somewhere above 192 entries. Half of that leaves
+// room for an entry to grow by half again before the listing is at risk, which
+// matters because the shape is allowed to gain fields. It is also several times
+// more names than observed use: a two-machine test published 28.
+const MaxVhosts = 128
+
 func newVhosts(entries map[string]string) (*vhosts, error) {
+	// Refused at startup rather than at the first publish, which is the same
+	// posture this function already takes towards an address it cannot parse:
+	// a configuration that cannot be served should stop the process while an
+	// operator is watching, not surprise the first caller.
+	//
+	// Defense in depth: the configuration validator is expected to catch an
+	// over-large set first, and it does so where the operator gets the exit
+	// code that means "fix your configuration". This check stays because the
+	// table itself must never silently accept more names than it will serve,
+	// whatever call site built the set — and it is the only guard for a call
+	// site that never passed through that validator.
+	if len(entries) > MaxVhosts {
+		return nil, fmt.Errorf("%w: %d names are configured and this build holds at most %d",
+			ErrVhostLimit, len(entries), MaxVhosts)
+	}
 	v := &vhosts{
 		exact:    make(map[string]route, len(entries)),
 		wildcard: make(map[string]route),
@@ -160,6 +198,12 @@ func newVhosts(entries map[string]string) (*vhosts, error) {
 // Anything else is refused and says which kind of entry is in the way: a
 // caller must not be able to take over a name the operator configured, or one
 // another caller published, by asking for it a second time.
+//
+// A table that already holds as many names as it will is also refused, and the
+// refusal names no name and no number: it travels back to whoever asked, and
+// what this build happens to hold is not their business. The repeat above is
+// deliberately not subject to it, because a request that adds no entry cannot
+// be the one that made the table too large.
 func (v *vhosts) add(key string, r route) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -169,6 +213,13 @@ func (v *vhosts) add(key string, r route) error {
 		}
 		return fmt.Errorf("%w: %q is %s and points at %s",
 			ErrVhostExists, key, existing.prov.describe(), existing.raw)
+	}
+	// Asked after the repeat above, deliberately: repeating a request that
+	// already holds adds no entry, so a full table must not turn a success
+	// into a refusal. Both maps count, because both are served from here and
+	// both appear in the listing.
+	if len(v.exact)+len(v.wildcard) >= MaxVhosts {
+		return fmt.Errorf("%w", ErrVhostLimit)
 	}
 	v.exact[key] = r
 	return nil
@@ -186,11 +237,11 @@ func (v *vhosts) add(key string, r route) error {
 // could silently stop serving something the operator set up. The refusal says
 // which kind is in the way rather than only that it refused.
 //
-// The second return value is the reason a withdrawal can be true and still not
-// leave the name unanswered: a pattern in the configuration may cover it, and
-// with the exact entry gone that pattern resumes serving the name, at whatever
-// address it points to. Saying so is the difference between reporting what
-// happened and implying something that did not.
+// The last two return values are the reason a withdrawal can be true and still
+// not leave the name unanswered: a pattern in the configuration may cover it,
+// and with the exact entry gone that pattern resumes serving the name, at
+// whatever address it points to. Saying so is the difference between reporting
+// what happened and implying something that did not.
 func (v *vhosts) remove(key string) (shadowedBy string, err error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()

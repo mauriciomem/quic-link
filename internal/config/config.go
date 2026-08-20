@@ -632,6 +632,17 @@ func validateAgent(c *Config) error {
 		}
 	}
 
+	// How many names are configured is checked here, alongside whether each
+	// one is a legal hostname, because both are the same kind of mistake: a
+	// file the operator has to edit. The name table enforces the same bound
+	// again when it is built, but a failure there is not a configuration
+	// failure as far as the exit code is concerned, and a supervisor script
+	// that branches on "the configuration is wrong" would miss this one.
+	if len(a.Vhosts) > router.MaxVhosts {
+		return fmt.Errorf("agent.vhosts: %d names are configured and this build serves at most %d: %w",
+			len(a.Vhosts), router.MaxVhosts, ErrInvalid)
+	}
+
 	// Published hostnames follow a different rule from route names, because
 	// they are hostnames: a browser will be told to ask for one.
 	for host, addr := range a.Vhosts {

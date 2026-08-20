@@ -224,9 +224,15 @@ func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized p
 		return fmt.Errorf("TLS config: %w", err)
 	}
 
+	// Returned as it stands, with no label added. Every failure the route
+	// table reports already says which entry it is about — a route name, a
+	// vhost name, or the limit on how many names may be held — so a prefix
+	// here adds nothing an operator can act on, and one refusal already
+	// begins with the very word this used to prepend, which an operator saw
+	// printed twice.
 	rtr, err := router.NewWithVhosts(routes, vhosts, router.AllowAll{})
 	if err != nil {
-		return fmt.Errorf("router: %w", err)
+		return err
 	}
 
 	// Our own pin, so a peer that turns out to be using our key is refused

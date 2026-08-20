@@ -41,6 +41,12 @@ var (
 	// telling a caller to ask for permission would send them to change a setting
 	// that cannot help.
 	ErrVhostImmutable = errors.New("router: that name was not published over this connection")
+	// ErrVhostLimit reports that the table already holds as many names as it
+	// will. It is kept apart from a name that is taken and from a request that
+	// was malformed, because the remedy differs: nothing about the request was
+	// wrong and choosing another name will not help — something has to be
+	// withdrawn first, or whoever runs the agent has to restart it.
+	ErrVhostLimit = errors.New("router: this agent holds as many published names as it will")
 )
 
 // Provenance records where a route table entry came from. It answers "who
