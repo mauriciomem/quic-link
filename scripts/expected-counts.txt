@@ -1,0 +1,41 @@
+# Expected number of reported test results, asserted by scripts/test.sh.
+#
+# WHAT THIS COUNTS, AND WHAT IT DOES NOT
+#
+# One line per reported top-level test result — the "--- PASS:", "--- SKIP:" and
+# "--- FAIL:" lines Go writes at column zero under `go test -v`. That is the same
+# as the number of `func Test...` declarations that actually run.
+#
+# Subtests are NOT counted. Go indents their result lines, and the pattern is
+# anchored to the start of the line, so a `t.Run` case is invisible here. This is
+# deliberate: it keeps the number stable when a table gains a case, which happens
+# often and is not the kind of change this check exists to notice. The
+# consequence is worth knowing before you conclude the check is broken: adding a
+# case to an existing table moves these numbers by zero.
+#
+# WHY COUNT AT ALL
+#
+# A suite can fail while naming no failing test, and it can silently stop
+# reporting results it used to report. That happened here once already: a test
+# closed the test process's own stdout and twenty results went unreported while
+# the suite still said FAIL. An exit status cannot see that; a count can.
+#
+# The count is a canary for results going missing, not a pass criterion. The
+# script checks `go test`'s exit status first and independently, because every
+# way of losing results — a panic, a timeout, a package that fails to build —
+# lowers this number while also failing the run.
+#
+# WHEN A NUMBER CHANGES
+#
+# Update it in the same commit that adds or removes a test, and say so in the
+# commit message. If the number moved and you did not intend it, something
+# stopped reporting.
+#
+# One number serves both Linux and macOS. That is only safe because the tests
+# behind build tags happen to balance: internal/daemon has one coredump test for
+# unix and one for everything else. A new platform-conditional test breaks that
+# and would fail on one runner only, so add such a test with per-platform counts
+# or not at all.
+
+cmd_quic_link=230
+tree_wide=722

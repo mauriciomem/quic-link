@@ -1,0 +1,90 @@
+# The suite, on both platforms this project supports, plus a cross-compile check.
+#
+# Every job calls a script from scripts/ rather than spelling out its steps, so
+# what CI runs and what a developer runs are the same thing by construction. If
+# you want to reproduce a failure here, run the same script locally.
+#
+# Actions are pinned to a commit rather than a tag: a tag can be moved to point
+# at different code, a commit cannot. Dependabot updates these and rewrites the
+# trailing comment, so the version stays readable.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read-only by default. No job here needs more, and the release workflow that
+# does will ask for it explicitly.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an in-flight run obsolete. Tags are not
+# covered by this workflow, so nothing cancellable is ever mid-publish.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide the state of the other.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Pinned rather than read from go.mod. The go directive states the
+          # minimum this code needs, which is not the same question as which
+          # toolchain built it, and a reported test count is only meaningful
+          # against a known one.
+          go-version: '1.26.5'
+          # setup-go keys its cache on go.mod by default. go.sum is the file that
+          # actually pins what gets downloaded.
+          cache-dependency-path: go.sum
+
+      - name: Show the toolchain being used
+        run: go version
+
+      - name: Build, vet, and run the suite with its result counts
+        run: ./scripts/test.sh
+
+  race:
+    name: race detector
+    # Linux only. The macOS runners have three cores and 7 GB, the smallest of
+    # the fleet, and the detector's memory overhead is the least useful place to
+    # spend that. A race is not platform-specific in this codebase.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
+
+      - name: Run the suite under the race detector
+        run: ./scripts/test.sh --race
+
+  cross:
+    name: cross-compile
+    # One job for every target. The whole matrix takes under a minute from a cold
+    # cache, which is cheaper than paying runner startup five times over.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
+
+      - name: Build every supported platform
+        run: ./scripts/cross.sh
