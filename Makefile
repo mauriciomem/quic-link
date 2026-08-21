@@ -14,7 +14,7 @@
 #
 # Requires nothing beyond make and a POSIX shell. Every recipe is a single line.
 
-.PHONY: default build test test-race lint vuln licences proto bench bench-check cross clean
+.PHONY: default build test test-race lint vuln licences proto bench bench-check cross release clean
 
 default: build
 
@@ -59,5 +59,11 @@ bench-check:
 cross:
 	./scripts/cross.sh
 
+# Build the release artifacts locally, exactly as CI does, and verify they are
+# reproducible: make release VERSION=v0.1.0
+release:
+	./scripts/release.sh $(VERSION) --check
+
 clean:
 	go clean -cache -testcache
+	rm -rf dist

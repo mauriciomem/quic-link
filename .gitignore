@@ -6,6 +6,9 @@
 *.out
 *.exe
 
+# Release artifacts, produced by scripts/release.sh
+/dist/
+
 # Docs / notes (not versioned)
 notes/
 internal-docs/

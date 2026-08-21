@@ -12,20 +12,46 @@ there are no CA files to manage.
 
 **Status:** core tunnel is complete (framed protocol, SSH + Docker routes, pinned
 identity, TOML config). A client-side daemon manages sessions and exposes a
-`status` command over a local socket; a loopback naming layer and job runners
-are in progress.
+`status` command over a local socket. The loopback naming layer is complete: names
+resolve, a browser reaches a service by hostname, and `expose` publishes a further
+name on a running agent. Job runners are designed but deliberately unscheduled.
 
 ## Quickstart
 
-**0. Build.** There's no packaged release yet, so this is the only way to get the
-binary:
+**0. Get the binary.** Either download a release or build from source.
+
+Releases carry one archive per platform, plus a `SHA256SUMS` file. Pick the one
+matching your machine, from the
+[releases page](https://github.com/mauriciomem/quic-link/releases):
+
+```bash
+tar -xzf quic-link-<version>-<os>-<arch>.tar.gz
+cd quic-link-<version>-<os>-<arch>
+./quic-link version
+```
+
+The archives are checksummed and carry build provenance, so you can confirm both
+what you downloaded and where it came from:
+
+```bash
+sha256sum -c SHA256SUMS                                   # or: shasum -a 256 -c
+gh attestation verify quic-link-*.tar.gz -R mauriciomem/quic-link
+```
+
+The second command asks GitHub whether that exact archive was built by this
+repository's release workflow, from a specific commit. It needs no keys.
+
+To build from source instead — Go 1.26.4 or newer:
 
 ```bash
 go build ./...
 ```
 
-This produces `quic-link` in the repository root; the rest of this guide assumes
-it's on your `PATH` or you're invoking it by full path.
+This produces `quic-link` in the repository root. A plain build reports `dev` for
+its version; `make release VERSION=v0.1.0` reproduces what a release contains.
+
+Either way, the rest of this guide assumes the binary is on your `PATH` or that
+you are invoking it by full path.
 
 **1. Generate an identity on each host (one-time).** Authentication is mutual
 raw-public-key pinning: each host holds a key, and the two ends verify

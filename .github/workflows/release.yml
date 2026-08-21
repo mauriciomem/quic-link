@@ -1,0 +1,86 @@
+# Publish a release when a version tag is pushed.
+#
+# Triggered by the tag, never by a branch, and the tag is the only source of the
+# version: it flows into the binaries through -ldflags, into the archive names,
+# and into the release title. Nothing downstream is hand-edited, so nothing
+# downstream can disagree with it.
+#
+# ⚠️ ORDER MATTERS WHEN THIS IS FIRST USED. GitHub's release API returns 404 —
+# not a permission error — if the tagged commit adds or modifies anything under
+# .github/workflows/ relative to the default branch, because the token available
+# to Actions cannot be authorised to modify workflows. Push the workflow files to
+# the default branch first, then tag a later commit.
+#
+# Prove the whole path on a pre-release tag before a real one. A tag is the first
+# immutable public thing this project produces, and release notes notify watchers
+# the moment they appear.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # Create the release and upload assets.
+      contents: write
+      # The three an attestation needs. Scoped to this job alone: no other
+      # workflow in this repository asks for more than read.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build refuses a dirty tree and reads the commit from git, so the
+          # full history is needed rather than a shallow copy.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
+
+      # Recorded in the log because it is part of what determines the output
+      # bytes: GOEXPERIMENT is stamped into the binary, so a different toolchain
+      # build produces a different hash from identical source.
+      - name: Record the toolchain
+        run: go version
+
+      # The shipped binaries carry a build tag, so the suite runs with it once
+      # here. Without this the artifact would be a configuration nothing tested.
+      - name: Run the suite in the shipping configuration
+        run: ./scripts/test.sh --tags grpcnotrace
+
+      - name: Build the release artifacts
+        run: ./scripts/release.sh "${GITHUB_REF_NAME}" --check
+
+      # Binds the artifacts to this workflow, this repository and this commit.
+      # A recipient verifies with:
+      #   gh attestation verify <file> -R mauriciomem/quic-link
+      # which needs no key distribution, which is the reason this is preferred
+      # over publishing signatures alongside the files.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          # The checksum file is the subject list, rather than a glob over the
+          # archives. It already names every artifact with its digest, so there
+          # is one description of what was released instead of two that could
+          # disagree.
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --draft \
+            dist/*.tar.gz dist/SHA256SUMS
