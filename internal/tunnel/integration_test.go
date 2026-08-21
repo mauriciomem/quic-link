@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -464,7 +465,14 @@ func TestWireDockerUnixRoundTrip(t *testing.T) {
 	serverTLS := mustServerTLS(t, serverKey, []string{clientPin})
 	clientTLS := mustClientTLS(t, clientKey, serverPin)
 
-	sockPath := filepath.Join(t.TempDir(), "d.sock")
+	// From /tmp rather than t.TempDir, whose path includes TMPDIR and the test
+	// name and can exceed the 104-byte socket limit on macOS.
+	sockDir, mkErr := os.MkdirTemp("/tmp", "ql-tunnel-")
+	if mkErr != nil {
+		t.Fatalf("creating a short temp dir for a unix socket: %v", mkErr)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, "d.sock")
 	unixLn, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("unix listen: %v", err)

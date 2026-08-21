@@ -14,16 +14,26 @@ import (
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
 
-// shortSocketPath returns a unix socket path short enough to fit within the
-// macOS sun_path limit. macOS t.TempDir() paths can be long enough that
-// "daemon.sock" inside them exceeds the 104-byte limit; this helper places
-// the socket in /tmp with a short test-specific name.
+// shortSocketPath returns a unix socket path short enough to bind.
+//
+// A socket address is limited to 104 bytes on macOS, and t.TempDir builds its
+// path from TMPDIR and the test's own name. On Linux TMPDIR is /tmp and the
+// result fits; on macOS it is a per-user directory under /var/folders of about
+// fifty characters, and a socket underneath it does not. The failure is a bare
+// "bind: invalid argument", or on the dialling side an error about the socket
+// being unreachable, and neither mentions a length.
+//
+// The directory comes from os.MkdirTemp under /tmp explicitly rather than from
+// TMPDIR, so it is unaffected by however the environment is configured, and it is
+// unique per call so two tests in one process cannot collide.
 func shortSocketPath(t *testing.T) string {
 	t.Helper()
-	// Use a short fixed name under /tmp so the path is always well under 104 bytes.
-	name := fmt.Sprintf("/tmp/ql-ipc-test-%d.sock", os.Getpid())
-	t.Cleanup(func() { os.Remove(name) })
-	return name
+	dir, err := os.MkdirTemp("/tmp", "ql-ipc-")
+	if err != nil {
+		t.Fatalf("creating a short temp dir for a unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "d.sock")
 }
 
 // startHardenedServer starts a Server with custom options on a short socket path.
@@ -248,11 +258,7 @@ func TestConnCap_Backpressure(t *testing.T) {
 // ctx is cancelled (via listener close) and does not leak goroutines.
 // The socket-file removal is tested in the cmd layer (daemon.Run).
 func TestGracefulShutdown_ServeExitsOnCtxCancel(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "d.sock")
-	// Use a shorter path approach: /tmp with fixed short name if path is too long.
-	if len(sock) > 100 {
-		sock = shortSocketPath(t)
-	}
+	sock := shortSocketPath(t)
 
 	srv := ipc.NewServer(sock, &stubStatus{data: []byte(`{}`)}, &stubPool{})
 	if err := srv.Listen(); err != nil {

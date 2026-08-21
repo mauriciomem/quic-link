@@ -23,6 +23,38 @@ import (
 	"testing"
 )
 
+// allTestFiles returns every _test.go file in the module, so this guard covers
+// the packages the mistake actually spread to rather than only its own.
+func allTestFiles(t *testing.T) ([]string, error) {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, "_test.go") {
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				return rerr
+			}
+			out = append(out, rel)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // sunPathBudget is the limit this project enforces for a socket address, matching
 // the constant in the production path resolver. Kept as a literal rather than
 // imported so that a change to one has to be made deliberately in both.
@@ -77,11 +109,17 @@ func TestShortTempDirLeavesRoomForASocket(t *testing.T) {
 // TestNoTestPointsTheSocketDirAtTempDir is the direct guard against the mistake
 // returning. A test that sets XDG_RUNTIME_DIR to t.TempDir() works on Linux and
 // fails on macOS, so it would pass review and pass locally and then fail in CI
-// on one platform only.
+// on one platform only — which is exactly how the four cases this guard was
+// written for were found.
+//
+// It scans the whole module rather than this package, because the same mistake
+// occurred independently in internal/ipc, internal/router and internal/tunnel,
+// each with its own local workaround or none. A guard that watched one package
+// would have reported success while three others were broken.
 func TestNoTestPointsTheSocketDirAtTempDir(t *testing.T) {
-	entries, err := filepath.Glob("*_test.go")
+	entries, err := allTestFiles(t)
 	if err != nil {
-		t.Fatalf("glob: %v", err)
+		t.Fatalf("finding test files: %v", err)
 	}
 	if len(entries) == 0 {
 		t.Fatal("no test files found; this test is looking in the wrong place")
@@ -89,10 +127,10 @@ func TestNoTestPointsTheSocketDirAtTempDir(t *testing.T) {
 	for _, path := range entries {
 		// This file has to name the pattern it forbids in order to describe it,
 		// so it is not a candidate for its own check.
-		if path == "socket_path_length_test.go" {
+		if strings.HasSuffix(path, "socket_path_length_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(path)
+		src, err := os.ReadFile(filepath.Join("../..", path))
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
@@ -100,7 +138,17 @@ func TestNoTestPointsTheSocketDirAtTempDir(t *testing.T) {
 			if strings.Contains(line, `"XDG_RUNTIME_DIR"`) && strings.Contains(line, "t.TempDir()") {
 				t.Errorf(`%s:%d points XDG_RUNTIME_DIR at t.TempDir(), whose path includes `+
 					`TMPDIR and the test name. That fits on Linux and does not on macOS, `+
-					`where the socket cannot be bound. Use shortTempDir(t) instead.`,
+					`where the socket cannot be bound. Use a directory taken from /tmp instead.`,
+					path, i+1)
+			}
+			// A socket path built directly out of t.TempDir has the same problem,
+			// and is how it reached three other packages.
+			if strings.Contains(line, "t.TempDir()") &&
+				(strings.Contains(line, ".sock") || strings.Contains(line, "unix://")) {
+				t.Errorf(`%s:%d builds a unix socket path from t.TempDir(), whose path `+
+					`includes TMPDIR and the test name. On macOS that exceeds the `+
+					`104-byte socket limit and fails with "bind: invalid argument", which `+
+					`names no length. Take the directory from /tmp instead.`,
 					path, i+1)
 			}
 		}

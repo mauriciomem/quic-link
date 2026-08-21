@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -319,8 +318,10 @@ func TestZeroSchema(t *testing.T) {
 // TestClientErrDaemonAbsent verifies that dialing a non-existent socket path
 // returns ErrDaemonAbsent.
 func TestClientErrDaemonAbsent(t *testing.T) {
-	dir := t.TempDir()
-	c := ipc.NewClient(filepath.Join(dir, "missing.sock"))
+	// A path short enough to attempt; see shortSocketPath. The socket deliberately
+	// does not exist, and a path too long to even try would fail for a different
+	// reason and prove nothing about an absent daemon.
+	c := ipc.NewClient(shortSocketPath(t))
 	_, err := c.StatusJSON()
 	if !errors.Is(err, ipc.ErrDaemonAbsent) {
 		t.Errorf("got %v, want ErrDaemonAbsent", err)

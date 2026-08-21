@@ -102,8 +102,29 @@ checkPackage() {
 
 	if [ "$status" -ne 0 ]; then
 		echo "FAIL: go test exited $status for $pattern; $got results were reported." >&2
-		echo "      Failing tests and packages:" >&2
-		grep -E '^(--- FAIL|FAIL|ok.*FAIL)|\[build failed\]|^panic:|test timed out' "$log" >&2 || true
+		echo "" >&2
+
+		# Print each failing test with the lines that precede it, because that is
+		# where the reason is. Go writes a t.Errorf message indented, BEFORE the
+		# "--- FAIL:" line it belongs to, so listing only the FAIL lines reports
+		# which tests failed and not one word about why — which is useless on a
+		# platform the maintainer cannot reproduce locally.
+		awk '
+			/^(--- FAIL|    --- FAIL)/ {
+				print "  " $0
+				for (i = 1; i <= n; i++) print "      " buf[i]
+				n = 0
+				next
+			}
+			/^(=== RUN|=== PAUSE|=== CONT|--- PASS|    --- PASS|--- SKIP|    --- SKIP|ok  |PASS|=== NAME)/ { n = 0; next }
+			{ if (n < 40) buf[++n] = $0 }
+		' "$log" >&2
+
+		# Build failures, panics and timeouts produce no result line at all, so
+		# they are reported separately.
+		grep -E '\[build failed\]|^panic:|test timed out|^FAIL[[:space:]]' "$log" >&2 || true
+
+		echo "" >&2
 		echo "      Full log: $log" >&2
 		return 1
 	fi

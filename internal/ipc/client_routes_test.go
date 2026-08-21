@@ -40,8 +40,11 @@ func TestClientRoutesJSON_Success(t *testing.T) {
 // listener returns ErrDaemonAbsent, matching StatusJSON's behaviour for the
 // identical condition (TestClientErrDaemonAbsent).
 func TestClientRoutesJSON_ErrDaemonAbsent(t *testing.T) {
-	dir := t.TempDir()
-	c := ipc.NewClient(dir + "/missing.sock")
+	// A path short enough to bind on either platform; see shortSocketPath. The
+	// socket deliberately does not exist - this test is about the error returned
+	// when nothing is listening, and a path too long to even attempt would return
+	// a different error and defeat the test.
+	c := ipc.NewClient(shortSocketPath(t))
 	_, err := c.RoutesJSON("srv1")
 	if !errors.Is(err, ipc.ErrDaemonAbsent) {
 		t.Errorf("got %v, want ErrDaemonAbsent", err)

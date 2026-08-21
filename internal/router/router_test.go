@@ -11,6 +11,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -71,9 +72,27 @@ func TestNewRejectsBadRouteName(t *testing.T) {
 // decided provenance semantics: Builtin tracks whether the operator supplied
 // the entry, not whether its name happens to be one of the two reserved
 // names. An override for "ssh" must therefore report Builtin: false, and the
+// shortSocketPath returns a unix socket path short enough to bind.
+//
+// A socket address is limited to 104 bytes on macOS, and t.TempDir builds its
+// path from TMPDIR plus the test's own name. On Linux that fits; on macOS TMPDIR
+// is a per-user directory under /var/folders of about fifty characters, and the
+// socket cannot be bound - "bind: invalid argument", which says nothing about
+// length. Taking the directory from /tmp explicitly makes the result independent
+// of how the environment is configured.
+func shortSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ql-router-")
+	if err != nil {
+		t.Fatalf("creating a short temp dir for a unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
+
 // untouched "docker" default must report Builtin: true.
 func TestNew_OverrideWinsOverBuiltin(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "override.sock")
+	sockPath := shortSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("unix listen: %v", err)
@@ -327,7 +346,7 @@ func TestDialUnauthorized(t *testing.T) {
 }
 
 func TestDialUnixRoundTrip(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "x.sock")
+	sockPath := shortSocketPath(t)
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("unix listen: %v", err)
