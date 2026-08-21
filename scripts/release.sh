@@ -120,7 +120,24 @@ for target in "${targets[@]}"; do
 	# One archive per platform, containing the binary and the two documents a
 	# recipient needs in order to know what they have and what it permits.
 	cp LICENSE THIRD-PARTY-NOTICES.md "$out/$name/"
-	tar -C "$out" -czf "$out/$name.tar.gz" "$name"
+
+	# The archive is built to be reproducible too, not just the binary inside it.
+	# By default tar records each file's mtime and the building user's name, and
+	# gzip records the time it ran, so two archives of identical bytes differ -
+	# which was measured against a real CI artifact: same file sizes throughout,
+	# different owner ("runner" against a local account) and different timestamps.
+	# Pinning all three lets anyone rebuild the archive and compare digests, which
+	# is what makes the attestation over that digest checkable by a third party
+	# rather than only by the builder.
+	#
+	# --sort=name keeps entry order independent of the filesystem. GNU tar is
+	# assumed: the release runs on Linux, and bsdtar on macOS neither accepts
+	# --sort nor spells --mtime the same way, so a maintainer reproducing this on
+	# macOS needs gtar.
+	tar --sort=name \
+		--mtime='UTC 1970-01-01' \
+		--owner=0 --group=0 --numeric-owner \
+		-C "$out" -cf - "$name" | gzip -n >"$out/$name.tar.gz"
 	rm -rf "$out/$name"
 	printf '  %-34s %s bytes\n' "$name.tar.gz" "$(wc -c <"$out/$name.tar.gz" | tr -d ' ')"
 done
