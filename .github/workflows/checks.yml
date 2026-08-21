@@ -82,6 +82,24 @@ jobs:
       - name: Every compiled-in module is named in THIRD-PARTY-NOTICES.md
         run: ./scripts/licences.sh
 
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
+
+      # Compile-and-run only, deliberately. A benchmark that has quietly stopped
+      # compiling is a benchmark nobody has, and that is worth catching. The
+      # timings are not: a shared runner varies by ten to twenty percent, which is
+      # wide enough to hide a real regression and narrow enough to look
+      # meaningful. Comparisons belong on a quiet machine, through benchstat.
+      - name: Every benchmark still compiles and runs
+        run: ./scripts/bench.sh --check
+
   protocol:
     runs-on: ubuntu-latest
     steps:

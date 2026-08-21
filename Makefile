@@ -14,7 +14,7 @@
 #
 # Requires nothing beyond make and a POSIX shell. Every recipe is a single line.
 
-.PHONY: default build test test-race lint vuln licences proto cross clean
+.PHONY: default build test test-race lint vuln licences proto bench bench-check cross clean
 
 default: build
 
@@ -46,6 +46,15 @@ licences:
 # wire protocol stayed compatible with the default branch.
 proto:
 	./scripts/proto.sh
+
+# Measure. Pass a count to average over more runs: make bench COUNT=20
+bench:
+	./scripts/bench.sh $(COUNT)
+
+# Only prove the benchmarks still compile and run. This is what CI does, because
+# timings on a shared runner are too noisy to gate on.
+bench-check:
+	./scripts/bench.sh --check
 
 cross:
 	./scripts/cross.sh

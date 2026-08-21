@@ -12,7 +12,7 @@ import (
 
 // realClientHello captures the exact first flight a real TLS client sends,
 // including the extensions and random padding no hand-written fixture imitates.
-func realClientHello(t *testing.T, serverName string) []byte {
+func realClientHello(t testing.TB, serverName string) []byte {
 	t.Helper()
 	client, server := net.Pipe()
 	got := make(chan []byte, 1)
