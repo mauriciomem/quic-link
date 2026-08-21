@@ -79,8 +79,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A tag carrying a semver pre-release part - v0.1.0-rc.1, v0.2.0-beta.1 -
+          # is published as a pre-release, so it is never presented as the version to
+          # download and never becomes "Latest". Without this a release-candidate tag
+          # would look exactly like a finished release to anyone visiting the page.
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in
+          *-*) prerelease="--prerelease" ;;
+          esac
+
+          # shellcheck disable=SC2086 # $prerelease is a single optional flag.
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
             --draft \
+            $prerelease \
             dist/*.tar.gz dist/SHA256SUMS
