@@ -47,7 +47,7 @@ pin    = "`+pin+`"
 // tests reports that instead of the thing it is actually checking.
 func runDaemonBriefly(t *testing.T, args ...string) error {
 	t.Helper()
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 	defer cancel()
 	return runVerbCtx(ctx, args)

@@ -11,7 +11,7 @@ import (
 // server does not exist.
 func TestRequireKnownServer_FallsBackToSettingsWithNoDaemon(t *testing.T) {
 	unsetQLEnvForTest(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	pin := mustTestPin(t)
 	path := writeTestConfig(t, `
 schema = 1
@@ -45,7 +45,7 @@ pin  = "`+pin+`"
 // naming only the file would be wrong for somebody using flags.
 func TestAutoSelectServer_NoServersAnywhereExplainsBothWays(t *testing.T) {
 	unsetQLEnvForTest(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	path := writeTestConfig(t, "schema = 1\n")
 
 	err := runVerb([]string{"--config", path, "status", "--routes"})
@@ -69,7 +69,7 @@ func TestAutoSelectServer_NoServersAnywhereExplainsBothWays(t *testing.T) {
 // so the verb acts on it.
 func TestAutoSelectServer_OneServerIsChosenWithoutBeingNamed(t *testing.T) {
 	unsetQLEnvForTest(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	pin := mustTestPin(t)
 	path := writeTestConfig(t, `
 schema = 1
@@ -91,7 +91,7 @@ pin  = "`+pin+`"
 // is worse than asking.
 func TestAutoSelectServer_SeveralServersAskRatherThanGuess(t *testing.T) {
 	unsetQLEnvForTest(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	pin := mustTestPin(t)
 	path := writeTestConfig(t, `
 schema = 1

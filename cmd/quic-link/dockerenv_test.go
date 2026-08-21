@@ -30,8 +30,36 @@ func (s *stubStatusProvider) StatusJSON() ([]byte, error) { return s.data, nil }
 // starting the server there.
 func withDaemonSocketEnv(t *testing.T) {
 	t.Helper()
-	tmp := t.TempDir()
-	t.Setenv("XDG_RUNTIME_DIR", tmp)
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
+}
+
+// shortTempDir returns a private directory whose path is short enough to hold a
+// unix socket, and removes it when the test finishes.
+//
+// t.TempDir cannot be used for this. It builds its path from TMPDIR and the
+// test's own name, and a unix socket address is limited to 104 bytes on macOS —
+// the smaller of the two platform limits, and the one this project enforces
+// everywhere. The longest test name here contributes 97 bytes on its own, which
+// leaves room for a TMPDIR of about seven characters. On Linux TMPDIR is
+// normally /tmp and the whole path fits with three bytes to spare; on macOS it
+// is a per-user directory under /var/folders that is roughly fifty characters,
+// and the socket cannot be bound at all. The failure is a bare
+// "bind: invalid argument" that says nothing about length, so it is worth not
+// rediscovering.
+//
+// os.MkdirTemp with an empty first argument uses the same TMPDIR and would have
+// the same problem, so /tmp is named explicitly. That is the one directory both
+// platforms guarantee, and only test code depends on it: the daemon itself
+// resolves its socket through XDG_RUNTIME_DIR, then TMPDIR with a length check,
+// then /tmp, and that logic is what these tests exercise rather than replace.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ql-test-")
+	if err != nil {
+		t.Fatalf("creating a short temp dir for a unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func TestDockerEnv_NoDaemon_Exit3_NoStdout(t *testing.T) {

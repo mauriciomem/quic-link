@@ -71,7 +71,7 @@ func TestServerFlags_RejectMalformedValues(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 			err := runVerb(append([]string{"daemon"}, tc.args...))
 			if exitCode(err) != 2 {
 				t.Fatalf("want a usage error (exit 2), got %d: %v", exitCode(err), err)
@@ -124,7 +124,7 @@ pin  = "`+pin+`"
 // API answering, not one tunnel — indistinguishable from a misconfiguration.
 func TestDaemon_WithNothingToManageSaysWhatIsMissing(t *testing.T) {
 	unsetQLEnvForTest(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	path := writeTestConfig(t, "schema = 1\n")
 
 	// Bounded on purpose. If the refusal is ever removed, this daemon would start
@@ -164,7 +164,7 @@ func TestDaemon_WithNothingToManageSaysWhatIsMissing(t *testing.T) {
 // in-process test noticed.
 func TestStdio_AcceptsAServerOnlyTheDaemonKnows(t *testing.T) {
 	unsetQLEnvForTest(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
 	path := writeTestConfig(t, "schema = 1\n")
 
 	// What this test can reach is the message. Whether a name the daemon manages is
