@@ -4,6 +4,23 @@ modules:
 lint:
   use:
     - STANDARD
+  # Two STANDARD rules are excluded rather than obeyed, because obeying them
+  # would change the wire contract to satisfy a style check.
+  #
+  # PACKAGE_DIRECTORY_MATCH wants package quiclink.v1 to live in quiclink/v1/.
+  # Moving the directory changes the generated Go import path, which every
+  # importer of the control plane would have to follow.
+  #
+  # SERVICE_SUFFIX wants service Control renamed to ControlService. A service
+  # name is part of the gRPC method path on the wire, so renaming it is a
+  # breaking protocol change that every existing peer would notice.
+  #
+  # Neither buys anything a reader of this proto does not already have. The
+  # rules that protect compatibility are enforced under `breaking` below, and
+  # those are not excluded.
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+    - SERVICE_SUFFIX
 breaking:
   use:
     - FILE

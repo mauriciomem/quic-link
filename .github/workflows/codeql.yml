@@ -1,0 +1,69 @@
+# CodeQL analysis.
+#
+# What this adds that the linters do not: interprocedural taint tracking. This
+# codebase parses bytes off a socket — HTTP request lines, TLS ClientHellos, DNS
+# queries, CBOR frames — and routes on what it finds. Following a value from
+# "arrived from an untrusted peer" to "used in a routing decision" across
+# function and package boundaries is what CodeQL does and what a
+# single-function pattern matcher structurally cannot.
+#
+# It also analyses the workflow files themselves, which is worth having while
+# .github/ is new and has never been reviewed by anything.
+#
+# Not on every push. It costs several minutes and its Go queries produce findings
+# that need a human to triage; on a single-maintainer project that budget is
+# better spent on pull requests and a weekly sweep than on every commit.
+
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, mid-week, away from the hour boundary so it is not queued behind
+    # everyone else's cron.
+    - cron: '17 3 * * 3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload the results to the security tab.
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: go.sum
+
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: go
+          # Go supports autobuild or manual only; build-mode none is unavailable
+          # for it. Manual is chosen over autobuild because autobuild's first
+          # action is to run bare `make`, which would make this project's
+          # Makefile part of a security scan's behaviour. Naming the build
+          # explicitly keeps the two independent.
+          build-mode: manual
+          queries: security-extended
+          # Off by default for advanced setup, unlike default setup.
+          dependency-caching: true
+
+      - name: Build for analysis
+        run: go build ./...
+
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: /language:go

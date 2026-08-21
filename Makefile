@@ -14,7 +14,7 @@
 #
 # Requires nothing beyond make and a POSIX shell. Every recipe is a single line.
 
-.PHONY: default build test test-race lint vuln cross clean
+.PHONY: default build test test-race lint vuln licences proto cross clean
 
 default: build
 
@@ -36,6 +36,16 @@ lint:
 # even when it finds something.
 vuln:
 	govulncheck ./...
+
+# Every module compiled into the binary is named in THIRD-PARTY-NOTICES.md at the
+# version being built.
+licences:
+	./scripts/licences.sh
+
+# Needs buf on PATH. Style rules first, then the one that matters: whether the
+# wire protocol stayed compatible with the default branch.
+proto:
+	./scripts/proto.sh
 
 cross:
 	./scripts/cross.sh
