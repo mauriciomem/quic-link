@@ -45,7 +45,13 @@ jobs:
           # minimum this code needs, which is not the same question as which
           # toolchain built it, and a reported test count is only meaningful
           # against a known one.
-          go-version: '1.26.5'
+          #
+          # Keep this current with Go's patch releases: two reachable standard-
+          # library vulnerabilities (crypto/tls and encoding/asn1) were found here
+          # at 1.26.5 and fixed in 1.26.6. A distribution's patched build of the
+          # same version can report clean while stock does not, so this pin - not a
+          # developer's local toolchain - is the honest signal.
+          go-version: '1.26.7'
           # setup-go keys its cache on go.mod by default. go.sum is the file that
           # actually pins what gets downloaded.
           cache-dependency-path: go.sum
@@ -67,7 +73,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.7'
           cache-dependency-path: go.sum
 
       - name: Run the suite under the race detector
@@ -83,7 +89,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.7'
           cache-dependency-path: go.sum
 
       - name: Build every supported platform
