@@ -1,41 +1,14 @@
-# Dependency updates.
-#
-# Two ecosystems, and the second is the one that is easy to forget: workflow
-# actions are pinned to commit SHAs here, and a SHA never becomes outdated by
-# itself. Dependabot is what moves them, rewriting the trailing version comment
-# as it goes so the pin stays readable.
-#
-# Worth knowing, because it changes what this file is for: Dependabot does not
-# raise security ALERTS for actions pinned to a SHA — only for ones using
-# semantic versions. Version UPDATES do work on SHAs. So pinning plus these
-# updates is a coherent pair; pinning plus an expectation of alerts is not.
-#
-# Updates are grouped. On a single-maintainer project a stream of one-line pull
-# requests is a stream that stops being read.
-
 version: 2
 updates:
   - package-ecosystem: gomod
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      go-dependencies:
-        patterns:
-          - "*"
     commit-message:
-      # Matches this repository's convention: a scope, then a sentence.
       prefix: "deps"
-
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      github-actions:
-        patterns:
-          - "*"
     commit-message:
       prefix: "ci"
