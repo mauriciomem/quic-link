@@ -26,8 +26,8 @@ Permission notice and copyright must be reproduced.
 
 | Module | Version |
 |---|---|
-| `github.com/quic-go/quic-go` | v0.60.0 |
-| `github.com/fxamacker/cbor/v2` | v2.9.2 |
+| `github.com/quic-go/quic-go` | v0.61.0 |
+| `github.com/fxamacker/cbor/v2` | v2.9.3 |
 | `github.com/pelletier/go-toml/v2` | v2.4.3 |
 | `github.com/x448/float16` | v0.8.4 |
 
@@ -40,11 +40,11 @@ the copyright holder's name to endorse derived products without permission.
 
 | Module | Version |
 |---|---|
-| `golang.org/x/net` | v0.55.0 |
-| `golang.org/x/sys` | v0.45.0 |
-| `golang.org/x/crypto` | v0.51.0 |
-| `golang.org/x/text` | v0.37.0 |
-| `google.golang.org/protobuf` | v1.36.11 |
+| `golang.org/x/net` | v0.56.0 |
+| `golang.org/x/sys` | v0.47.0 |
+| `golang.org/x/crypto` | v0.54.0 |
+| `golang.org/x/text` | v0.40.0 |
+| `google.golang.org/protobuf` | v1.36.12 |
 | `github.com/spf13/pflag` | v1.0.9 |
 
 The `golang.org/x/*` and `google.golang.org/protobuf` modules are Copyright (c) The Go Authors.
@@ -56,8 +56,8 @@ files were modified. **quic-link modifies none of these modules.**
 
 | Module | Version | Ships a `NOTICE` file? |
 |---|---|---|
-| `google.golang.org/grpc` | v1.82.1 | **Yes — `NOTICE.txt`** |
-| `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260414002931-afd174a4e478 | No |
+| `google.golang.org/grpc` | v1.83.0 | **Yes — `NOTICE.txt`** |
+| `google.golang.org/genproto/googleapis/rpc` | v0.0.0-20260526163538-3dc84a4a5aaa | No |
 | `github.com/spf13/cobra` | v1.10.2 | No |
 | `github.com/inconshreveable/mousetrap` | v1.1.0 | No |
 
@@ -92,6 +92,15 @@ licences actually attach to. It deliberately does not enumerate the wider module
 (`go list -m all`), which includes modules used only for testing or tooling and never shipped.
 
 ## Changelog
+
+- 2026-08-21: **Versions synchronised with a combined dependency upgrade.** Nine rows moved:
+  `cbor` v2.9.3, `quic-go` v0.61.0, `x/crypto` v0.54.0, `x/net` v0.56.0, `x/sys` v0.47.0,
+  `x/text` v0.40.0, `grpc` v1.83.0, `protobuf` v1.36.12, and `genproto/googleapis/rpc` to its
+  2026-05-26 pseudo-version. **No module entered or left the build closure and no licence
+  changed**, so only version cells were edited; `grpc`'s `NOTICE.txt` was diffed between
+  v1.82.1 and v1.83.0 and is byte-identical, so the text reproduced below still satisfies
+  §4(d). Recorded because this file pins versions, which is what makes a routine bump able to
+  falsify it — the reason the check that caught this exists.
 
 - 2026-08-21: **`google.golang.org/genproto/googleapis/rpc` added; it was missing.** It is a
   transitive requirement of `google.golang.org/grpc` and is genuinely in the build closure
