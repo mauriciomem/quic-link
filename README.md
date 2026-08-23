@@ -18,7 +18,30 @@ name on a running agent. Job runners are designed but deliberately unscheduled.
 
 ## Quickstart
 
-**0. Get the binary.** Either download a release or build from source.
+**0. Get the binary.** One command, or download by hand, or build from source.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mauriciomem/quic-link/main/scripts/install.sh | sh
+```
+
+That detects your platform, downloads the matching release archive, checks it
+against the release's own `SHA256SUMS`, and puts a single binary in
+`~/.local/bin`. It then tells you whether that directory is on your `PATH` and,
+if it is not, prints the exact line to add and which file to add it to.
+
+**It uses no `sudo`, writes nothing outside your home directory, edits no shell
+profile, and installs no service.** That is deliberate: exactly one quic-link
+command ever needs root — `sudo quic-link init`, step 2 below — and an installer
+that quietly did that work would remove the one moment you are told what is
+changing on your machine. Read it before running it if you would rather:
+[`scripts/install.sh`](scripts/install.sh).
+
+Two variables adjust it: `QLINK_INSTALL_DIR` for somewhere other than
+`~/.local/bin`, and `QLINK_VERSION` to pin a tag (including a pre-release, which
+`latest` deliberately skips).
+
+<details>
+<summary>Or download by hand</summary>
 
 Releases carry one archive per platform, plus a `SHA256SUMS` file. Pick the one
 matching your machine, from the
@@ -40,6 +63,8 @@ gh attestation verify quic-link-*.tar.gz -R mauriciomem/quic-link
 
 The second command asks GitHub whether that exact archive was built by this
 repository's release workflow, from a specific commit. It needs no keys.
+
+</details>
 
 To build from source instead — Go 1.26.4 or newer:
 
