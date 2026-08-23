@@ -4,19 +4,11 @@
 #
 #   curl -fsSL https://github.com/mauriciomem/quic-link/raw/HEAD/scripts/install.sh | sh
 #
-# WHAT THIS DOES, AND WHAT IT DELIBERATELY DOES NOT
-#
 # It downloads one release archive, checks it against the release's own
 # SHA256SUMS, and copies a single binary into ~/local/bin. That is all.
 #
 # It does not use sudo, write anything outside your home directory, edit your
-# shell profile, install a service, or start anything. That is not modesty about
-# scope — it is the project's privilege model. Exactly one quic-link operation
-# ever needs root, and it is `sudo quic-link init`, which registers a single
-# resolver file so that *.internal names resolve. That prompt is the product's
-# promise: setup asks once, visibly, and usage never asks. An installer that
-# quietly did the same work would remove the one moment a user is told what is
-# being changed on their machine.
+# shell profile, install a service, or start anything. 
 #
 # Likewise it will not edit your PATH. It prints the line to add and where to add
 # it, because a script that silently rewrites a shell profile is a script you
@@ -27,10 +19,6 @@
 set -eu
 
 REPO="mauriciomem/quic-link"
-# Deliberately NOT prefixed QUIC_LINK_. The binary treats that prefix as its own
-# configuration namespace and warns about any name in it that it does not
-# recognise, so an installer variable left set in a shell would make every
-# later quic-link command print a warning.
 INSTALL_DIR="${QLINK_INSTALL_DIR:-$HOME/local/bin}"
 VERSION="${QLINK_VERSION:-latest}"
 
@@ -93,8 +81,6 @@ curl -fSL --progress-bar -o "${tmp}/${name}.tar.gz" "${base}/${name}.tar.gz" ||
      See https://github.com/${REPO}/releases/tag/${VERSION}"
 
 # ----------------------------------------------------------------- verify -----
-# The release publishes one SHA256SUMS covering every archive. Checking it means
-# a corrupted or truncated download fails here rather than at first run.
 step "Verifying the checksum"
 # Retry once: a transient TLS or network fault must not be reported as "this
 # release has no checksums", which would quietly downgrade the check.
@@ -148,12 +134,6 @@ installed=$("${INSTALL_DIR}/quic-link" version 2>/dev/null || echo "installed")
 say "    ${installed}"
 
 # ------------------------------------------------------------------- PATH -----
-# Checked rather than assumed. Note that ~/local/bin is NOT a location any
-# operating system adds to PATH for you — unlike ~/.local/bin, the XDG
-# user-level equivalent of /usr/local, which systemd and most distributions add
-# automatically. So this branch is the normal case here rather than the
-# exception, which is why the guidance below is written to be followed rather
-# than skimmed.
 case ":${PATH}:" in
 *":${INSTALL_DIR}:"*)
 	on_path=yes
@@ -213,9 +193,5 @@ say ""
 say "    Step 2 is the only command that needs root, and it writes exactly one"
 say "    file, which 'quic-link init --undo' removes. Skip it if you do not want"
 say "    name resolution: everything else works without it."
-say ""
-say "    Verify what you downloaded came from the release workflow:"
-say ""
-say "        gh attestation verify <archive> -R ${REPO}"
 say ""
 say "    Docs: https://github.com/${REPO}#readme"
