@@ -14,7 +14,7 @@
 #
 # Requires nothing beyond make and a POSIX shell. Every recipe is a single line.
 
-.PHONY: default build test test-race lint vuln licences proto bench bench-check cross release clean
+.PHONY: default build test test-race lint vuln proto bench bench-check cross release clean
 
 default: build
 
@@ -36,11 +36,6 @@ lint:
 # even when it finds something.
 vuln:
 	govulncheck ./...
-
-# Every module compiled into the binary is named in THIRD-PARTY-NOTICES.md.
-# Names only: a licence attaches to a module, not to a release of it.
-licences:
-	./scripts/licences.sh
 
 # Needs buf on PATH. Style rules first, then the one that matters: whether the
 # wire protocol stayed compatible with the default branch.
