@@ -37,8 +37,8 @@ lint:
 vuln:
 	govulncheck ./...
 
-# Every module compiled into the binary is named in THIRD-PARTY-NOTICES.md at the
-# version being built.
+# Every module compiled into the binary is named in THIRD-PARTY-NOTICES.md.
+# Names only: a licence attaches to a module, not to a release of it.
 licences:
 	./scripts/licences.sh
 
