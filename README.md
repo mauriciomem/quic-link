@@ -104,8 +104,9 @@ with `status`:
 
 ```bash
 quic-link status --json
-# {"schema":1,...,"servers":[{"name":"myserver","session":"connected",
-#  "local_ports":{"ssh":50330,"docker":50331},...}]}
+# {"schema":2,"identity":{...},"servers":[{"name":"myserver","session":"connected",
+#  "transport":"dial","since_ms":1234,"local_ports":{"ssh":50330,"docker":50331},
+#  "path":"ipv4-direct"}]}
 ```
 
 Use them directly, or reach for the porcelain verbs instead:

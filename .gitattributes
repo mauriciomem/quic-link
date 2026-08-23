@@ -1,0 +1,15 @@
+# Normalise line endings for text, so a checkout on any platform produces the
+# same bytes the tests were written against.
+* text=auto eol=lf
+
+# Golden files are compared byte-for-byte and deliberately carry no trailing
+# newline, so they must never be normalised or "tidied". Marking them binary
+# stops git from touching their contents and stops diffs from being shown as
+# text, which is the honest representation: a one-byte change here is a contract
+# change, not a whitespace change.
+internal/daemon/testdata/*.json -text
+
+# Shell scripts and workflows must keep LF even if a contributor's editor
+# defaults otherwise; a CRLF shebang line is not executable.
+*.sh text eol=lf
+.github/**/*.yml text eol=lf
