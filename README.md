@@ -21,7 +21,7 @@ name on a running agent. Job runners are designed but deliberately unscheduled.
 **0. Get the binary.** One command, or download by hand, or build from source.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mauriciomem/quic-link/main/scripts/install.sh | sh
+curl -fsSL https://github.com/mauriciomem/quic-link/raw/HEAD/scripts/install.sh | sh
 ```
 
 That detects your platform, downloads the matching release archive, checks it

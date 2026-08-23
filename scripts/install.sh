@@ -2,7 +2,7 @@
 #
 # Install quic-link into ~/local/bin.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mauriciomem/quic-link/main/scripts/install.sh | sh
+#   curl -fsSL https://github.com/mauriciomem/quic-link/raw/HEAD/scripts/install.sh | sh
 #
 # WHAT THIS DOES, AND WHAT IT DELIBERATELY DOES NOT
 #
