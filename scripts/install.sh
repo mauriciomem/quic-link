@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
 #
-# Install quic-link into ~/.local/bin.
+# Install quic-link into ~/local/bin.
 #
 #   curl -fsSL https://raw.githubusercontent.com/mauriciomem/quic-link/main/scripts/install.sh | sh
 #
 # WHAT THIS DOES, AND WHAT IT DELIBERATELY DOES NOT
 #
 # It downloads one release archive, checks it against the release's own
-# SHA256SUMS, and copies a single binary into ~/.local/bin. That is all.
+# SHA256SUMS, and copies a single binary into ~/local/bin. That is all.
 #
 # It does not use sudo, write anything outside your home directory, edit your
 # shell profile, install a service, or start anything. That is not modesty about
@@ -31,7 +31,7 @@ REPO="mauriciomem/quic-link"
 # configuration namespace and warns about any name in it that it does not
 # recognise, so an installer variable left set in a shell would make every
 # later quic-link command print a warning.
-INSTALL_DIR="${QLINK_INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${QLINK_INSTALL_DIR:-$HOME/local/bin}"
 VERSION="${QLINK_VERSION:-latest}"
 
 say()  { printf '%s\n' "$*"; }
@@ -148,8 +148,12 @@ installed=$("${INSTALL_DIR}/quic-link" version 2>/dev/null || echo "installed")
 say "    ${installed}"
 
 # ------------------------------------------------------------------- PATH -----
-# Checked rather than assumed: ~/.local/bin is on PATH by default on most modern
-# Linux and is not on macOS.
+# Checked rather than assumed. Note that ~/local/bin is NOT a location any
+# operating system adds to PATH for you — unlike ~/.local/bin, the XDG
+# user-level equivalent of /usr/local, which systemd and most distributions add
+# automatically. So this branch is the normal case here rather than the
+# exception, which is why the guidance below is written to be followed rather
+# than skimmed.
 case ":${PATH}:" in
 *":${INSTALL_DIR}:"*)
 	on_path=yes
@@ -185,8 +189,8 @@ else
 	else
 		say "    Add this line to ${profile}:"
 		say ""
-		if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
-			say "        export PATH=\"\$HOME/.local/bin:\$PATH\""
+		if [ "$INSTALL_DIR" = "$HOME/local/bin" ]; then
+			say "        export PATH=\"\$HOME/local/bin:\$PATH\""
 		else
 			say "        export PATH=\"${INSTALL_DIR}:\$PATH\""
 		fi

@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/mauriciomem/quic-link/main/scripts/
 
 That detects your platform, downloads the matching release archive, checks it
 against the release's own `SHA256SUMS`, and puts a single binary in
-`~/.local/bin`. It then tells you whether that directory is on your `PATH` and,
+`~/local/bin`. It then tells you whether that directory is on your `PATH` and,
 if it is not, prints the exact line to add and which file to add it to.
 
 **It uses no `sudo`, writes nothing outside your home directory, edits no shell
@@ -37,7 +37,7 @@ changing on your machine. Read it before running it if you would rather:
 [`scripts/install.sh`](scripts/install.sh).
 
 Two variables adjust it: `QLINK_INSTALL_DIR` for somewhere other than
-`~/.local/bin`, and `QLINK_VERSION` to pin a tag (including a pre-release, which
+`~/local/bin`, and `QLINK_VERSION` to pin a tag (including a pre-release, which
 `latest` deliberately skips).
 
 <details>

@@ -61,7 +61,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/quic-link daemon
+ExecStart=%h/local/bin/quic-link daemon
 # The daemon reclaims a stale socket on its own, so a restart after an unclean
 # exit needs no cleanup step.
 Restart=on-failure
@@ -99,7 +99,7 @@ session. That is often what you want on a laptop and rarely what you want on a s
 **Scoping to one server** — add the flag to `ExecStart`:
 
 ```ini
-ExecStart=%h/.local/bin/quic-link daemon --server web1
+ExecStart=%h/local/bin/quic-link daemon --server web1
 ```
 
 ---
