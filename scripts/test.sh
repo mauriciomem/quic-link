@@ -2,27 +2,14 @@
 #
 # Run the test suite the way CI runs it, and vice versa.
 #
-# This script is the single definition of "run the tests". The GitHub Actions
-# workflow calls it rather than repeating its steps, so local and CI results
-# cannot drift apart by accident.
-#
 # Usage:
 #   scripts/test.sh              # build, vet, test, and assert the result counts
 #   scripts/test.sh --race       # the same, with the race detector
 #   scripts/test.sh --tags TAGS  # the same, with extra build tags
 #
-# THE ORDER OF THE STEPS IS THE POINT
-#
-# Build first, on its own. A package that fails to compile makes `go test` report
-# far fewer results while still failing, and the cheapest way to tell "the tree
-# is broken" from "a test is broken" is to try building it — which takes a
-# fraction of a second and cannot be misread.
-#
+# Build first, on its own. 
 # Then test, capturing output to a file, and check the exit status BEFORE counting
-# anything. Piping `go test` straight into a counter reports the counter's exit
-# status, so a failing suite can look like a passing one. That is not theoretical:
-# it is what a first draft of this script did.
-#
+# anything.
 # Then count, from the saved file. Counting is a check for results going missing,
 # not a check that they passed.
 
@@ -61,12 +48,6 @@ if [ -z "$want_cli" ] || [ -z "$want_tree" ]; then
 fi
 
 # countResults counts reported top-level test results in a saved log.
-#
-# awk rather than `grep -c`, for two reasons that both cost real time to
-# rediscover: `grep -c` exits 1 when it matches nothing, which under `set -e`
-# aborts the script before it can print the diagnostic that would explain why;
-# and the obvious guard for that, `grep -c ... || echo 0`, prints "0" twice
-# because grep prints its zero before exiting non-zero. awk has neither problem.
 countResults() {
 	awk '/^--- (PASS|SKIP|FAIL): Test/ { n++ } END { print n + 0 }' "$1"
 }
@@ -105,10 +86,7 @@ checkPackage() {
 		echo "" >&2
 
 		# Print each failing test with the lines that precede it, because that is
-		# where the reason is. Go writes a t.Errorf message indented, BEFORE the
-		# "--- FAIL:" line it belongs to, so listing only the FAIL lines reports
-		# which tests failed and not one word about why — which is useless on a
-		# platform the maintainer cannot reproduce locally.
+		# where the reason is.
 		awk '
 			/^(--- FAIL|    --- FAIL)/ {
 				print "  " $0

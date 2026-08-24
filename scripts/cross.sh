@@ -7,11 +7,6 @@
 # boundary value in a test (a port number of 1<<33, chosen to prove an
 # impossible port is refused, does not fit a 32-bit int). Those targets build
 # and ship correctly; only their tests cannot be compiled for them.
-#
-# Windows is absent on purpose. The tree does not compile for it, and that is
-# currently load-bearing: the unix-socket peer-credential check has no Windows
-# equivalent, so a Windows binary would start a daemon that refuses every
-# connection from its own CLI. A build failure is the better of those two.
 
 set -euo pipefail
 

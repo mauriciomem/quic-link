@@ -23,47 +23,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.7'
           cache-dependency-path: go.sum
-
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          # Pinned, not `latest`. A linter that updates itself turns an unrelated
-          # push into a red build on code nobody touched.
           version: v2.13.1
-          # The caps default to 50 per linter and 3 per repeated issue, which
-          # silently truncates the report — this tree measured 517 findings while
-          # displaying 82. A gate must not misrepresent its own scope.
-          args: --max-issues-per-linter=0 --max-same-issues=0
 
   vulnerabilities:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.7'
           cache-dependency-path: go.sum
-
-      # No third-party action: two commands, and nothing to pin or trust.
-      #
-      # govulncheck reports only vulnerabilities this code can actually reach,
-      # which is why it is a gate at all. Fourteen advisories currently sit in
-      # the module graph unreached, and one of them has no fix available — a gate
-      # demanding a clean graph could never pass, so this one demands that
-      # nothing reachable is vulnerable.
-      #
-      # Text output on purpose: `-format json` exits 0 even when it finds
-      # something, so a JSON-consuming step would have to inspect the payload to
-      # notice. The default mode exits 3.
       - name: Scan for vulnerabilities this code reaches
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -73,17 +53,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.7'
           cache-dependency-path: go.sum
-
-      # Compile-and-run only, deliberately. A benchmark that has quietly stopped
-      # compiling is a benchmark nobody has, and that is worth catching. The
-      # timings are not: a shared runner varies by ten to twenty percent, which is
-      # wide enough to hide a real regression and narrow enough to look
-      # meaningful. Comparisons belong on a quiet machine, through benchstat.
       - name: Every benchmark still compiles and runs
         run: ./scripts/bench.sh --check
 
@@ -94,28 +67,16 @@ jobs:
         with:
           # buf compares against a git ref, so the history has to be present.
           fetch-depth: 0
-
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.7'
           cache-dependency-path: go.sum
-
-      # Installed rather than pulled from a third-party action, for the same
-      # reason govulncheck is: one command, pinned to an exact version, and one
-      # fewer supplier to trust in a workflow that gates the wire protocol.
       - name: Install buf
         run: |
           go install github.com/bufbuild/buf/cmd/buf@v1.72.0
           buf --version
-
-      # Style rules are configured in buf.yaml; two are excluded there with their
-      # reasons, because obeying them would change the wire contract.
+      # Style rules are configured in buf.yaml
       - name: Proto lint
         run: buf lint
-
-      # This is the gate that matters. The wire protocol is versioned, and a
-      # change to field layout or semantics is required to bump the version — a
-      # rule that has until now depended on a human noticing. buf compares the
-      # proto against the base of the change and fails on an incompatible edit.
       - name: Proto compatibility against the base branch
         run: buf breaking --against '.git#ref=origin/${{ github.base_ref || github.event.repository.default_branch }}'

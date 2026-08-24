@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
 #
 # Protocol checks: style, then compatibility.
-#
-# The second is the one worth having. The wire protocol is versioned, and the
-# rule is that any change to frame layout, field semantics or status codes bumps
-# the version. Until now that rule was enforced by a human noticing. `buf
-# breaking` enforces it mechanically, and it is not vacuous: renaming a single
-# response field makes it fail, naming both the field and the changed json_name.
-#
-# Two style rules are excluded in buf.yaml, with reasons, because obeying them
-# would move the proto directory and rename the service — both of which change
-# what peers see on the wire, to satisfy a linter.
-
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

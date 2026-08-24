@@ -9,8 +9,6 @@
 # Called by the release workflow and usable by hand, so what CI publishes and what
 # can be reproduced locally are the same bytes.
 #
-# THE FLAGS, AND WHY EACH IS THERE
-#
 #   CGO_ENABLED=0   a static binary with no host C toolchain in its inputs.
 #   -trimpath       removes build directory paths, so two people building the
 #                   same commit in different directories get the same bytes.
@@ -31,11 +29,7 @@
 # It removes vcs.revision and vcs.modified from the binary. The commit is put
 # back by -X, but vcs.modified is not: that flag is the toolchain's own
 # observation that the tree was clean, and nothing can restore it. This script
-# therefore refuses to build from a dirty tree, which is a stronger check than the
-# field it replaces — a stamped-in "clean" claim is only as good as the process
-# that set it, whereas a refusal happens before any artifact exists.
-#
-# ON THE WORD "REPRODUCIBLE"
+# therefore refuses to build from a dirty tree.
 #
 # Given the same source, the same toolchain build, and this recipe, the output is
 # byte-identical regardless of build directory. It is not reproducible across
@@ -58,16 +52,7 @@ check="${2:-}"
 #
 # Modified tracked files are refused outright: they are in the build and not in
 # the commit, so a stamped version would name something that does not exist
-# anywhere. This replaces the vcs.modified flag that -buildvcs=false removes, and
-# is stronger, because it happens before an artifact exists rather than being
-# recorded inside one.
-#
-# Untracked files are a warning rather than a refusal, with one exception. Most of
-# them - local notes, scratch scripts - cannot reach the build, because the build
-# compiles packages and a file outside one is invisible to it. An untracked .go
-# file is different: it would be compiled, and it is not in the commit, so it gets
-# the same refusal as a modification.
-modified=$(git status --porcelain --untracked-files=no)
+# anywhere. This replaces the vcs.modified flag that -buildvcs=false removes
 if [ -n "$modified" ]; then
 	echo "FAIL: tracked files are modified, so a version stamped into these binaries" >&2
 	echo "      would not identify what is in them:" >&2
@@ -121,15 +106,6 @@ for target in "${targets[@]}"; do
 	# recipient needs in order to know what they have and what it permits.
 	cp LICENSE THIRD-PARTY-NOTICES.md "$out/$name/"
 
-	# The archive is built to be reproducible too, not just the binary inside it.
-	# By default tar records each file's mtime and the building user's name, and
-	# gzip records the time it ran, so two archives of identical bytes differ -
-	# which was measured against a real CI artifact: same file sizes throughout,
-	# different owner ("runner" against a local account) and different timestamps.
-	# Pinning all three lets anyone rebuild the archive and compare digests, which
-	# is what makes the attestation over that digest checkable by a third party
-	# rather than only by the builder.
-	#
 	# --sort=name keeps entry order independent of the filesystem. GNU tar is
 	# assumed: the release runs on Linux, and bsdtar on macOS neither accepts
 	# --sort nor spells --mtime the same way, so a maintainer reproducing this on

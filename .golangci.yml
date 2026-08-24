@@ -1,51 +1,33 @@
-# Linter configuration.
-#
-# The set here is deliberately narrow, and the reason is worth stating because
-# the obvious alternative looks better and is worse.
-#
-# Running the default set over this tree reports 517 findings — and, by default,
-# displays only 82 of them, because golangci-lint caps output per linter and per
-# repeated issue. Roughly 470 are unchecked error returns from `Close` and
-# `fmt.Fprintf`, overwhelmingly in tests, which is ordinary Go rather than a
-# latent defect. A gate that starts 517 findings in the red is a gate that gets
-# suppressed wholesale, and then it protects nothing.
-#
-# This set reports zero findings today. That is the property that matters: it
-# makes every future finding a true positive, on a codebase where nobody has to
-# first decide whether 517 pre-existing ones are worth reading.
-#
-# Widening it later is a deliberate step, not a side effect of adding CI. The
-# 470 unchecked-error findings are a real cleanup and are recorded as such.
-
 version: "2"
+
+run:
+  tests: true
 
 linters:
   default: none
   enable:
-    # Compiler-adjacent correctness: printf argument mismatches, lost context
-    # cancellation, unreachable code, struct tag errors.
     - govet
-    # Assignments whose value is never used.
     - ineffassign
-    # Deep bug-finding analysis. Restricted below to the SA (correctness) group,
-    # because it is the group that finds bugs rather than styling.
     - staticcheck
+    - makezero
+    - nilerr
 
   settings:
+    govet:
+      enable:
+        - nilness
     staticcheck:
-      # SA* only. The other groups (S, ST, QF) are simplifications, style and
-      # quickfixes; useful, but they would land tens of findings on existing code
-      # and none of them describes a defect.
-      #
-      # SA1019 — use of a deprecated symbol — is excluded on purpose. It fires 23
-      # times, all on this project's own deprecated TLS helpers and on
-      # go/parser.ParseDir, and retiring those is its own decision rather than
-      # something to discover inside a lint gate.
       checks:
         - "SA*"
-        - "-SA1019"
 
-# Both source-scanning tests in this tree read every .go file including tests, so
-# tests are linted too rather than excluded. The two findings this set reported
-# when it was introduced were both in test code, and both were guards that could
-# not fail — which is the argument for not excluding them.
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        text: "SA1019"
+        linters:
+          - staticcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

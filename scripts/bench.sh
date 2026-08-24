@@ -7,10 +7,10 @@
 #   scripts/bench.sh            measure, and print the numbers
 #   scripts/bench.sh --check    only verify the benchmarks still compile and run
 #
-# The second is what belongs in CI. Timings on a shared runner vary by ten to
-# twenty percent, which is wide enough to hide any regression worth finding and
-# narrow enough to look meaningful, so gating on them would produce noise with a
-# decimal point. What CI can usefully assert is that a benchmark has not silently
+# The second is what belongs in CI. Timings on a shared runner may vary enough to 
+# hide any regression worth finding and narrow enough to look meaningful, so 
+# gating on them would produce noise with a decimal point. 
+# What CI can usefully assert is that a benchmark has not silently
 # stopped compiling, because a benchmark nobody can run is a benchmark nobody has.
 #
 # For an actual comparison, run this on both sides of a change with -count=10 or
