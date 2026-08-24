@@ -111,7 +111,9 @@ TLS 1.3 comes built in, so there is no separate encryption layer to configure.
 
 Tracing one SSH connection from your terminal through the tunnel:
 
-1. **You run** `ssh -p 50330 user@127.0.0.1` (the port quic-link handed you).
+1. **You run** `ssh -p <port> user@127.0.0.1`, using the port quic-link handed you
+   for this server (`quic-link status --json` reports it), or simply
+   `quic-link ssh <server>`, which looks it up for you.
 2. **The daemon accepts** that local TCP connection on the port it is holding open
    for this server's "ssh" target.
 3. **A new stream opens** on the existing QUIC connection, carrying a small header
