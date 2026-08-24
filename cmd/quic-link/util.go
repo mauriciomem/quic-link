@@ -157,7 +157,7 @@ func clientTLSFromFlags(keyFile, serverPin string) (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load identity key: %w", err)
 	}
-	tlsConf, err := identity.ClientTLS(key, serverPin)
+	tlsConf, err := identity.ClientDialTLS(key, serverPin)
 	if err != nil {
 		return nil, fmt.Errorf("TLS config: %w", err)
 	}

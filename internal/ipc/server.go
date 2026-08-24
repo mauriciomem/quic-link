@@ -146,7 +146,9 @@ type AttachPool interface {
 }
 
 // attachReadyTimeout is the maximum time handleAttach waits for the pool to
-// provide a live connection when a reconnect is in progress.
+// provide a live connection when a reconnect is in progress. Five seconds is
+// long enough to cover a single-flight reconnect already under way but short
+// enough to give the operator a fast failure when the agent is genuinely down.
 const attachReadyTimeout = 5 * time.Second
 
 // ServerOpts carries optional tuning for the Server. Zero value uses the

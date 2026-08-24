@@ -508,6 +508,25 @@ func TestControlCall_DeadlineIsBounded(t *testing.T) {
 // holds its own copy, the close does not race the pool's internal state —
 // but the in-flight RPC against a now-closed client must still surface as an
 // ordinary failure, not a panic or a hang.
+//
+// The ordering this test depends on is the subtle part, and getting it wrong
+// makes the test fail on a loaded machine for a reason that is not a defect.
+// Displacement installs the new connection and releases the entry lock
+// FIRST, and only afterwards closes the old control client and the old
+// connection. Those are separate steps in that order, with nothing ordering
+// the second against any observer of the first. So waiting for the pool to
+// hand back a different connection proves only that the swap has landed: at
+// that instant the old control client is routinely still open, its stream is
+// still live, and the agent that owns it is still answering on it. An RPC
+// issued then can legitimately succeed, and asserting a failure at that
+// point asserts something the design never promised.
+//
+// Waiting for the displaced connection's own context instead gives a real
+// ordering edge. The displacer closes the old control client and then closes
+// the old connection, in that order, in the same call on one goroutine — so
+// observing the connection's context become done proves the control-client
+// close has already returned. Only after that is a failure the code's actual
+// promise rather than a coincidence of scheduling.
 func TestControlCall_DisplacedMidCall_FailsCleanly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -544,6 +563,19 @@ func TestControlCall_DisplacedMidCall_FailsCleanly(t *testing.T) {
 	r.connectAgent(t, ctx)
 	if got := waitForDistinctConn(t, ctx, r.pool, "rev", incumbent, 15*time.Second); got == nil {
 		t.Fatal("displacement never happened")
+	}
+
+	// Wait for the displacement to have actually reached the incumbent, not
+	// merely the pool. This is what makes the assertion below deterministic:
+	// the displacer closes the old control client before it closes the old
+	// connection, so a done connection context proves the client close has
+	// already happened. Polling the pool alone would leave the old client
+	// briefly still open and still answered by its agent.
+	select {
+	case <-incumbent.Context().Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the displaced connection was never closed, so its control client was never closed either; " +
+			"displacement is expected to tear down the session it replaced")
 	}
 
 	// Let the parked call proceed against the now-displaced client.

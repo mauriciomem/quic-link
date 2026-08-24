@@ -39,11 +39,27 @@ If you want to build from source or read the code, this is the whole loop:
 ./scripts/test.sh            # build, gofmt, vet, the suite, and the result counts
 ./scripts/test.sh --race     # the same, with the race detector
 ./scripts/cross.sh           # every platform still compiles
+golangci-lint run ./...      # the static-analysis gate
 ```
 
-`make test`, `make test-race` and `make cross` are aliases for those, and the CI
-workflow calls the same scripts, so a green run locally means the same thing a
-green run in CI does.
+`make test`, `make test-race`, `make cross` and `make lint` are aliases for those,
+and the CI workflow calls the same scripts, so a green run locally means the same
+thing a green run in CI does.
+
+The linter is pinned to the version CI uses, because one that updates itself turns
+an unrelated push into a red build on code nobody touched:
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+  | sh -s -- -b "$(go env GOPATH)/bin" v2.13.1
+```
+
+Pass no flags to it. Which linters run, and how much of the report is shown, are
+both settled in `.golangci.yml` — deliberately, so that a bare run and CI cannot
+disagree. Two of the defaults there are worth knowing: the report caps are lifted,
+because the defaults of 50 per linter and 3 per repeated issue silently truncate,
+and use of a deprecated symbol is only tolerated in test files, so a deprecated
+call reaching production code fails the build.
 
 Two details worth knowing before you read the script:
 

@@ -194,14 +194,6 @@ func OpenControl(ctx context.Context, conn transport.Conn, version string, opts 
 	return cclient, nil
 }
 
-// attachReadyTimeout is the maximum time DoAttach waits for the pool to
-// provide a live connection. A session that is still connecting will make the
-// caller wait up to this long before returning a "not ready" error. Five
-// seconds is long enough to cover a single-flight reconnect in progress but
-// short enough to give the operator a fast failure when the agent is genuinely
-// down.
-const attachReadyTimeout = 5 * time.Second
-
 // LogAttach emits the open/close audit pair for a splice. Both the ipc server
 // and the edge accept loops call this so the audit lines are structurally
 // identical regardless of how the attach was initiated.

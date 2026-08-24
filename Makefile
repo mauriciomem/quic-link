@@ -28,9 +28,11 @@ test:
 test-race:
 	./scripts/test.sh --race
 
-# Needs golangci-lint on PATH; see CONTRIBUTING.md.
+# Needs golangci-lint on PATH; see CONTRIBUTING.md for the version to install.
+# Which linters run, and how much is reported, are both in .golangci.yml, so a
+# bare `golangci-lint run` sees exactly what this target and CI see.
 lint:
-	golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 ./...
+	golangci-lint run ./...
 
 # Needs govulncheck on PATH. Text output is deliberate: the JSON mode exits 0
 # even when it finds something.
