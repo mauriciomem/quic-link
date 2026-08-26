@@ -54,14 +54,14 @@ func TestPool_GivesUpOnPermanentAuthFailure(t *testing.T) {
 	_, authorizedPin := genPoolIdentity(t) // what the agent actually accepts
 
 	// Agent accepts authorizedPin, NOT clientKey's pin.
-	serverTLS, err := identity.ServerTLS(serverKey, []string{authorizedPin})
+	serverTLS, err := identity.AgentListenTLS(serverKey, []string{authorizedPin})
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
 	// Client trusts the real server pin (so the client-side handshake completes).
-	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	clientTLS, err := identity.ClientDialTLS(clientKey, serverPin)
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
+		t.Fatalf("ClientDialTLS: %v", err)
 	}
 
 	// Start the agent.

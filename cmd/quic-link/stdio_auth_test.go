@@ -39,9 +39,9 @@ func TestStdioRun_AuthRejected_ExitCode4(t *testing.T) {
 	clientKey, _ := stdioAuthGenIdentity(t)
 	_, authorizedPin := stdioAuthGenIdentity(t) // agent authorizes this pin, NOT the client's
 
-	serverTLS, err := identity.ServerTLS(serverKey, []string{authorizedPin})
+	serverTLS, err := identity.AgentListenTLS(serverKey, []string{authorizedPin})
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
 
 	serverUDP, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})

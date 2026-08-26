@@ -298,13 +298,13 @@ func TestLivenessProbe_DetectsDeadAgentFast(t *testing.T) {
 	serverKey, serverPin := genPoolLivenessIdentity(t)
 	clientKey, clientPin := genPoolLivenessIdentity(t)
 
-	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	serverTLS, err := identity.AgentListenTLS(serverKey, []string{clientPin})
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
-	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	clientTLS, err := identity.ClientDialTLS(clientKey, serverPin)
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
+		t.Fatalf("ClientDialTLS: %v", err)
 	}
 
 	// Start the agent listener.
@@ -564,13 +564,13 @@ func TestSessionLost_ProbeDetector(t *testing.T) {
 	serverKey, serverPin := genPoolLivenessIdentity(t)
 	clientKey, clientPin := genPoolLivenessIdentity(t)
 
-	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	serverTLS, err := identity.AgentListenTLS(serverKey, []string{clientPin})
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
-	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	clientTLS, err := identity.ClientDialTLS(clientKey, serverPin)
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
+		t.Fatalf("ClientDialTLS: %v", err)
 	}
 
 	// Build the freezable server that can simulate network death without
@@ -745,13 +745,13 @@ func TestSessionLost_NaturalDropDetector(t *testing.T) {
 	serverKey, serverPin := genPoolLivenessIdentity(t)
 	clientKey, clientPin := genPoolLivenessIdentity(t)
 
-	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	serverTLS, err := identity.AgentListenTLS(serverKey, []string{clientPin})
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
-	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	clientTLS, err := identity.ClientDialTLS(clientKey, serverPin)
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
+		t.Fatalf("ClientDialTLS: %v", err)
 	}
 
 	serverUDP1, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})

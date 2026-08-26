@@ -103,7 +103,7 @@ func TestAConnectionCompletesOverIPv6(t *testing.T) {
 	agentKey, agentPin := stdioAuthGenIdentity(t)
 	clientKey, clientPin := stdioAuthGenIdentity(t)
 
-	agentTLS, err := identity.ServerTLS(agentKey, []string{clientPin})
+	agentTLS, err := identity.AgentListenTLS(agentKey, []string{clientPin})
 	if err != nil {
 		t.Fatalf("agent TLS: %v", err)
 	}

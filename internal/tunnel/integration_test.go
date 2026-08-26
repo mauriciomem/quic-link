@@ -278,9 +278,9 @@ func mustGenIdentity(t *testing.T) (ed25519.PrivateKey, string) {
 // cert and expects the given server pin.
 func mustClientTLS(t *testing.T, key ed25519.PrivateKey, serverPin string) *tls.Config {
 	t.Helper()
-	c, err := identity.ClientTLS(key, serverPin)
+	c, err := identity.ClientDialTLS(key, serverPin)
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
+		t.Fatalf("ClientDialTLS: %v", err)
 	}
 	return c
 }
@@ -289,9 +289,9 @@ func mustClientTLS(t *testing.T, key ed25519.PrivateKey, serverPin string) *tls.
 // cert and authorizes the given client pins.
 func mustServerTLS(t *testing.T, key ed25519.PrivateKey, authorized []string) *tls.Config {
 	t.Helper()
-	c, err := identity.ServerTLS(key, authorized)
+	c, err := identity.AgentListenTLS(key, authorized)
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
 	return c
 }

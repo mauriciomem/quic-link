@@ -43,13 +43,13 @@ func TestPool_ReconnectSoak_RealQUIC(t *testing.T) {
 
 	serverKey, serverPin := genPoolIdentity(t)
 	clientKey, clientPin := genPoolIdentity(t)
-	serverTLS, err := identity.ServerTLS(serverKey, []string{clientPin})
+	serverTLS, err := identity.AgentListenTLS(serverKey, []string{clientPin})
 	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
+		t.Fatalf("AgentListenTLS: %v", err)
 	}
-	clientTLS, err := identity.ClientTLS(clientKey, serverPin)
+	clientTLS, err := identity.ClientDialTLS(clientKey, serverPin)
 	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
+		t.Fatalf("ClientDialTLS: %v", err)
 	}
 
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")

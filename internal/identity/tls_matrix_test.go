@@ -260,36 +260,3 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 		})
 	}
 }
-
-// TestDeprecatedAliases_MatchNewConstructors keeps the old names working
-// identically while callers migrate.
-func TestDeprecatedAliases_MatchNewConstructors(t *testing.T) {
-	key := matrixKey(t)
-	peer := matrixPin(t, matrixKey(t))
-
-	oldClient, err := ClientTLS(key, peer)
-	if err != nil {
-		t.Fatalf("ClientTLS: %v", err)
-	}
-	newClient, err := ClientDialTLS(key, peer)
-	if err != nil {
-		t.Fatalf("ClientDialTLS: %v", err)
-	}
-	if oldClient.ClientAuth != newClient.ClientAuth ||
-		oldClient.InsecureSkipVerify != newClient.InsecureSkipVerify {
-		t.Error("ClientTLS drifted from ClientDialTLS")
-	}
-
-	oldServer, err := ServerTLS(key, []string{peer})
-	if err != nil {
-		t.Fatalf("ServerTLS: %v", err)
-	}
-	newServer, err := AgentListenTLS(key, []string{peer})
-	if err != nil {
-		t.Fatalf("AgentListenTLS: %v", err)
-	}
-	if oldServer.ClientAuth != newServer.ClientAuth ||
-		oldServer.InsecureSkipVerify != newServer.InsecureSkipVerify {
-		t.Error("ServerTLS drifted from AgentListenTLS")
-	}
-}

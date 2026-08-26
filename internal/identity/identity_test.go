@@ -166,13 +166,13 @@ func TestPinningHandshake(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			serverTLS, err := ServerTLS(serverKey, tc.authorized)
+			serverTLS, err := AgentListenTLS(serverKey, tc.authorized)
 			if err != nil {
-				t.Fatalf("ServerTLS: %v", err)
+				t.Fatalf("AgentListenTLS: %v", err)
 			}
-			clientTLS, err := ClientTLS(clientKey, tc.expectServerPin)
+			clientTLS, err := ClientDialTLS(clientKey, tc.expectServerPin)
 			if err != nil {
-				t.Fatalf("ClientTLS: %v", err)
+				t.Fatalf("ClientDialTLS: %v", err)
 			}
 
 			c := clientTLS
@@ -218,13 +218,6 @@ func TestPinningHandshake(t *testing.T) {
 					handshakeErr, cerr, serr, tc.wantErr)
 			}
 		})
-	}
-}
-
-func TestServerTLSRejectsEmptyAuthorized(t *testing.T) {
-	key := mustKey(t)
-	if _, err := ServerTLS(key, nil); err == nil {
-		t.Fatal("ServerTLS accepted an empty authorized set")
 	}
 }
 

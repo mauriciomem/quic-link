@@ -147,22 +147,6 @@ func AgentDialTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, err
 	return pinningTLS(key, modeDial, authorized)
 }
 
-// ServerTLS builds the agent-side listening config.
-//
-// Deprecated: use AgentListenTLS. The old name reads as a transport role when
-// what it actually encodes is an agent that listens.
-func ServerTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
-	return AgentListenTLS(key, authorized)
-}
-
-// ClientTLS builds the client-side dialing config.
-//
-// Deprecated: use ClientDialTLS. The old name hides that the shape follows the
-// transport direction, not the logical role.
-func ClientTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
-	return ClientDialTLS(key, expectedServerPin)
-}
-
 // verifyPin returns a tls.Config.VerifyPeerCertificate callback that parses the
 // peer's leaf, computes its pin, and requires membership in allowed. Returning
 // an error aborts the handshake with a TLS alert.

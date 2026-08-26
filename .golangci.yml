@@ -23,6 +23,18 @@ linters:
   exclusions:
     generated: lax
     rules:
+      # Use of a deprecated symbol, tolerated in test files only. Six findings
+      # remain, all on go/parser.ParseDir or go/ast.Package in the tests that
+      # scan this tree's own source; neither has a non-deprecated equivalent
+      # short of rewriting them onto golang.org/x/tools/go/packages.
+      #
+      # Scoped to tests rather than switched off, because the check earns its
+      # keep on production code: while it was disabled outright it was hiding
+      # the only production call to a deprecated helper in the tree. The list
+      # was seventeen findings longer until the project's own deprecated TLS
+      # aliases were retired, which is the argument for keeping it narrow. A
+      # rule scoped this way leaves a shrinking list visible instead of an
+      # invisible one.
       - path: _test\.go
         text: "SA1019"
         linters:
