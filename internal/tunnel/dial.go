@@ -43,8 +43,9 @@ func (WallClock) After(d time.Duration) <-chan time.Time { return time.After(d) 
 // specific to this direction is the loop around it, since whichever end opens
 // the connection is the end that has to reopen it.
 //
-// It returns when ctx ends, or when the peer rejects our identity, which is a
-// configuration problem that will not fix itself by retrying.
+// It returns when ctx ends, or when the peer rejects our identity, or when the
+// peer is using our own identity — both are configuration problems that will
+// not fix themselves by retrying.
 func DialAndServe(
 	ctx context.Context,
 	t transport.Transport,
@@ -78,6 +79,17 @@ func DialAndServe(
 				// change that, and doing so forever would bury the one message
 				// that says what is actually wrong.
 				slog.Error("client rejected our identity; giving up",
+					"role", "agent", "addr", addr, "err", err)
+				return err
+			}
+
+			if transport.IsRoleMismatch(err) {
+				// Both ends are configured with the same key, so retrying
+				// cannot resolve it either — it needs a separate key for one
+				// end, not another attempt.
+				slog.Error("client is using our own identity; giving up. "+
+					"Both ends are configured with the same key, so neither can tell which role the "+
+					"other is playing: generate a separate key for each end",
 					"role", "agent", "addr", addr, "err", err)
 				return err
 			}
@@ -131,19 +143,48 @@ func DialAndServe(
 		// A client that rejects our identity does so after our own handshake
 		// has already completed, so the rejection arrives as the reason the
 		// connection closed rather than as a dial error.
-		if cause := context.Cause(conn.Context()); transport.IsAuthFailed(cause) {
+		cause := context.Cause(conn.Context())
+		if transport.IsAuthFailed(cause) {
 			slog.Error("client rejected our identity; giving up",
 				"role", "agent", "addr", addr, "err", cause)
 			return cause
 		}
 
-		slog.Warn("client connection lost; reconnecting", "role", "agent", "addr", addr)
+		// A role collision (both ends holding the same key) surfaces here
+		// once both handshakes have already completed, rather than as a dial
+		// error. It cannot self-heal by retrying, so it is terminal exactly
+		// like the auth-failure case above.
+		if transport.IsRoleMismatch(cause) {
+			slog.Error("client is using our own identity; giving up. "+
+				"Both ends are configured with the same key, so neither can tell which role the "+
+				"other is playing: generate a separate key for each end",
+				"role", "agent", "addr", addr, "err", cause)
+			return cause
+		}
 
 		// A session that stayed up long enough starts the schedule over, so a
 		// stable link that drops once does not inherit a long wait from an
-		// outage hours earlier.
+		// outage hours earlier. This has to be decided before the backoff
+		// below consults attempt, or a stable session's first post-drop wait
+		// would use whatever attempt was left over from before it connected.
 		if clock.Since(lastSuccessAt) > policy.StableAfter() {
 			attempt = 0
+		}
+
+		d := policy.Backoff(attempt)
+		attempt++
+
+		slog.Warn("client connection lost; reconnecting",
+			"role", "agent",
+			"addr", addr,
+			"attempt", attempt,
+			"next_retry_in", d,
+		)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-clock.After(d):
 		}
 	}
 }
