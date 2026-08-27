@@ -78,9 +78,14 @@ type route struct {
 	raw     string
 	network string
 	address string
-	// prov records where this entry came from. Removal safety depends on
-	// it: an entry a remote caller added is the only kind that same caller
-	// may take away again.
+	// prov records where this entry came from — config, builtin, or
+	// runtime — not who created it. Removal safety rests on origin alone:
+	// an entry the operator configured cannot be withdrawn over the
+	// network, while a runtime-published one can be, by any authorized
+	// caller, not only the one that published it. Provenance carries no
+	// caller identity, so the table has no way to tell one authorized
+	// caller's entry apart from another's; distinguishing them would need
+	// a field this type does not have.
 	prov Provenance
 }
 
