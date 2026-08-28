@@ -84,6 +84,12 @@ type listenEntry struct {
 	// a peer the way it blocks for a dial in the other direction. It is
 	// replaced on every drop.
 	waiting chan struct{}
+	// waitErr is set by failWaiters just before it closes waiting, so a Get
+	// call that wakes from that close has something to read besides the
+	// still-nil current connection. It is cleared by promote, mirroring how
+	// dialEntry clears dialErr once a connection becomes usable — a stale
+	// shutdown cause must not outlive the shutdown it described.
+	waitErr error
 
 	// watchers tracks the per-session goroutines so shutdown can join them.
 	watchers sync.WaitGroup
@@ -226,6 +232,7 @@ func (e *listenEntry) promote(ctx context.Context, conn transport.Conn) bool {
 	e.since = e.clock.Now()
 	firstEver := !e.everConnected
 	e.everConnected = true
+	e.waitErr = nil
 	close(e.waiting)
 	e.waiting = make(chan struct{})
 	e.mu.Unlock()
@@ -359,16 +366,21 @@ func (e *listenEntry) Get(ctx context.Context) (Conn, error) {
 	for {
 		e.mu.Lock()
 		conn := e.current
+		waitErr := e.waitErr
 		wait := e.waiting
 		e.mu.Unlock()
 
 		if conn != nil {
 			return conn, nil
 		}
+		if waitErr != nil {
+			return nil, fmt.Errorf("server %q: no agent has connected yet: %w", e.name, waitErr)
+		}
 
 		select {
 		case <-wait:
-			// A peer arrived; loop and pick it up.
+			// Either a peer arrived or failWaiters ran; loop and pick up
+			// whichever one it was from e.current/e.waitErr above.
 		case <-ctx.Done():
 			return nil, fmt.Errorf("server %q: no agent has connected yet: %w", e.name, ctx.Err())
 		}
@@ -469,9 +481,12 @@ func (e *listenEntry) Close(err error) {
 	}
 }
 
-// failWaiters wakes anyone blocked in Get during shutdown.
-func (e *listenEntry) failWaiters(_ error) {
+// failWaiters wakes anyone blocked in Get during shutdown, recording err so
+// they can report why rather than merely waking with nothing to say — the
+// same shape dialEntry uses for the same purpose (its dialErr/dialing pair).
+func (e *listenEntry) failWaiters(err error) {
 	e.mu.Lock()
+	e.waitErr = err
 	close(e.waiting)
 	e.waiting = make(chan struct{})
 	e.mu.Unlock()
