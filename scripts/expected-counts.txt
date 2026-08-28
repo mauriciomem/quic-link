@@ -38,4 +38,4 @@
 # or not at all.
 
 cmd_quic_link=232
-tree_wide=725
+tree_wide=726
