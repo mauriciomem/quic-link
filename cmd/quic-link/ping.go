@@ -47,7 +47,7 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 				named, ok := a.cfg.Servers[serverName]
 				if !ok {
 					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
-					return usageErrorf("server %q not found in config", serverName)
+					return pingUnknownServerError(a, serverName)
 				}
 				srv = named
 			} else if flags.Changed("server") {
@@ -157,6 +157,32 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 	cmd.Flags().StringVar(&pin, "pin", "", "expected agent pin (base64; from `quic-link keygen` on the agent)")
 
 	return cmd
+}
+
+// pingUnknownServerError explains a server name that is not in a.cfg.Servers.
+//
+// ping cannot fall back to the running daemon the way most other verbs do:
+// pingRun dials its own fresh QUIC connection per probe, so it needs an
+// address and a pin, and the daemon's status snapshot carries neither. But a
+// name that the daemon IS managing (because it was defined entirely on the
+// daemon's own command line, with no [servers.<name>] entry anywhere) is not
+// "not found" in any useful sense, and telling the user to go edit a file
+// that is not the problem sends them looking in the wrong place. This asks
+// knownServers only to pick the right sentence — never to attempt the probe
+// itself — so the resolution path ping actually uses is unchanged.
+func pingUnknownServerError(a *app, serverName string) error {
+	names, fromDaemon, ok := knownServers(a)
+	if ok && fromDaemon {
+		if _, managed := names[serverName]; managed {
+			return usageErrorf(
+				"server %q is managed by the running daemon, but ping needs a direct "+
+					"address and pin that only a [servers.%s] entry (or --server/--pin) can "+
+					"give it; the daemon does not expose those over its status socket. Add "+
+					"one to the config, or run: quic-link ping --server ADDR --pin PIN",
+				serverName, serverName)
+		}
+	}
+	return usageErrorf("server %q not found in config", serverName)
 }
 
 // aggregateProbeError returns the error to report when every probe failed.

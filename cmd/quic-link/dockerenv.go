@@ -60,6 +60,15 @@ func runDockerEnv(cmd *cobra.Command, a *app, args []string) error {
 	if err != nil {
 		return err
 	}
+	// A name that is not known at all is a usage mistake (exit 2), not a
+	// docker-readiness condition (exit 3). This must run before the daemon
+	// is ever asked for status: errDockerNotReady is matched ahead of
+	// errUsage in exitCodeForError, so once that error exists it can no
+	// longer be remapped to 2 by wrapping it — the fix has to keep it from
+	// being constructed in the first place.
+	if err := requireKnownServer(a, serverName); err != nil {
+		return err
+	}
 
 	sock, err := daemonSocketPath(a.cfg)
 	if err != nil {

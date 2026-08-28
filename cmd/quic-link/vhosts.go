@@ -106,7 +106,7 @@ SERVER may be omitted when exactly one server is enabled.
 
 Reading this asks nothing of the agent's operator: reporting what a name table
 holds is not the same as changing it, so no permission is needed for it.`,
-		Args: cobra.MaximumNArgs(1),
+		Args: wrapArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runVhosts(cmd, a, args, jsonFlag)
 		},
@@ -142,7 +142,7 @@ SERVER may be omitted when exactly one server is enabled.
   {"schema":1,"server":"...","host":"...","shadowed_by":"*...",
    "shadowed_by_address":"tcp://127.0.0.1:3000"}
 Both shadow fields are absent unless a pattern took over, and absent together.`,
-		Args: cobra.RangeArgs(1, 2),
+		Args: wrapArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runVhostsRm(cmd, a, args, jsonFlag)
 		},

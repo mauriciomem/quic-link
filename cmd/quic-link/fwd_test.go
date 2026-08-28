@@ -212,6 +212,13 @@ func (s *syncBuilder) Len() int {
 // (rather than startAxTestServer's ad hoc /tmp path, which fwd would never
 // find), mirroring dockerenv_test.go's startServerAtPath but for an
 // attach-capable pool instead of a status-only stub.
+//
+// The status side reports exactly "server1" as known. fwd's preflight now
+// asks the daemon whether the named server is known at all before ever
+// attempting an attach (requireKnownServer, called ahead of Preflight), so
+// a status stub that always answered empty would make every fixture here
+// look like an unknown-server case regardless of what it is actually
+// testing.
 func startFwdAxServer(t *testing.T, pool ipc.AttachPool) string {
 	t.Helper()
 	sock, err := daemonSocketPath(nil)
@@ -221,7 +228,8 @@ func startFwdAxServer(t *testing.T, pool ipc.AttachPool) string {
 	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
 		t.Fatalf("mkdir socket dir: %v", err)
 	}
-	srv := ipc.NewServerWithOpts(sock, &axStatusStub{}, pool, ipc.ServerOpts{UID: os.Getuid()})
+	statusJSON := `{"schema":1,"servers":[{"name":"server1","session":"connected","transport":"dial","since_ms":10,"local_ports":{"ssh":0,"docker":0}}]}`
+	srv := ipc.NewServerWithOpts(sock, &stubStatusProvider{data: []byte(statusJSON)}, pool, ipc.ServerOpts{UID: os.Getuid()})
 	if err := srv.Listen(); err != nil {
 		t.Fatalf("startFwdAxServer listen: %v", err)
 	}
