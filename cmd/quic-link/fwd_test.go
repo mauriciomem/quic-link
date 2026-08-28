@@ -239,6 +239,70 @@ func startFwdAxServer(t *testing.T, pool ipc.AttachPool) string {
 	return sock
 }
 
+// TestFwd_UnknownServer_Exit2_NothingBound is the headline regression this
+// step exists for. Empirically, before the fix, an unknown SERVER name with
+// a daemon up never refused at all: the daemon answers status 3 for an
+// unknown server exactly as it does for "session not ready", the fwd
+// preflight classifies bare status 3 as transient and warns rather than
+// fails, and fwd went on to bind a local port and listen on it until
+// killed — 0 of many attempts ever refused. A bad SERVER name is a usage
+// mistake, not a transient daemon-scoped condition, and preflight.go's own
+// doc comment already promises the caller exits "without ever binding a
+// local port" for exactly this shape of failure. This asserts that promise
+// holds: exit 2, and — checked directly against the OS rather than trusted
+// from the process's own exit code — no local port left listening.
+func TestFwd_UnknownServer_Exit2_NothingBound(t *testing.T) {
+	unsetQLEnvForTest(t)
+	withDaemonSocketEnv(t)
+	pin := mustTestPin(t)
+	path := writeTestConfig(t, `
+schema = 1
+[servers.server1]
+addr = "127.0.0.1:7443"
+pin  = "`+pin+`"
+`)
+	agentConn := axBuildMemAgent(t)
+	pool := &axConnPool{conn: agentConn}
+	startFwdAxServer(t, pool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root := newRootCmd()
+	var stdout, stderr strings.Builder
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--config", path, "fwd", "nosuch", "ssh"})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- root.ExecuteContext(ctx) }()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("fwd never returned; it should refuse an unknown server before binding, not " +
+			"warn and keep listening")
+	}
+
+	if err == nil {
+		t.Fatal("expected an error for an unknown server")
+	}
+	if got := exitCode(err); got != 2 {
+		t.Errorf("exitCode = %d, want 2 (usage — the server name is the mistake), err=%v, stderr=%q",
+			got, err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout must be empty: no CONTRACT line means no port was ever bound, got %q", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "listening anyway") {
+		t.Errorf("stderr must not claim it is listening anyway for an unknown server, got %q", stderr.String())
+	}
+	if !strings.Contains(err.Error(), "nosuch") {
+		t.Errorf("error should name the unknown server, got: %v", err)
+	}
+}
+
 // TestFwd_UnknownTarget_PreflightExit5_NothingBound is the startup-preflight
 // contract test: an unknown target must exit 5 before any local port is ever
 // bound and before the CONTRACT line is ever printed.
