@@ -1263,3 +1263,390 @@ func TestMergeEnv_RecognisedVariableStillApplies(t *testing.T) {
 		t.Errorf("log level = %q, want %q from the environment", cfg.Log.Level, "debug")
 	}
 }
+
+// ---- pin canonicalization ----------------------------------------------------
+//
+// /**
+//  * @spec-handoff
+//  * @interface Config.Load(path string) (*Config, error);
+//  *            (c *Config) Validate(active Role) (warnings []string, err error)
+//  * @behavior
+//  *   - After Load and a successful Validate, every pin string reachable from
+//  *     the returned *Config — Server.Pin (all three sites: servers.<name>.pin,
+//  *     agent.authorized_clients[*] validated under RoleAgent, and the same
+//  *     field validated as a warning under RoleClient) — holds
+//  *     identity.ParsePin's canonical return value, never the raw string the
+//  *     TOML file (or env/flag overlay) supplied. ParsePin's own validation
+//  *     behavior (reject on decode error or wrong length) is unchanged; only
+//  *     which string is STORED changes.
+//  *   - This closes the gap where internal/identity/tls.go's pinningTLS
+//  *     builds its `allowed` set from whatever config handed it and verifyPin
+//  *     does an exact map-key comparison against the canonical pin computed
+//  *     live from the peer's certificate (PinFromCert) — a raw, non-canonical
+//  *     but validly-decoding pin string can never appear as a map key equal to
+//  *     that live value unless config canonicalizes it first.
+//  *   - When a stored pin's canonical form differs from what the file/flag
+//  *     supplied, a slog.Warn-level record fires once, during validation, so
+//  *     an operator learns their file carries a non-canonical spelling instead
+//  *     of the mismatch staying invisible until a peer is rejected. The exact
+//  *     message wording is Kou's to choose; this spec only requires: level
+//  *     WARN, and the record identifiable by a stable substring (this test
+//  *     suite checks for the literal word "pin" and "canonical" — see
+//  *     TestValidate_WarnsWhenStoredPinIsNotCanonical below for the exact
+//  *     substrings asserted).
+//  * @edge-cases
+//  *   - A non-canonical but validly-decoding base64 spelling of the SAME
+//  *     32-byte digest (Go's base64.StdEncoding.DecodeString is non-strict
+//  *     about some trailing-bit spellings) must canonicalize to the same
+//  *     stored value as the canonical spelling — this is intended widening of
+//  *     ACCEPTED SPELLINGS, not of trusted KEYS: both encode the identical
+//  *     digest.
+//  *   - Trimmed-but-otherwise-canonical pins (existing TestForwardClientConfig
+//  *     etc.) must keep passing unchanged — this is a regression risk audited
+//  *     manually, not a new test, since those fixtures already use
+//  *     already-canonical pins and so cannot distinguish old from new
+//  *     behavior.
+//  * @see internal/identity/pin.go (ParsePin), internal/identity/tls.go
+//  *      (pinningTLS, verifyPin)
+//  *
+//  * IMPORTANT FOR KOU: this fix must land as ONE batch across BOTH
+//  * internal/config/config.go AND internal/identity/tls.go (per the plan's
+//  * explicit instruction) — fixing config.go's three discard sites alone is
+//  * necessary but the review that opened this task also asks tls.go's
+//  * allowed-set construction and comparison to be (re-)confirmed once config
+//  * supplies canonical strings, precisely because tls.go is the second half of
+//  * the same bug: it is the site that ultimately does the failing map lookup,
+//  * and any other caller of pinningTLS/AgentListenTLS/AgentDialTLS/
+//  * ClientDialTLS/ClientListenTLS that still hands it a raw string (e.g. a
+//  * future call site, or one this review missed) reintroduces the same
+//  * failure. Landing config.go's fix without re-verifying tls.go's contract
+//  * would leave the fix incomplete in spirit even if these particular tests
+//  * go green.
+//  *
+//  * NOTE ON SCOPE: no identity-layer test file was added alongside this one.
+//  * internal/identity/tls.go's pinningTLS/verifyPin were probed directly
+//  * during red-phase investigation (an allowed set built from a raw string
+//  * correctly rejects a canonical peer, and correctly accepts once given a
+//  * canonical string) and both already behave exactly as specified — that
+//  * package's contract ("compare exact strings; canonicalization is the
+//  * caller's job") is not itself broken, so no red test could be written
+//  * there without asserting something already true. The defect is entirely
+//  * that config.go's three call sites hand tls.go the WRONG (non-canonical)
+//  * string; once config.go is fixed, tls.go needs no code change — the tests
+//  * in THIS file are the ones that prove that end to end. Kou should still
+//  * read tls.go's pinningTLS/AgentListenTLS/AgentDialTLS/ClientDialTLS/
+//  * ClientListenTLS to confirm no OTHER caller (present or introduced by this
+//  * fix) hands it a raw string; that confirmation is a code-reading exercise,
+//  * not something a passing-today test can encode.
+//  */
+
+// nonCanonicalPinSpelling returns a validly-decoding base64 spelling of the
+// SAME 32-byte digest as canonical, but byte-different from it — Go's
+// base64.StdEncoding.DecodeString accepts more than one spelling for the
+// final 6-bit group of a padded value, because the two padding bits it
+// discards are not required to be zero. Flipping the low bit of the
+// second-to-last character (while holding the encoded value's length and
+// validity) produces exactly such an alternate spelling.
+//
+// t.Fatal fires if canonical is not the padded, unpadded-input-length shape
+// this construction assumes (44 characters, one trailing '='), which is what
+// base64.StdEncoding.EncodeToString of a 32-byte SHA-256 always produces —
+// so this only fails if a caller passes something else by mistake.
+func nonCanonicalPinSpelling(t *testing.T, canonical string) string {
+	t.Helper()
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	if len(canonical) < 2 || canonical[len(canonical)-1] != '=' {
+		t.Fatalf("nonCanonicalPinSpelling: %q is not a padded base64(32 bytes) pin", canonical)
+	}
+	idx := len(canonical) - 2
+	pos := strings.IndexByte(alphabet, canonical[idx])
+	if pos < 0 {
+		t.Fatalf("nonCanonicalPinSpelling: %q not in base64 alphabet", string(canonical[idx]))
+	}
+	flipped := (pos &^ 0x3) | ((pos & 0x3) ^ 0x1)
+	variant := canonical[:idx] + string(alphabet[flipped]) + canonical[idx+1:]
+	if variant == canonical {
+		t.Fatal("nonCanonicalPinSpelling: flip produced no change; test construction is broken")
+	}
+	rawCanon, err := base64.StdEncoding.DecodeString(canonical)
+	if err != nil {
+		t.Fatalf("nonCanonicalPinSpelling: canonical does not decode: %v", err)
+	}
+	rawVariant, err := base64.StdEncoding.DecodeString(variant)
+	if err != nil {
+		t.Fatalf("nonCanonicalPinSpelling: variant does not decode: %v", err)
+	}
+	if string(rawCanon) != string(rawVariant) {
+		t.Fatalf("nonCanonicalPinSpelling: variant decodes to a different digest than canonical")
+	}
+	return variant
+}
+
+// TestForwardModePin_TrailingWhitespaceStillCanonicalizes is the headline
+// regression: a server pin in a config file with trailing whitespace (the
+// exact shape the operator A/B-reproduced — pasted with two trailing spaces)
+// must, after Load+Validate, be stored as the CANONICAL pin — asserting the
+// mechanism (what value reaches the struct field that tls.go's allowed-set
+// construction reads from) rather than only the downstream symptom (a
+// handshake failing). A test that stopped at "the handshake failed" would
+// stay green even if some unrelated change broke the handshake for a
+// different reason; this asserts the one thing that actually matters here:
+// which string identity.ParsePin's canonical form becomes the stored value.
+func TestForwardModePin_TrailingWhitespaceStillCanonicalizes(t *testing.T) {
+	unsetAllQLEnv(t)
+	canonical := mustPin(t)
+	padded := canonical + "  " // the operator's reproduction: two trailing spaces
+	path := writeConfig(t, `
+schema = 1
+[servers.s1]
+addr = "1.2.3.4:7443"
+pin  = "`+padded+`"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	warnings, err := cfg.Validate(config.RoleClient)
+	if err != nil {
+		t.Fatalf("Validate(RoleClient): %v", err)
+	}
+	_ = warnings
+
+	got := cfg.Servers["s1"].Pin
+	if got != canonical {
+		t.Fatalf("servers.s1.pin after Validate = %q, want canonical %q — "+
+			"the stored pin must be identity.ParsePin's canonical return "+
+			"value, not the raw file string, or tls.go's allowed-set will "+
+			"never match the pin computed live from the peer's certificate",
+			got, canonical)
+	}
+}
+
+// TestAuthorizedClientPin_TrailingWhitespaceStillCanonicalizes is the same
+// headline regression at the second discard site: an agent's
+// authorized_clients entry with trailing whitespace must canonicalize after
+// Validate(RoleAgent), which is the hard-error validation path for the agent
+// role (config.go's second ParsePin-discard site).
+func TestAuthorizedClientPin_TrailingWhitespaceStillCanonicalizes(t *testing.T) {
+	unsetAllQLEnv(t)
+	canonical := mustPin(t)
+	padded := canonical + "  "
+	path := writeConfig(t, `
+schema = 1
+[agent]
+listen = ":7443"
+authorized_clients = ["`+padded+`"]
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Validate(config.RoleAgent); err != nil {
+		t.Fatalf("Validate(RoleAgent): %v", err)
+	}
+	if len(cfg.Agent.AuthorizedClients) != 1 {
+		t.Fatalf("authorized_clients len=%d, want 1", len(cfg.Agent.AuthorizedClients))
+	}
+	got := cfg.Agent.AuthorizedClients[0]
+	if got != canonical {
+		t.Fatalf("agent.authorized_clients[0] after Validate = %q, want canonical %q",
+			got, canonical)
+	}
+}
+
+// TestAuthorizedClientPin_TrailingWhitespaceStillCanonicalizes_ClientRoleWarningPath
+// covers the THIRD discard site: the same authorized_clients field, but
+// validated through validateAgentWarnings (the warning path taken when the
+// active role is RoleClient and an [agent] block is merely present, e.g. a
+// config shared between roles). This path uses a distinct loop in
+// config.go from the RoleAgent hard-error path above, so it is a distinct
+// call site and must be independently proven to canonicalize.
+func TestAuthorizedClientPin_TrailingWhitespaceStillCanonicalizes_ClientRoleWarningPath(t *testing.T) {
+	unsetAllQLEnv(t)
+	canonical := mustPin(t)
+	padded := canonical + "  "
+	serverPin := mustPin(t)
+	path := writeConfig(t, `
+schema = 1
+[servers.s1]
+addr = "1.2.3.4:7443"
+pin  = "`+serverPin+`"
+[agent]
+listen = ":7443"
+dial   = "host:7443"
+authorized_clients = ["`+padded+`"]
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// RoleClient is active here; the [agent] block is present-but-inactive, so
+	// its problems (including a non-canonical pin) surface as warnings, not a
+	// hard error — this is the third of the three ParsePin-discard sites named
+	// in the review, and it must canonicalize exactly like the other two.
+	if _, err := cfg.Validate(config.RoleClient); err != nil {
+		t.Fatalf("Validate(RoleClient): unexpected hard error: %v", err)
+	}
+	got := cfg.Agent.AuthorizedClients[0]
+	if got != canonical {
+		t.Fatalf("agent.authorized_clients[0] (client-role warning path) after "+
+			"Validate = %q, want canonical %q", got, canonical)
+	}
+}
+
+// TestAgentAuthorizedClient_PaddedPin_HandshakeSucceedsEndToEnd is the
+// end-to-end proof requested alongside the mechanism-level tests above: it
+// drives config.Load and config.Validate exactly as cmd/quic-link/agent.go
+// does, then feeds the resulting AuthorizedClients slice directly into
+// identity.AgentListenTLS (the same call agent.go makes, with no further
+// ParsePin step in between) and asserts the resulting tls.Config's
+// VerifyPeerCertificate callback ACCEPTS a legitimate peer presenting the
+// canonical spelling of the same key that was configured with two trailing
+// spaces — the exact operator-reproduced shape (authorized_clients with a
+// padded pin, agent role, real TLS callback, real certificate).
+//
+// This is deliberately not a live UDP/QUIC handshake (that would be neither
+// fast nor independent — see the five properties in this project's test
+// quality rules) — VerifyPeerCertificate is the exact function net/tls
+// invokes mid-handshake, and calling it directly with a real certificate
+// exercises the identical code path without the cost or flakiness of a full
+// QUIC session. TestListeningConfigsRejectPeerWithNoCertificate and
+// TestPinningHandshake (internal/identity, both pre-existing) demonstrate the
+// full-handshake shape is already covered elsewhere for the cases that need
+// it; this test's job is specifically to cross the config/identity boundary,
+// which those do not.
+func TestAgentAuthorizedClient_PaddedPin_HandshakeSucceedsEndToEnd(t *testing.T) {
+	unsetAllQLEnv(t)
+	agentKey, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate (agent key): %v", err)
+	}
+	clientKey, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("Generate (client key): %v", err)
+	}
+	canonicalClientPin, err := identity.PinForKey(clientKey)
+	if err != nil {
+		t.Fatalf("PinForKey: %v", err)
+	}
+	padded := canonicalClientPin + "  " // the operator's exact reproduction
+
+	path := writeConfig(t, `
+schema = 1
+[agent]
+listen = ":7443"
+authorized_clients = ["`+padded+`"]
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Validate(config.RoleAgent); err != nil {
+		t.Fatalf("Validate(RoleAgent): %v", err)
+	}
+
+	// agent.go passes cfg.Agent.AuthorizedClients straight into
+	// identity.AgentListenTLS/AgentDialTLS with no further parsing — see
+	// cmd/quic-link/agent.go's effectiveClients / agentRun.
+	serverTLS, err := identity.AgentListenTLS(agentKey, cfg.Agent.AuthorizedClients)
+	if err != nil {
+		t.Fatalf("AgentListenTLS: %v", err)
+	}
+	clientCert, err := identity.SelfSignedCarrier(clientKey)
+	if err != nil {
+		t.Fatalf("SelfSignedCarrier: %v", err)
+	}
+
+	if err := serverTLS.VerifyPeerCertificate(clientCert.Certificate, nil); err != nil {
+		t.Fatalf("legitimate client REJECTED: %v — this is the exact "+
+			"operator-reported failure (\"peer rejected the pin\") reproduced "+
+			"end-to-end from a config file with a padded authorized_clients "+
+			"entry through to the TLS pin check agent.go actually runs", err)
+	}
+}
+
+// TestNonCanonicalPinSpelling_CanonicalizesToSameDigest documents and locks in
+// a deliberate consequence of the fix: Go's base64.StdEncoding.DecodeString
+// is non-strict about certain trailing-bit spellings of a padded value, so
+// more than one input string can decode to the identical 32-byte digest.
+// After the fix, config.Load+Validate must canonicalize such a spelling to
+// the SAME stored value the canonical spelling would produce — this is a
+// wider set of ACCEPTED SPELLINGS of one key, never a widening of which KEYS
+// are trusted, since both strings decode to the same SHA-256 digest.
+func TestNonCanonicalPinSpelling_CanonicalizesToSameDigest(t *testing.T) {
+	unsetAllQLEnv(t)
+	canonical := mustPin(t)
+	variant := nonCanonicalPinSpelling(t, canonical)
+
+	path := writeConfig(t, `
+schema = 1
+[servers.s1]
+addr = "1.2.3.4:7443"
+pin  = "`+variant+`"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Validate(config.RoleClient); err != nil {
+		t.Fatalf("Validate(RoleClient): %v", err)
+	}
+	got := cfg.Servers["s1"].Pin
+	if got != canonical {
+		t.Fatalf("servers.s1.pin = %q, want the canonical spelling %q — a "+
+			"non-canonical-but-validly-decoding spelling of the SAME digest "+
+			"must canonicalize to the identical stored value", got, canonical)
+	}
+}
+
+// TestValidate_WarnsWhenStoredPinIsNotCanonical is the required
+// operator-visible signal: when a configured pin's canonical form differs
+// from what was written in the file, a WARN-level slog record must fire
+// during validation, so an operator who has a typo'd/padded pin in their
+// settings learns about it at startup instead of discovering it only when a
+// legitimate peer is silently rejected at the TLS layer (the exact failure
+// mode the operator A/B-reproduced in production).
+//
+// The exact message wording is left to the implementation; this test follows
+// the precedent set by TestMergeEnv_UnknownVariableWarnsAndDoesNotFail (same
+// package, same slog-capture technique) and asserts only a stable substring
+// and the WARN level, not an exact string.
+func TestValidate_WarnsWhenStoredPinIsNotCanonical(t *testing.T) {
+	unsetAllQLEnv(t)
+	canonical := mustPin(t)
+	padded := canonical + "  "
+	path := writeConfig(t, `
+schema = 1
+[servers.s1]
+addr = "1.2.3.4:7443"
+pin  = "`+padded+`"
+`)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var logged bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	defer slog.SetDefault(restore)
+
+	if _, err := cfg.Validate(config.RoleClient); err != nil {
+		t.Fatalf("Validate(RoleClient): %v", err)
+	}
+
+	out := logged.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected a WARN-level record when a stored pin is not "+
+			"canonical; log was:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "pin") {
+		t.Errorf("the warning must be identifiable as being about a pin; "+
+			"log was:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "canonical") {
+		t.Errorf("the warning must say the pin was not canonical (or "+
+			"equivalent stable wording an operator can search logs for); "+
+			"log was:\n%s", out)
+	}
+}
