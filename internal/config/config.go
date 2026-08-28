@@ -29,26 +29,6 @@ import (
 // semantic). The caller maps errors.Is(err, config.ErrInvalid) to exit code 2.
 var ErrInvalid = errors.New("invalid configuration")
 
-// pinNotCanonicalMsg is the operator-visible warning fired when a stored pin
-// decodes to a valid 32-byte digest but was not written in its canonical
-// base64 spelling. This is not a rejection — the pin is still accepted, and is
-// rewritten to the canonical form before it reaches tls.go's allowed-pin set —
-// it is a heads-up that the settings file itself carries a spelling that a
-// byte-for-byte diff against 'quic-link keygen' output would not match.
-const pinNotCanonicalMsg = "configured pin is not in canonical form; it has been normalized in memory, but the settings file should be updated to the canonical spelling printed by 'quic-link keygen'"
-
-// pinPrefix returns the first 8 characters of a pin for log identification,
-// the same short form PeerIdentity.Short uses elsewhere in the tree, so a
-// warning about a pin reads the same way every other pin-bearing log line
-// does without ever printing the full pin.
-func pinPrefix(pin string) string {
-	const n = 8
-	if len(pin) < n {
-		return pin
-	}
-	return pin[:n]
-}
-
 // ---- Types ------------------------------------------------------------------
 
 // Config is the top-level configuration structure. Field names match the TOML
@@ -479,18 +459,11 @@ func (c *Config) Validate(active Role) (warnings []string, err error) {
 // first hard error found. A server with enabled=false is skipped for hard
 // validation; its problems (if any) are collected as warning strings instead,
 // because a disabled server cannot be selected and is not on the active path.
-//
-// validateServer canonicalizes each server's pin in place (see
-// ValidateServerSettings), so the loop writes the possibly-updated copy back
-// into c.Servers before moving on — otherwise the canonical form would be
-// computed and immediately discarded, leaving the stored config with the
-// same non-canonical spelling identity.ParsePin was asked to fix.
 func validateServers(c *Config) ([]string, error) {
 	var warns []string
 	for name, srv := range c.Servers {
 		disabled := srv.Enabled != nil && !*srv.Enabled
-		err := validateServer(name, &srv)
-		c.Servers[name] = srv
+		err := validateServer(name, srv)
 		if disabled {
 			if err != nil {
 				warns = append(warns, fmt.Sprintf("servers.%s (disabled): %v", name, err))
@@ -550,11 +523,8 @@ func validateDistinctListenPins(servers map[string]Server) error {
 }
 
 // validateServer validates one server entry and returns a wrapped ErrInvalid on
-// the first problem found. srv is a pointer because ValidateServerSettings may
-// rewrite srv.Pin to its canonical spelling; the caller is responsible for
-// writing the (possibly updated) value back into whatever map or struct it
-// came from.
-func validateServer(name string, srv *Server) error {
+// the first problem found.
+func validateServer(name string, srv Server) error {
 	// The name becomes the first label of a hostname, so it has to be able to
 	// be one. This is checked before anything else because it is the only
 	// problem here that a user cannot see by reading their own file.
@@ -579,16 +549,12 @@ func validateServer(name string, srv *Server) error {
 // label is used only to say where a problem is. It may be any wording that
 // helps the reader locate it.
 //
-// srv is a pointer because a valid pin is rewritten to its canonical spelling
-// in place: identity.ParsePin already does the decode-and-re-encode work to
-// produce that canonical form, and discarding it here would leave the stored
-// config holding whatever spelling the file happened to contain — which is
-// exactly what tls.go's pin comparison cannot forgive, since it matches
-// canonical strings by exact equality. When the canonical form differs from
-// what was stored, a slog.Warn fires so an operator learns their file has a
-// non-canonical pin instead of finding out only when a legitimate peer is
-// rejected.
-func ValidateServerSettings(label string, srv *Server) error {
+// The pin is checked with identity.ParsePinStrict, not identity.ParsePin: a
+// pin that decodes correctly but was not written in its own canonical
+// spelling is refused outright rather than repaired, because a pin is an
+// authentication credential and a credential that arrives in the wrong form
+// is a sign the file is wrong, not a hint to be quietly corrected.
+func ValidateServerSettings(label string, srv Server) error {
 	bothSet := srv.Addr != "" && srv.Listen != ""
 	neitherSet := srv.Addr == "" && srv.Listen == ""
 	if bothSet {
@@ -603,16 +569,14 @@ func ValidateServerSettings(label string, srv *Server) error {
 			label, ErrInvalid,
 		)
 	}
-	canonical, err := identity.ParsePin(srv.Pin)
-	if err != nil {
+	if _, err := identity.ParsePinStrict(srv.Pin); err != nil {
+		if errors.Is(err, identity.ErrPinNotCanonical) {
+			return fmt.Errorf("servers.%s: pin is not canonical: %w", label, ErrInvalid)
+		}
 		return fmt.Errorf("servers.%s: pin is required and must be valid base64(SHA-256): %v: %w",
 			label, err, ErrInvalid,
 		)
 	}
-	if canonical != srv.Pin {
-		slog.Warn(pinNotCanonicalMsg, "server", label, "pin_prefix", pinPrefix(canonical))
-	}
-	srv.Pin = canonical
 	return nil
 }
 
@@ -621,9 +585,7 @@ func ValidateServerSettings(label string, srv *Server) error {
 func validateServersWarnings(servers map[string]Server) []string {
 	var w []string
 	for name, srv := range servers {
-		err := validateServer(name, &srv)
-		servers[name] = srv
-		if err != nil {
+		if err := validateServer(name, srv); err != nil {
 			w = append(w, fmt.Sprintf("servers.%s (inactive for agent role): %v", name, err))
 		}
 	}
@@ -663,14 +625,12 @@ func validateAgent(c *Config) error {
 		)
 	}
 	for i, pin := range a.AuthorizedClients {
-		canonical, err := identity.ParsePin(pin)
-		if err != nil {
+		if _, err := identity.ParsePinStrict(pin); err != nil {
+			if errors.Is(err, identity.ErrPinNotCanonical) {
+				return fmt.Errorf("agent.authorized_clients[%d]: pin is not canonical: %w", i, ErrInvalid)
+			}
 			return fmt.Errorf("agent.authorized_clients[%d]: invalid pin: %v: %w", i, err, ErrInvalid)
 		}
-		if canonical != pin {
-			slog.Warn(pinNotCanonicalMsg, "role", "agent", "pin_prefix", pinPrefix(canonical))
-		}
-		a.AuthorizedClients[i] = canonical
 	}
 
 	// Validate each route name and address using the same validator/parser
@@ -728,15 +688,14 @@ func validateAgentWarnings(a *Agent) []string {
 		w = append(w, "agent (inactive for client role): authorized_clients must be non-empty")
 	}
 	for i, pin := range a.AuthorizedClients {
-		canonical, err := identity.ParsePin(pin)
-		if err != nil {
+		if _, err := identity.ParsePinStrict(pin); err != nil {
+			if errors.Is(err, identity.ErrPinNotCanonical) {
+				w = append(w, fmt.Sprintf("agent (inactive for client role): authorized_clients[%d]: pin is not canonical", i))
+				continue
+			}
 			w = append(w, fmt.Sprintf("agent (inactive for client role): authorized_clients[%d]: invalid pin: %v", i, err))
 			continue
 		}
-		if canonical != pin {
-			slog.Warn(pinNotCanonicalMsg, "role", "client", "pin_prefix", pinPrefix(canonical))
-		}
-		a.AuthorizedClients[i] = canonical
 	}
 
 	for target, addr := range a.Routes {
