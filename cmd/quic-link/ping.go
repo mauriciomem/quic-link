@@ -136,7 +136,7 @@ omitted and exactly one enabled server exists, it is used automatically.`,
 				if err != nil {
 					return err
 				}
-			} else if err := config.ValidateServerSettings("(from flags)", srv); err != nil {
+			} else if err := config.ValidateServerSettings("(from flags)", &srv); err != nil {
 				return err
 			}
 
