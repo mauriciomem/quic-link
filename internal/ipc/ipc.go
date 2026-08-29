@@ -51,6 +51,13 @@ const maxFrameSize = 64 * 1024
 // idle for hours, so no deadline is imposed after the initial handshake.
 const openReadDeadline = 5 * time.Second
 
+// attachAckReadDeadline bounds the client's read of the server's attach ack.
+// The ack is a single CBOR frame, so this is ample; a hung daemon must not
+// block the caller forever waiting for it. Like openReadDeadline, it applies
+// only to this one read — the returned conn is unrestricted afterward for the
+// live splice.
+const attachAckReadDeadline = 10 * time.Second
+
 // ipcFrameVersion is the single-byte version prefix for IPC frames. It is
 // distinct from the QUIC wire proto version so a stray QUIC connection that
 // stumbles onto the socket path produces a clear version-mismatch error rather
