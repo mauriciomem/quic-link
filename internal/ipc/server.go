@@ -594,6 +594,20 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			_ = writeResponse(conn, errorResponse(1, "internal error withdrawing a name"))
 			return
 		}
+		// WithdrawSnapshot carries three agent-worded strings (Host,
+		// ShadowedBy, ShadowedByAddress), so its JSON encoding can exceed
+		// this socket's frame the same way a route or vhost listing can —
+		// checked before the write for the same reason those three siblings
+		// check it, so an oversized reply is a named refusal instead of a
+		// bare socket error indistinguishable from a dead daemon.
+		if len(wbody) > maxFrameSize-routesBodyHeadroom {
+			slog.Warn("ipc: relay withdraw: reply too large for the local socket",
+				"role", "daemon", "server", req.Server, "body_bytes", len(wbody))
+			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
+				"server %q sent a withdrawal reply too large to relay over the local socket (%d bytes as JSON); "+
+					"this is a local IPC limit, not a problem with the name", req.Server, len(wbody))))
+			return
+		}
 		_ = writeResponse(conn, okResponse(wbody))
 
 	case "expose":
