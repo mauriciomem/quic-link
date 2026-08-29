@@ -34,7 +34,8 @@
 // at the point a name is taken away, not at the point it resolves.
 //
 // Authorization is a separate step from resolution: once a name resolves,
-// Router asks its Policy whether the peer may have it. The default Policy,
+// Router asks its Policy — via Policy.Authorize — whether the peer may have
+// it. The default Policy,
 // AllowAll, permits every authenticated peer for every target while per-key
 // access control stays an open question, but the check-point itself is
 // unconditional — it runs on every dial regardless of what the policy in
