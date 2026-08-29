@@ -9,23 +9,6 @@ import (
 	"time"
 )
 
-// captureStderr redirects os.Stderr for the duration of fn and returns what was
-// written. keygen status messages (created / reused / rotating) go to stderr.
-func captureStderr(t *testing.T, fn func() error) (string, error) {
-	t.Helper()
-	old := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("pipe: %v", err)
-	}
-	os.Stderr = w
-	runErr := fn()
-	w.Close()
-	os.Stderr = old
-	out, _ := io.ReadAll(r)
-	return string(out), runErr
-}
-
 // captureAll captures both stdout and stderr simultaneously. keygen writes the
 // CONTRACT "pin: <base64>" to stdout and status messages to stderr; we must
 // assert them independently to prove stdout is unaffected by stderr additions.

@@ -74,18 +74,6 @@ func (p *fakePool) ControlCall(context.Context, string, func(context.Context, *c
 
 func (p *fakePool) Close() {}
 
-// fakeMetaReader simulates reading a .meta sidecar. present=false simulates
-// an absent sidecar so the identity block is omitted from the snapshot.
-type fakeMetaReader struct {
-	created time.Time
-	present bool
-	err     error
-}
-
-func (r *fakeMetaReader) Read(path string) (time.Time, bool, error) {
-	return r.created, r.present, r.err
-}
-
 // ---- TestStatusJSON_GoldenFile -----------------------------------------------
 
 // TestStatusJSON_GoldenFile verifies that the bytes produced by the daemon's
