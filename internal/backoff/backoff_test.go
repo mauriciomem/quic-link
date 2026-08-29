@@ -25,10 +25,10 @@ func TestMain(m *testing.M) {
 func testPolicy(draws ...float64) backoff.Exponential {
 	i := 0
 	return backoff.Exponential{
-		Base:         250 * time.Millisecond,
-		Factor:       2,
-		Cap:          15 * time.Second,
-		StableAfter_: 60 * time.Second,
+		Base:      250 * time.Millisecond,
+		Factor:    2,
+		Cap:       15 * time.Second,
+		StableFor: 60 * time.Second,
 		Rand: func() float64 {
 			d := draws[i%len(draws)]
 			i++

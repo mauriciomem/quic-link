@@ -162,11 +162,11 @@ func waitForDials(t *testing.T, tr *countingDeadTransport, n int, budget time.Du
 // a random one. The point here is the clock jump, not the draw.
 func ceilingPolicy() daemon.ExponentialReconnectPolicy {
 	return daemon.ExponentialReconnectPolicy{
-		Base:         250 * time.Millisecond,
-		Factor:       2,
-		Cap:          15 * time.Second,
-		StableAfter_: 60 * time.Second,
-		Rand:         func() float64 { return 1.0 },
+		Base:      250 * time.Millisecond,
+		Factor:    2,
+		Cap:       15 * time.Second,
+		StableFor: 60 * time.Second,
+		Rand:      func() float64 { return 1.0 },
 	}
 }
 
