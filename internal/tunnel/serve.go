@@ -283,7 +283,7 @@ const NoPeerIdentityCode = 0x06
 const (
 	// controlOpenDeadline bounds how long after a session is established the
 	// client may take to open its control stream. Past it, the agent closes
-	// the session with 0x03.
+	// the session with controlStreamMissingCode.
 	controlOpenDeadline = 5 * time.Second
 	// agentVersionMsg is carried in the control stream's ok response. It is a
 	// fixed string, not opt.Version, deliberately: opt.Version is already
@@ -292,6 +292,25 @@ const (
 	// change the ok response's wire content for every client on every
 	// session — a behavior change this comment does not make on its own.
 	agentVersionMsg = "quic-link agent"
+
+	// controlStreamMissingCode is sent by whichever side finds the control
+	// stream missing: below, both when it never opens within
+	// controlOpenDeadline and when the agent's own response to it fails to
+	// write. This name matches internal/daemon's constant of the same value
+	// and meaning — the two packages independently close a session for the
+	// same protocol reason, and duplicating the numeric literal without the
+	// shared name is exactly the drift this file already avoids for 0x02
+	// and 0x06.
+	controlStreamMissingCode = 0x03
+	// unsupportedProtoCode is sent when the control stream's meta.proto is
+	// not "1".
+	unsupportedProtoCode = 0x04
+	// cleanCloseCode closes a session with no application error: the
+	// control stream ended normally, or the agent is shutting down. Naming
+	// it keeps every close reason in this file self-describing rather than
+	// leaving the one that means "nothing went wrong" as the sole bare
+	// literal among named siblings.
+	cleanCloseCode = 0x00
 )
 
 // Serve accepts QUIC connections from ln and, for every stream opened by a
@@ -337,7 +356,7 @@ func ServeConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 // serveConn derives the peer identity once and handles all streams on a
 // single accepted QUIC connection. It also enforces the control-stream open
 // deadline: if the client does not open a control stream within
-// controlOpenDeadline, the session is closed with 0x03.
+// controlOpenDeadline, the session is closed with controlStreamMissingCode.
 func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt ServeOpts) {
 	peer, err := router.IdentityFromCerts(conn.PeerCertificates())
 	if err != nil {
@@ -398,7 +417,7 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 	// disagrees with.
 	openTimer := time.AfterFunc(controlOpenDeadline, func() {
 		if !cs.isOpen() {
-			_ = conn.CloseWithError(0x03, "control stream not opened within deadline")
+			_ = conn.CloseWithError(controlStreamMissingCode, "control stream not opened within deadline")
 		}
 	})
 	defer openTimer.Stop()
@@ -412,7 +431,7 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 			// idle timeout. Without this, the peer would wait the full
 			// MaxIdleTimeout before detecting the drop.
 			if ctx.Err() != nil {
-				_ = conn.CloseWithError(0, "agent shutting down")
+				_ = conn.CloseWithError(cleanCloseCode, "agent shutting down")
 			}
 			return
 		}
@@ -521,7 +540,7 @@ func serveControl(
 			Msg:    `control proto must be "1"`,
 		})
 		_ = stream.Close()
-		_ = conn.CloseWithError(0x04, "unsupported control proto")
+		_ = conn.CloseWithError(unsupportedProtoCode, "unsupported control proto")
 		return nil
 	}
 	if !cs.markOpen() {
@@ -557,7 +576,7 @@ func serveControl(
 
 	if err := proto.WriteResponse(stream, proto.Response{Status: proto.StatusOK, Msg: agentVersionMsg}); err != nil {
 		stream.Reset(proto.StreamResetCode)
-		_ = conn.CloseWithError(0x03, "control response write failed")
+		_ = conn.CloseWithError(controlStreamMissingCode, "control response write failed")
 		return fmt.Errorf("control: write ok: %w", err)
 	}
 
@@ -587,7 +606,7 @@ func serveControl(
 		"peer", peer.Short(),
 		"session_duration", time.Since(sessionStart).Round(time.Millisecond),
 	)
-	_ = conn.CloseWithError(0x00, "control stream closed")
+	_ = conn.CloseWithError(cleanCloseCode, "control stream closed")
 	return nil
 }
 
