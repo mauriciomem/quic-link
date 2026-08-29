@@ -265,6 +265,15 @@ func SameIdentityAsPeer(ownPin string, peer router.Identity) bool {
 // need saying out loud.
 const RoleMismatchCode = 0x02
 
+// NoPeerIdentityCode is sent in the defense-in-depth branch below, when a
+// connection somehow reaches this point with no peer certificate at all.
+// It is deliberately distinct from RoleMismatchCode: the two are different
+// conditions on the wire (no certificate, versus a certificate that matches
+// our own), and transport.IsRoleMismatch classifies a close purely by its
+// numeric code, so sharing a code here would make that classifier misfire on
+// this branch and report a role collision that never happened.
+const NoPeerIdentityCode = 0x06
+
 const (
 	// controlOpenDeadline bounds how long after a session is established the
 	// client may take to open its control stream. Past it, the agent closes
@@ -324,8 +333,11 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 	if err != nil {
 		// Should be unreachable: the pinning handshake already requires a client
 		// certificate, so a peer without one never completes a connection. Kept
-		// as defense-in-depth.
-		_ = conn.CloseWithError(0x02, "no peer identity")
+		// as defense-in-depth. Uses its own close code, not RoleMismatchCode: a
+		// caller with no certificate at all has not collided with our identity,
+		// and reporting it as if it had would send an operator chasing a key
+		// collision that does not exist.
+		_ = conn.CloseWithError(NoPeerIdentityCode, "no peer identity")
 		return
 	}
 	if SameIdentityAsPeer(opt.OwnPin, peer) {

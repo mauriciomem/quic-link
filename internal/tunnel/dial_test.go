@@ -501,6 +501,62 @@ func TestDialAndServe_GivesUpOnRoleMismatch_FromConnCloseCause(t *testing.T) {
 	}
 }
 
+// TestDialAndServe_RetriesAfterNoPeerIdentityClose is the regression test for
+// the close-code overload at the DialAndServe level: a connection-close cause
+// carrying tunnel.NoPeerIdentityCode must NOT be classified as a role
+// mismatch by transport.IsRoleMismatch, so the loop keeps retrying rather
+// than giving up permanently after one dial. Before this fix, serve.go sent
+// the same numeric code for "no peer identity" as for a genuine role
+// collision, so this connection-close cause was indistinguishable from one
+// and DialAndServe returned immediately instead of reconnecting.
+func TestDialAndServe_RetriesAfterNoPeerIdentityClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	hub := mem.NewHub()
+	leaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+	dialer := &countingDialer{inner: hub.Transport("noident-dialer:1", mem.WithCert(leaf))}
+
+	// The waiting side closes every accepted connection with
+	// tunnel.NoPeerIdentityCode, standing in for serveConn's defense-in-depth
+	// branch without needing an unreachable real handshake state.
+	waiterLn, err := hub.Transport("noident-waiter:1").Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { waiterLn.Close() })
+	go func() {
+		for {
+			conn, err := waiterLn.Accept(ctx)
+			if err != nil {
+				return
+			}
+			_ = conn.CloseWithError(uint64(tunnel.NoPeerIdentityCode), "no peer identity")
+		}
+	}()
+
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tunnel.DialAndServe(ctx, dialer, "noident-waiter:1", rtr, zeroPolicy{}, tunnel.WallClock{})
+	}()
+
+	if !pollUntilTrue(10*time.Second, func() bool { return dialer.count() >= 2 }) {
+		t.Fatalf("dial count = %d, want at least 2 — a no-peer-identity close "+
+			"must not be classified as a role mismatch and must not stop the retry loop",
+			dialer.count())
+	}
+	cancel()
+	<-done
+}
+
 // TestDialAndServe_GivesUpWhenIdentityRejected: retrying a rejected identity
 // forever would bury the one message that explains the problem.
 func TestDialAndServe_GivesUpWhenIdentityRejected(t *testing.T) {
