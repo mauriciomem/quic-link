@@ -34,8 +34,15 @@ type ConnSource interface {
 }
 
 // portProbeBlocks is the maximum number of ten-port blocks tried before giving
-// up when acquiring a port pair. With base ports near 42000, ten blocks covers
-// 42000–42100 which is well within ephemeral range.
+// up when acquiring a port pair. config.LocalPortBase hashes a server name to
+// a base in [42000, 61990]; this probe steps up to (portProbeBlocks-1)*10 = 90
+// ports above whichever base a given server lands on — not a fixed window
+// starting at 42000. For a server whose base falls near the top of that
+// range, the probe ceiling reaches roughly 62080, which is inside the IANA
+// dynamic/private range (49152–65535) but above the narrower ephemeral range
+// some OS/BSD configurations default to (historically as low as
+// 32768–60999). On such a system the top of the probe window can collide
+// with a port the kernel hands out to an unrelated outbound connection.
 const portProbeBlocks = 10
 
 // openConnReadyTimeout is the maximum time an edge accept loop waits for the

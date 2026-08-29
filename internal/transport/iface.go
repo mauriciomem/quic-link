@@ -1,6 +1,8 @@
 // Package transport defines the Transport abstraction used by quic-link.
-// The QUIC implementation is the only concrete implementation shipped today.
-// See the TODO markers for TCP/wss fallback extension points.
+// The QUIC implementation is the only concrete implementation shipped today;
+// the interfaces below are kept transport-agnostic in shape (Stream/Conn
+// wrap io/net primitives, not QUIC-specific types) so a second transport
+// could implement them without a redesign, though none is planned.
 package transport
 
 import (
@@ -39,10 +41,10 @@ type ConnStats struct {
 	MeanDeviation time.Duration
 }
 
-// Stream is a single bidirectional data channel over a Conn.
-//
-// TODO (TCP/wss fallback): implement Stream backed by a net.Conn, presenting
-// the whole TCP connection as one stream.
+// Stream is a single bidirectional data channel over a Conn. The shape is
+// io.ReadWriteCloser plus Reset, deliberately not QUIC-specific, so a
+// non-QUIC implementation would wrap a net.Conn without changing this
+// interface.
 type Stream interface {
 	io.ReadWriteCloser
 	// Reset abruptly terminates both directions of the stream with the given
@@ -52,9 +54,6 @@ type Stream interface {
 }
 
 // Conn is an established transport connection that can carry multiple Streams.
-//
-// TODO (TCP/wss fallback): implement Conn backed by a net.Conn, exposing
-// a single Stream wrapping the underlying TCP connection.
 type Conn interface {
 	// OpenStream opens a new outbound bidirectional stream to the peer.
 	OpenStream(ctx context.Context) (Stream, error)
@@ -77,8 +76,6 @@ type Conn interface {
 }
 
 // Listener accepts inbound Conn connections.
-//
-// TODO (TCP/wss fallback): wrap net.Listener to implement this interface.
 type Listener interface {
 	Accept(ctx context.Context) (Conn, error)
 	Addr() net.Addr
@@ -86,9 +83,6 @@ type Listener interface {
 }
 
 // Transport establishes (Dial) and accepts (Listen) Conn connections.
-//
-// TODO (TCP/wss fallback): implement Transport using net.Dial/net.Listen
-// and register it behind a --transport=tcp flag in cmd/quic-link/main.go.
 type Transport interface {
 	// Dial connects to the server at addr (host:port) and returns an
 	// established Conn after the handshake completes.

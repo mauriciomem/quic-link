@@ -80,7 +80,8 @@ func Ping(ctx context.Context, t transport.Transport, serverAddr string) (*Resul
 	defer conn.CloseWithError(0, "ping done") //nolint:errcheck
 
 	// Block until 1-RTT keys are derived: only then do RTT estimates reflect
-	// actual network conditions rather than the initial 333 ms estimate.
+	// actual network conditions rather than the seeded 100 ms placeholder
+	// (quic-go's utils.DefaultInitialRTT).
 	select {
 	case <-conn.HandshakeComplete():
 	case <-ctx.Done():
