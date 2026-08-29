@@ -86,9 +86,14 @@ type listenEntry struct {
 	waiting chan struct{}
 	// waitErr is set by failWaiters just before it closes waiting, so a Get
 	// call that wakes from that close has something to read besides the
-	// still-nil current connection. It is cleared by promote, mirroring how
-	// dialEntry clears dialErr once a connection becomes usable — a stale
-	// shutdown cause must not outlive the shutdown it described.
+	// still-nil current connection. It is cleared by promote — not because a
+	// stale value has been observed to survive a promote today, but because
+	// two things close that gap by construction and are worth recording so a
+	// future change does not reopen it: every failWaiters call site (in
+	// runLoop) is immediately followed by return, so no promote on this
+	// entry can ever run after one; and Get itself checks conn before
+	// waitErr, so even if a stale waitErr somehow outlived a promote, a live
+	// connection would still win the race to be read first.
 	waitErr error
 
 	// watchers tracks the per-session goroutines so shutdown can join them.
