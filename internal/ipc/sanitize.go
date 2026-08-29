@@ -15,6 +15,38 @@ import (
 // terminal-flooding vector, not as a limit a real value could ever meet.
 const MaxSanitizedFieldLen = 256
 
+// IsUnsafeAgentRune reports whether r belongs to a Unicode category this
+// package treats as unsafe to place in front of a human when it was chosen
+// by the far end of a session: C0/C1 control characters (the framing an
+// escape or OSC sequence needs, plus CR/LF), Unicode format characters
+// (category Cf, e.g. a bidi override), and line/paragraph separators
+// (Zl/Zp, missed by the control-character check because they are neither
+// control nor format characters). It is the single definition of "unsafe"
+// this package and internal/daemon build their sanitizers on:
+// SanitizeAgentString below uses it directly, and internal/daemon's
+// boundedFailureText consults it too, layering its own bound, truncation
+// marker, and whitespace-to-space substitution on top.
+//
+// internal/control/addvhost.go's auditName solves the same problem for a
+// caller-supplied name written to this agent's own log, and applies the
+// identical five rune classes — but cannot call this function: this
+// package already depends on internal/control (for the control-plane
+// client), so importing the other way would cycle. Its own copy of the
+// rule is deliberately kept in step by hand; a category added here is
+// worth checking against auditName too.
+func IsUnsafeAgentRune(r rune) bool {
+	switch {
+	case r < 0x20 || (r >= 0x7f && r <= 0x9f):
+		return true
+	case unicode.Is(unicode.Cf, r):
+		return true
+	case unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
+		return true
+	default:
+		return false
+	}
+}
+
 // SanitizeAgentString renders a string chosen by the far end of a session
 // safe to place in front of a human, whether on a terminal or inside a --json
 // document, before it leaves this trust boundary.
@@ -29,15 +61,10 @@ const MaxSanitizedFieldLen = 256
 // freely. This function is the one place that distrust is acted on, so no
 // relay that forwards far-end text can forget to.
 //
-// It strips every C0 control byte (0x00-0x1F, which includes ESC, BEL, CR
-// and LF — the bytes that give a terminal escape or OSC sequence its
-// structure, and the two that could forge a second log line), every C1
-// control byte (0x7F-0x9F), every Unicode format character (category Cf,
-// e.g. U+202E RIGHT-TO-LEFT OVERRIDE) and every line/paragraph separator
-// (Zl/Zp) missed by the two checks above. It drops any byte sequence that is
-// not valid UTF-8 rather than replacing it, so a run of garbage cannot
-// inflate the output, and it truncates the result to MaxSanitizedFieldLen
-// bytes.
+// Character handling is IsUnsafeAgentRune, above. It drops any byte
+// sequence that is not valid UTF-8 rather than replacing it, so a run of
+// garbage cannot inflate the output, and it truncates the result to
+// MaxSanitizedFieldLen bytes.
 //
 // Deliberately NOT special-cased: recognising specific escape *sequences*
 // (e.g. "ESC ] ... BEL" for OSC) would be an allow-list-shaped defense that
@@ -62,19 +89,8 @@ func SanitizeAgentString(s string) string {
 			// Not valid UTF-8 at this position. Drop the byte rather than
 			// emit a replacement character per bad byte, which would let a
 			// long run of garbage inflate the output instead of shrinking it.
-		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
-			// C0 and C1 control bytes: the framing an escape or OSC
-			// sequence needs, and the CR/LF that would forge a second line.
-		case unicode.Is(unicode.Cf, r):
-			// Unicode format characters: no framing power over an escape
-			// sequence or JSON syntax, but the whole point of one (like a
-			// bidi override) is to make already-honest bytes render in a
-			// different, misleading order.
-		case unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
-			// Line and paragraph separators, which are neither control nor
-			// format characters and so are missed by both cases above. A
-			// consumer that treats one as a line break reads output as
-			// having more lines than were written.
+		case IsUnsafeAgentRune(r):
+			// See IsUnsafeAgentRune's own doc for which categories this covers.
 		default:
 			b.WriteRune(r)
 		}

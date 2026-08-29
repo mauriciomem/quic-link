@@ -8,13 +8,13 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/identity"
+	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
@@ -987,6 +987,20 @@ const maxFailureTextBytes = 200
 
 // boundedFailureText makes an error safe to print beside other fields: valid
 // text, on one line, of a predictable length.
+//
+// Character filtering delegates to ipc.IsUnsafeAgentRune, the same rule
+// ipc.SanitizeAgentString applies at the IPC relay boundary — LastError's
+// text can originate at the far end exactly as a RoutesError.Msg can (both
+// may carry a QUIC ApplicationError/TransportError's ErrorMessage, a
+// CONNECTION_CLOSE reason phrase the far end chose), so it is held to the
+// same rule rather than a second, independently-maintained one that could
+// drift from it. What stays local to this function is the length bound
+// (maxFailureTextBytes, not ipc.MaxSanitizedFieldLen — this field's
+// documented shape in the status --json CONTRACT predates the shared
+// sanitizer and is kept as-is) and the "…" truncation marker, plus turning
+// \n/\r/\t into a plain space rather than dropping them outright: a dropped
+// newline would run two words together with nothing between them, where a
+// space keeps the sentence readable.
 func boundedFailureText(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -1000,7 +1014,7 @@ func boundedFailureText(s string) string {
 			// Whitespace that would otherwise split one field across lines and
 			// let a message impersonate another.
 			b.WriteRune(' ')
-		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+		case ipc.IsUnsafeAgentRune(r):
 			continue
 		default:
 			b.WriteRune(r)
