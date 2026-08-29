@@ -33,19 +33,19 @@ const defaultAttachCap = 256
 // injects a real implementation; tests inject a stub. Returning raw JSON bytes
 // decouples the IPC package from the daemon's snapshot type so internal/ipc
 // does not import internal/daemon.
+type StatusProvider interface {
+	// StatusJSON returns the JSON-encoded status snapshot ready to embed as
+	// a CBOR raw message in the Response.Body field. The returned bytes MUST
+	// be valid JSON.
+	StatusJSON() ([]byte, error)
+}
+
 // DoctorProvider answers what only the daemon knows. probe is a label the
 // caller has just looked up; the answer says whether that lookup reached the
 // responder, which is the difference between "a name resolved" and "this
 // machine's resolver is pointed here".
 type DoctorProvider interface {
 	DoctorJSON(probe string) ([]byte, error)
-}
-
-type StatusProvider interface {
-	// StatusJSON returns the JSON-encoded status snapshot ready to embed as
-	// a CBOR raw message in the Response.Body field. The returned bytes MUST
-	// be valid JSON.
-	StatusJSON() ([]byte, error)
 }
 
 // RoutesProvider relays a live route-table query to a named server's agent
