@@ -109,7 +109,12 @@ func withdrawFailure(server, host string, err error) error {
 			"server %q publishes %q from its own configuration, which cannot be withdrawn "+
 				"from here; the operator of that agent decides what it configures", server, host)}
 	case codes.InvalidArgument:
-		return &ipc.RoutesError{Status: 2, Msg: status.Convert(err).Message()}
+		// status.Convert(err).Message() is the connected agent's own gRPC
+		// status text — worded by whoever answered this session's handshake.
+		// Sanitized here for the same reason expose.go's AlreadyExists/
+		// InvalidArgument cases are: pinning proves which key answered, not
+		// what that key's holder puts in a status message.
+		return &ipc.RoutesError{Status: 2, Msg: ipc.SanitizeAgentString(status.Convert(err).Message())}
 	default:
 		slog.Debug("withdraw: control call failed; reporting as reconnecting",
 			"role", "daemon", "session", server, "err", err)

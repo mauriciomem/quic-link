@@ -134,10 +134,16 @@ func exposeFailure(server string, err error) error {
 			"the agent at server %q refuses remote changes to what it publishes; "+
 				"its operator can allow them", server)}
 	case codes.AlreadyExists:
+		// status.Convert(err).Message() is the connected agent's own gRPC
+		// status text — worded by whoever answered this session's handshake,
+		// which pinning proves the identity of but not the intentions of.
+		// Sanitized here as well as at the IPC relay boundary this RoutesError
+		// eventually crosses, so the daemon's own log line (should this ever
+		// reach one) never carries the far end's raw bytes either.
 		return &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
-			"server %q already publishes that name: %s", server, status.Convert(err).Message())}
+			"server %q already publishes that name: %s", server, ipc.SanitizeAgentString(status.Convert(err).Message()))}
 	case codes.InvalidArgument:
-		return &ipc.RoutesError{Status: 2, Msg: status.Convert(err).Message()}
+		return &ipc.RoutesError{Status: 2, Msg: ipc.SanitizeAgentString(status.Convert(err).Message())}
 	case codes.ResourceExhausted:
 		// The request was fine and there was no room for it, which is neither a
 		// mistake to correct nor a connection to wait out. The number is

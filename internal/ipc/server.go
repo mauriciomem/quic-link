@@ -110,6 +110,23 @@ type RoutesError struct {
 // Error implements the error interface.
 func (e *RoutesError) Error() string { return e.Msg }
 
+// routesErrorResponse turns a *RoutesError into the Response this socket
+// actually sends, running its Msg through SanitizeAgentString first.
+//
+// A RoutesError's Msg is, at several of its construction sites in
+// internal/daemon, a gRPC status message the connected agent worded itself
+// (status.Convert(err).Message()) — text an authenticated, correctly-pinned
+// peer chose, not text this build wrote. Being pinned proves which key
+// answered a handshake; it says nothing about what that key's holder puts in
+// a status message. Every one of handleRPC's four relay cases (routes,
+// vhosts, withdraw, expose) turns a *RoutesError into a Response the same
+// way, so that conversion happens exactly once, here, rather than once per
+// case — a fifth relay added later gets this by construction instead of by
+// remembering to call the sanitizer itself.
+func routesErrorResponse(re *RoutesError) Response {
+	return errorResponse(re.Status, SanitizeAgentString(re.Msg))
+}
+
 // routesRPCTimeout bounds how long the routes relay's own call to the agent
 // may take, applied on top of whatever bound the daemon enforces internally
 // on the control-plane call itself. It is generous headroom over that inner
@@ -469,9 +486,11 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			var re *RoutesError
 			if errors.As(err, &re) {
 				// The provider already knows exactly why and exactly what
-				// status that belongs to — relay both verbatim rather than
-				// replacing a distinguishable reason with a generic one.
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				// status that belongs to — relay both, through the same
+				// sanitizing boundary every RoutesError crosses (see
+				// routesErrorResponse), rather than replacing a
+				// distinguishable reason with a generic one.
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay routes", "role", "daemon", "server", req.Server, "err", err)
@@ -520,7 +539,7 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		if verr != nil {
 			var re *RoutesError
 			if errors.As(verr, &re) {
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay vhosts", "role", "daemon", "server", req.Server, "err", verr)
@@ -568,7 +587,7 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		if werr != nil {
 			var re *RoutesError
 			if errors.As(werr, &re) {
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay withdraw", "role", "daemon", "server", req.Server, "err", werr)
@@ -616,7 +635,7 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		if eerr != nil {
 			var re *RoutesError
 			if errors.As(eerr, &re) {
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay expose", "role", "daemon", "server", req.Server, "err", eerr)
@@ -711,12 +730,19 @@ func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, r
 	// The Once in releaseConn guarantees the slot is released exactly once
 	// even if this closure is called and then the defer in the accept goroutine
 	// fires again later.
+	//
+	// resp.Msg on a non-OK ack is the agent's own wording, carried here over
+	// the QUIC wire from wherever the agent's route table refused the attach —
+	// the same kind of far-end-worded text a RoutesError carries, and it
+	// crosses this socket into the CLI's stderr the same way. Sanitized for
+	// the same reason routesErrorResponse sanitizes a RoutesError's Msg.
 	relayAck := func(resp proto.Response) error {
 		var writeErr error
 		if resp.Status == proto.StatusOK {
 			writeErr = writeResponse(conn, okResponse(nil))
 		} else {
-			writeErr = writeResponse(conn, errorResponse(uint(proto.ExitCodeForStatus(resp.Status)), resp.Msg))
+			writeErr = writeResponse(conn, errorResponse(
+				uint(proto.ExitCodeForStatus(resp.Status)), SanitizeAgentString(resp.Msg)))
 		}
 		if writeErr != nil {
 			return writeErr
