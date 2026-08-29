@@ -168,9 +168,12 @@ func newStdioCmd(a *app) *cobra.Command {
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
 				return usageErrorf("--server is required (or add SERVER to the config with an addr)")
 			}
-			serverPin, perr := identity.ParsePin(srv.Pin)
+			serverPin, perr := identity.ParsePinStrict(srv.Pin)
 			if perr != nil {
 				fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+				if errors.Is(perr, identity.ErrPinNotCanonical) {
+					return usageErrorf("pin is not canonical")
+				}
 				return usageErrorf("pin is required and must be a valid pin: %v", perr)
 			}
 
