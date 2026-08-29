@@ -25,10 +25,12 @@ package daemon
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/router"
+	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/transport/mem"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
@@ -42,6 +44,38 @@ type reportsShutdownWithoutCancelling struct {
 }
 
 func (reportsShutdownWithoutCancelling) Err() error { return context.Canceled }
+
+// streamCloseTrackingConn wraps a transport.Conn and records whether the
+// Stream returned by its first OpenStream call was closed. This is the seam
+// this test needs to observe the control client's Close() reaching the
+// underlying transport stream: control.Client.Close() closes a *grpc.ClientConn,
+// which closes the net.Conn adapter (internal/control.streamConn), which
+// forwards to the transport.Stream this call hands out — one level below
+// anything *control.Client itself exposes.
+type streamCloseTrackingConn struct {
+	transport.Conn
+	stream *streamCloseTrackingStream
+}
+
+func (c *streamCloseTrackingConn) OpenStream(ctx context.Context) (transport.Stream, error) {
+	s, err := c.Conn.OpenStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.stream = &streamCloseTrackingStream{Stream: s, closed: make(chan struct{})}
+	return c.stream, nil
+}
+
+type streamCloseTrackingStream struct {
+	transport.Stream
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *streamCloseTrackingStream) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return s.Stream.Close()
+}
 
 // TestListenEntry_Promote_RefusesInstallWhenCtxReportsShutdown exercises the
 // guard on the success path of promote: a control stream that opens cleanly
@@ -85,10 +119,11 @@ func TestListenEntry_Promote_RefusesInstallWhenCtxReportsShutdown(t *testing.T) 
 
 	acceptCtx, acceptCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer acceptCancel()
-	conn, err := ln.Accept(acceptCtx)
+	rawConn, err := ln.Accept(acceptCtx)
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
 	}
+	conn := &streamCloseTrackingConn{Conn: rawConn}
 
 	e := &listenEntry{name: "shutdown-guard", waiting: make(chan struct{}), clock: WallClock{}}
 	shutdownCtx := reportsShutdownWithoutCancelling{context.Background()}
@@ -102,5 +137,15 @@ func TestListenEntry_Promote_RefusesInstallWhenCtxReportsShutdown(t *testing.T) 
 	}
 	if e.controlClient != nil {
 		t.Errorf("e.controlClient = %v, want nil: promote must not install a control client once ctx reports shutdown", e.controlClient)
+	}
+
+	if conn.stream == nil {
+		t.Fatalf("the control stream was never opened; want the success path (a real control-stream open) to be exercised")
+	}
+	select {
+	case <-conn.stream.closed:
+	case <-time.After(2 * time.Second):
+		t.Error("promote refused to install the connection but never closed the control " +
+			"client it had already opened")
 	}
 }
