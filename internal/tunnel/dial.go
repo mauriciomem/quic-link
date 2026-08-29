@@ -164,9 +164,11 @@ func DialAndServe(
 
 		// A session that stayed up long enough starts the schedule over, so a
 		// stable link that drops once does not inherit a long wait from an
-		// outage hours earlier. This has to be decided before the backoff
-		// below consults attempt, or a stable session's first post-drop wait
-		// would use whatever attempt was left over from before it connected.
+		// outage hours earlier. Decided before the backoff below consults
+		// attempt so the block stays correct by construction even if the
+		// post-connect "attempt = 0" above (which already makes attempt 0
+		// here on every ordinary path) is ever removed or reordered — not
+		// because a stale value is reachable today.
 		if clock.Since(lastSuccessAt) > policy.StableAfter() {
 			attempt = 0
 		}
