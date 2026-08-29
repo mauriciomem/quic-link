@@ -209,7 +209,7 @@ func Load(path string) (*Config, error) {
 	// Expand a leading ~ in the key file path so the value is always absolute
 	// after Load returns, regardless of whether it came from a default, file,
 	// or environment override.
-	cfg.Identity.KeyFile = expandTilde(cfg.Identity.KeyFile)
+	cfg.Identity.KeyFile = identity.ExpandHome(cfg.Identity.KeyFile)
 
 	return cfg, nil
 }
@@ -711,20 +711,6 @@ func validateAgentWarnings(a *Agent) []string {
 }
 
 // ---- Helpers ----------------------------------------------------------------
-
-// expandTilde expands a leading ~ or ~/ to the user home directory. Paths
-// that do not start with ~ are returned unchanged.
-func expandTilde(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			if p == "~" {
-				return home
-			}
-			return filepath.Join(home, p[2:])
-		}
-	}
-	return p
-}
 
 // ---- Removed keys -----------------------------------------------------------
 

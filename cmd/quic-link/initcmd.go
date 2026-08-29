@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/setup"
 )
 
@@ -158,7 +159,7 @@ func runRootHalf(cmd *cobra.Command, a *app, n config.Naming, assumeYes bool) er
 // the system one, whether the daemon is running, and a real lookup, so anything
 // beyond a short answer and a pointer would be a second, worse copy of it.
 func runUserHalf(cmd *cobra.Command, a *app, n config.Naming, out io.Writer) error {
-	keyFile := expandTilde(a.cfg.Identity.KeyFile)
+	keyFile := identity.ExpandHome(a.cfg.Identity.KeyFile)
 	user := setup.Survey(setup.UserPaths(keyFile, config.FileInUse(a.configPath)))
 
 	fmt.Fprintf(out, "Nothing to do here: this half installs nothing.\n\n")

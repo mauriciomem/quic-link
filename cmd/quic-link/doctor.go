@@ -16,6 +16,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/buildinfo"
 	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/daemon"
+	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/names"
 	"github.com/mauriciomem/quic-link/internal/setup"
@@ -130,7 +131,7 @@ func diagnose(cmd *cobra.Command, a *app) report {
 	}
 	if home != "" {
 		arts = append(arts, setup.Survey(setup.UserPaths(
-			expandTilde(a.cfg.Identity.KeyFile),
+			identity.ExpandHome(a.cfg.Identity.KeyFile),
 			config.FileInUse(a.configPath)))...)
 	}
 	for _, art := range arts {

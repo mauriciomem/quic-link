@@ -244,7 +244,7 @@ func stdioRun(ctx context.Context, server, target, keyFile, serverPin string) er
 	// connection's close cause for a TLS-alert-range rejection and maps it to
 	// transport.ErrAuthFailed, which exitCodeForError turns into exit 4
 	// instead of the generic exit 1.
-	keyCreated := readKeyCreatedRFC3339(expandTilde(keyFile))
+	keyCreated := readKeyCreatedRFC3339(identity.ExpandHome(keyFile))
 	cclient, err := tunnel.OpenControl(ctx, conn, "quic-link stdio", control.OpenOpts{KeyCreated: keyCreated})
 	if err != nil {
 		_ = conn.CloseWithError(0x03, "control open failed")
