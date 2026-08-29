@@ -1,9 +1,31 @@
 package tunnel_test
 
+// @spec-handoff
+// @interface DialAndServe(ctx context.Context, t transport.Transport, addr string, rtr *router.Router, policy backoff.Policy, clock Clock, opts ...ServeOpts) error
+// @behavior
+//   - After ServeConn returns from a connection that completed its handshake
+//     and then dropped for an ordinary reason (not an auth failure, not a role
+//     collision), the loop must consult policy.Backoff(attempt) and wait on the
+//     channel returned by clock.After(d) before dialing again — the same
+//     scheduling the dial-failure path already applies. Reaching ServeConn once
+//     must not be treated as license to skip the wait on a later drop.
+//   - When either t.Dial's error or the cause behind ServeConn returning
+//     (context.Cause(conn.Context())) is a role collision recognised by
+//     transport.IsRoleMismatch, DialAndServe returns that error immediately and
+//     makes no further dial attempt, the same way it already stops for
+//     transport.IsAuthFailed — a distinct and equally terminal condition.
+// @edge-cases
+//   - A role collision can surface at either check site depending on handshake
+//     timing; both must be terminal on their own, independently.
+//   - The attempt counter is reset to 0 by the connect that just succeeded, so
+//     the first post-drop Backoff call under test is expected with n=0.
+// @see ./dial.go
+
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -32,6 +54,83 @@ type zeroPolicy struct{}
 
 func (zeroPolicy) Backoff(int) time.Duration  { return 0 }
 func (zeroPolicy) StableAfter() time.Duration { return time.Second }
+
+// recordingBackoffPolicy records every Backoff(n) call it receives, so a test
+// can assert the reconnect loop actually consulted the schedule rather than
+// merely observing that a reconnect eventually happened on its own. zeroPolicy
+// cannot do this: it hands out zero regardless of whether anyone called it,
+// which makes a test built on it structurally blind to whether the loop
+// consulted the policy at all.
+type recordingBackoffPolicy struct {
+	mu   sync.Mutex
+	seen []int
+}
+
+func (p *recordingBackoffPolicy) Backoff(n int) time.Duration {
+	p.mu.Lock()
+	p.seen = append(p.seen, n)
+	p.mu.Unlock()
+	return 10 * time.Millisecond
+}
+
+func (p *recordingBackoffPolicy) StableAfter() time.Duration { return time.Hour }
+
+// calls returns a snapshot of every n passed to Backoff so far, in call order.
+func (p *recordingBackoffPolicy) calls() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]int, len(p.seen))
+	copy(out, p.seen)
+	return out
+}
+
+// gatedClock is a Clock whose After never fires on its own: every channel it
+// hands out stays open until the test calls release, at which point every
+// pending (and every future) call resolves at once. This lets a test tell the
+// difference between "the loop waited on the clock, and the wait just hasn't
+// ended yet" and "the loop never waited on the clock in the first place" —
+// the second is what a real elapsed-time measurement cannot distinguish from
+// the first without flaking on timing.
+type gatedClock struct {
+	mu   sync.Mutex
+	seen []time.Duration
+	gate chan struct{}
+	once sync.Once
+}
+
+func newGatedClock() *gatedClock {
+	return &gatedClock{gate: make(chan struct{})}
+}
+
+func (c *gatedClock) Now() time.Time                  { return time.Now() }
+func (c *gatedClock) Since(t time.Time) time.Duration { return time.Since(t) }
+
+// After records the requested duration and returns a channel that only
+// delivers once release has been called, regardless of d. The duration itself
+// is not honoured — this clock's purpose is to prove the loop reached the
+// wait point at all, not to reproduce real timing.
+func (c *gatedClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	c.seen = append(c.seen, d)
+	c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	go func() {
+		<-c.gate
+		ch <- time.Now()
+	}()
+	return ch
+}
+
+// release lets every pending and future After channel deliver. Safe to call
+// more than once.
+func (c *gatedClock) release() { c.once.Do(func() { close(c.gate) }) }
+
+// afterCallCount reports how many times After has been called so far.
+func (c *gatedClock) afterCallCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.seen)
+}
 
 // countingDialer counts dials and can be told to fail.
 type countingDialer struct {
@@ -197,6 +296,267 @@ func TestDialAndServe_ReconnectsAfterDrop(t *testing.T) {
 	}
 }
 
+// pollUntilTrue polls cond every 5ms until it reports true or budget elapses.
+// It returns whether cond became true within the budget, so a caller can
+// t.Fatalf with a message that explains what the timeout means rather than a
+// bare "timed out".
+func pollUntilTrue(budget time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return cond()
+}
+
+// TestDialAndServe_AppliesBackoffAfterPostHandshakeDrop is the regression test
+// for the defect where a connection that completes its handshake and later
+// drops skips the reconnect schedule entirely, even though a connection that
+// never completed its handshake (an ordinary dial failure) correctly waits on
+// it. Both paths return to the same t.Dial call at the top of the loop, so
+// nothing about the retry should depend on how far the previous attempt got —
+// but today it does.
+//
+// A fake clock whose After blocks until the test releases it is used
+// deliberately instead of measuring elapsed wall time: this loop already
+// resets its own attempt counter to zero on every successful connect, so an
+// implementation that skips the wait still eventually reconnects — the defect
+// is invisible to any test that only checks "did it reconnect", it is visible
+// only in whether the schedule was ever consulted and whether the loop
+// actually blocked on it before trying again.
+func TestDialAndServe_AppliesBackoffAfterPostHandshakeDrop(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	hub, dialer, at := agentDialRig(t)
+	client := newWaitingClient(t, hub, at)
+
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	policy := &recordingBackoffPolicy{}
+	clock := newGatedClock()
+	t.Cleanup(clock.release)
+
+	go func() { _ = tunnel.DialAndServe(ctx, dialer, at, rtr, policy, clock) }()
+
+	first := client.accept(t, ctx)
+	if dialer.count() != 1 {
+		t.Fatalf("dial count = %d before any drop, want exactly 1", dialer.count())
+	}
+
+	// An ordinary drop: neither an auth failure nor a role collision, the
+	// same close code the existing TestDialAndServe_ReconnectsAfterDrop uses.
+	if err := first.CloseWithError(0, "test-forced drop"); err != nil {
+		t.Fatalf("CloseWithError: %v", err)
+	}
+
+	if !pollUntilTrue(3*time.Second, func() bool { return clock.afterCallCount() >= 1 }) {
+		t.Fatalf("clock.After was never called within the budget after a post-handshake drop; "+
+			"the loop redialed (dial count = %d) without consulting the backoff schedule at all — "+
+			"a connection that completed its handshake and then dropped is skipping the wait that "+
+			"an ordinary dial failure correctly takes", dialer.count())
+	}
+
+	if calls := policy.calls(); len(calls) == 0 {
+		t.Fatal("policy.Backoff was never called after a post-handshake drop; " +
+			"the loop is reconnecting without consulting the schedule")
+	} else if calls[0] != 0 {
+		t.Errorf("first post-drop Backoff call used attempt=%d, want 0 — "+
+			"attempt was reset to 0 by the connect that just succeeded", calls[0])
+	}
+
+	// The wait must actually gate the next dial, not merely have been asked
+	// for and then ignored: while the gate stays closed, no second dial may
+	// happen.
+	time.Sleep(50 * time.Millisecond)
+	if got := dialer.count(); got != 1 {
+		t.Fatalf("dial count = %d while the backoff wait was still pending, want exactly 1 — "+
+			"the loop redialed before its own clock.After channel delivered", got)
+	}
+
+	// Releasing the gate must let the loop resume and reconnect, so this is
+	// not merely detecting a permanent wedge either.
+	clock.release()
+	if !pollUntilTrue(5*time.Second, func() bool { return dialer.count() >= 2 }) {
+		t.Fatalf("dial count = %d after releasing the backoff wait, want at least 2 — "+
+			"the loop did not resume after the clock delivered", dialer.count())
+	}
+}
+
+// TestDialAndServe_GivesUpOnRoleMismatch_FromDialError covers the first of the
+// two sites in the loop that must treat a role collision as terminal: the
+// error returned directly by t.Dial. Today only transport.IsAuthFailed is
+// checked there, so a role-mismatch-shaped error falls through to the
+// ordinary "unreachable; retrying" backoff path and is retried forever —
+// exactly the one misconfiguration (both ends holding one key) that cannot
+// self-heal by retrying.
+func TestDialAndServe_GivesUpOnRoleMismatch_FromDialError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	hub := mem.NewHub()
+	leaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+	// mem.FailDial makes every Dial return this error regardless of whether a
+	// listener exists, mirroring TestDialAndServe_GivesUpWhenIdentityRejected's
+	// use of the same seam for the auth-failure terminal path. Wrapping
+	// transport.ErrRoleMismatch is what transport.IsRoleMismatch checks first.
+	roleMismatchErr := fmt.Errorf("dial: %w", transport.ErrRoleMismatch)
+	colliding := &countingDialer{
+		inner: hub.Transport("colliding-agent:1", mem.WithCert(leaf), mem.FailDial(roleMismatchErr)),
+	}
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tunnel.DialAndServe(ctx, colliding, "anywhere:1", rtr, zeroPolicy{}, tunnel.WallClock{})
+	}()
+
+	select {
+	case err := <-done:
+		if !transport.IsRoleMismatch(err) {
+			t.Errorf("returned %v, want a role mismatch", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("kept retrying a role collision the peer will never resolve by itself")
+	}
+	if got := colliding.count(); got != 1 {
+		t.Errorf("dial count = %d, want exactly 1: a role collision at Dial must not be retried", got)
+	}
+}
+
+// TestDialAndServe_GivesUpOnRoleMismatch_FromConnCloseCause covers the second
+// site: the cause behind ServeConn returning, read via
+// context.Cause(conn.Context()). This is where a role collision actually
+// surfaces in practice, because the collision is only detected after both
+// ends' handshakes have already completed — the dialing side's own Dial call
+// succeeds, and the rejection arrives as the reason its connection closed. The
+// waiting listener here is deliberately given the SAME certificate as the
+// dialing agent's own transport, which is the misconfiguration itself (one
+// keypair copied to both ends): ServeConn's own role check (shared with the
+// accepting path, see role_mismatch_test.go) sees the peer presenting our own
+// identity and closes with the role-mismatch code before ever accepting a
+// stream, which cancels the dialing side's connection context with the
+// collision as its cause. newWaitingClient is not reused here because it
+// mints its own fresh, distinct identity internally — using it would dial a
+// peer with a different key, which is not what this test needs to reproduce.
+func TestDialAndServe_GivesUpOnRoleMismatch_FromConnCloseCause(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	hub := mem.NewHub()
+	shared, sharedPin, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+
+	dialer := &countingDialer{inner: hub.Transport("colliding-dialer:1", mem.WithCert(shared))}
+
+	// The waiting side presents the identical certificate — the collision.
+	waiterLn, err := hub.Transport("colliding-waiter:1", mem.WithCert(shared)).Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { waiterLn.Close() })
+
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tunnel.DialAndServe(ctx, dialer, "colliding-waiter:1", rtr, zeroPolicy{}, tunnel.WallClock{},
+			tunnel.ServeOpts{OwnPin: sharedPin})
+	}()
+
+	// Accept the raw connection only — do not open a control stream on it.
+	// ServeConn refuses the role collision before it ever accepts a stream, so
+	// there is nothing here for a control open to succeed against.
+	if _, err := waiterLn.Accept(ctx); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !transport.IsRoleMismatch(err) {
+			t.Errorf("returned %v, want a role mismatch", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("kept retrying a role collision surfaced as a connection-close cause")
+	}
+	if got := dialer.count(); got != 1 {
+		t.Errorf("dial count = %d, want exactly 1: a role collision surfaced after ServeConn "+
+			"returns must not be retried", got)
+	}
+}
+
+// TestDialAndServe_RetriesAfterNoPeerIdentityClose is the regression test for
+// the close-code overload at the DialAndServe level: a connection-close cause
+// carrying tunnel.NoPeerIdentityCode must NOT be classified as a role
+// mismatch by transport.IsRoleMismatch, so the loop keeps retrying rather
+// than giving up permanently after one dial. Before this fix, serve.go sent
+// the same numeric code for "no peer identity" as for a genuine role
+// collision, so this connection-close cause was indistinguishable from one
+// and DialAndServe returned immediately instead of reconnecting.
+func TestDialAndServe_RetriesAfterNoPeerIdentityClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	hub := mem.NewHub()
+	leaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+	dialer := &countingDialer{inner: hub.Transport("noident-dialer:1", mem.WithCert(leaf))}
+
+	// The waiting side closes every accepted connection with
+	// tunnel.NoPeerIdentityCode, standing in for serveConn's defense-in-depth
+	// branch without needing an unreachable real handshake state.
+	waiterLn, err := hub.Transport("noident-waiter:1").Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { waiterLn.Close() })
+	go func() {
+		for {
+			conn, err := waiterLn.Accept(ctx)
+			if err != nil {
+				return
+			}
+			_ = conn.CloseWithError(uint64(tunnel.NoPeerIdentityCode), "no peer identity")
+		}
+	}()
+
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- tunnel.DialAndServe(ctx, dialer, "noident-waiter:1", rtr, zeroPolicy{}, tunnel.WallClock{})
+	}()
+
+	if !pollUntilTrue(10*time.Second, func() bool { return dialer.count() >= 2 }) {
+		t.Fatalf("dial count = %d, want at least 2 — a no-peer-identity close "+
+			"must not be classified as a role mismatch and must not stop the retry loop",
+			dialer.count())
+	}
+	cancel()
+	<-done
+}
+
 // TestDialAndServe_GivesUpWhenIdentityRejected: retrying a rejected identity
 // forever would bury the one message that explains the problem.
 func TestDialAndServe_GivesUpWhenIdentityRejected(t *testing.T) {
@@ -262,6 +622,107 @@ func TestDialAndServe_StopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("did not stop when its context was cancelled")
+	}
+}
+
+// TestDialAndServe_CancelDuringDialFailureWait_ReturnsPromptly is the
+// regression test for the ctx.Done() arm of the pre-existing dial-failure
+// wait's select (dial.go, the retry path). It uses gatedClock rather than
+// elapsed-time measurement so it can tell "the loop is parked in the wait,
+// and cancelling ctx wakes it" apart from "the loop is not waiting on ctx at
+// all, and would only exit once the clock happened to deliver" — deleting
+// the ctx.Done() case entirely still lets the loop return once release() is
+// called, so only a test that cancels ctx WITHOUT ever releasing the gate
+// can catch that regression.
+func TestDialAndServe_CancelDuringDialFailureWait_ReturnsPromptly(t *testing.T) {
+	hub := mem.NewHub()
+	leaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+	// No listener registered at this address: every dial fails, driving the
+	// loop straight into the dial-failure wait on the first iteration.
+	dialer := &countingDialer{inner: hub.Transport("unreachable-dial-agent:1", mem.WithCert(leaf))}
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	clock := newGatedClock()
+	// The gate is not released before the assertions below run — releasing
+	// early would let the loop exit via clock.After instead of ctx.Done(),
+	// which is the exact ambiguity this test exists to rule out. Released
+	// via Cleanup purely so the clock's own internal goroutine (which blocks
+	// on the gate, independent of ctx) does not leak past the test.
+	t.Cleanup(clock.release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- tunnel.DialAndServe(ctx, dialer, "nowhere:1", rtr, zeroPolicy{}, clock)
+	}()
+
+	if !pollUntilTrue(3*time.Second, func() bool { return clock.afterCallCount() >= 1 }) {
+		t.Fatal("clock.After was never called; the loop did not reach the dial-failure wait")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not return promptly after ctx was cancelled while parked in the " +
+			"dial-failure wait — the ctx.Done() arm of that select may have been lost")
+	}
+}
+
+// TestDialAndServe_CancelDuringPostDropWait_ReturnsPromptly is the same
+// regression test for the newer post-handshake-drop wait (dial.go:184-188),
+// which shares the exact select shape with the dial-failure wait above and
+// the exact coverage gap: nothing previously drove ctx.Done() to fire while
+// the loop was parked there specifically, as opposed to at some other point
+// in the loop.
+func TestDialAndServe_CancelDuringPostDropWait_ReturnsPromptly(t *testing.T) {
+	hub, dialer, at := agentDialRig(t)
+	client := newWaitingClient(t, hub, at)
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	clock := newGatedClock()
+	// Same reasoning as the sibling test above: not released before the
+	// assertions run, only via Cleanup afterward so the clock's own
+	// goroutine does not leak.
+	t.Cleanup(clock.release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- tunnel.DialAndServe(ctx, dialer, at, rtr, zeroPolicy{}, clock) }()
+
+	first := client.accept(t, ctx)
+	if dialer.count() != 1 {
+		t.Fatalf("dial count = %d before any drop, want exactly 1", dialer.count())
+	}
+	if err := first.CloseWithError(0, "test-forced drop"); err != nil {
+		t.Fatalf("CloseWithError: %v", err)
+	}
+
+	if !pollUntilTrue(3*time.Second, func() bool { return clock.afterCallCount() >= 1 }) {
+		t.Fatal("clock.After was never called after the drop; the loop did not reach the post-drop wait")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not return promptly after ctx was cancelled while parked in the " +
+			"post-drop wait — the ctx.Done() arm of that select may have been lost")
 	}
 }
 

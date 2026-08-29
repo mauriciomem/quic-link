@@ -37,5 +37,5 @@
 # and would fail on one runner only, so add such a test with per-platform counts
 # or not at all.
 
-cmd_quic_link=232
-tree_wide=722
+cmd_quic_link=248
+tree_wide=768

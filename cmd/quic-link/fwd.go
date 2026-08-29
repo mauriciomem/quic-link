@@ -184,6 +184,18 @@ func runFwd(cmd *cobra.Command, a *app, args []string) error {
 	if err != nil {
 		return err
 	}
+	// An unknown server name must be refused here, before any side effect.
+	// Without this check the name reaches the daemon's attach preflight,
+	// which answers a bare status 3 for both "unknown server" and "session
+	// not ready yet" — the same code the preflight already treats as
+	// transient and warns through, so an unknown name fell all the way to
+	// bindFwdListener and held a local port open until killed, never
+	// refusing at all. Checking the name against knownServers directly, the
+	// same way ssh/status/expose/vhosts already do, catches the mistake
+	// before a port is ever bound.
+	if err := requireKnownServer(a, server); err != nil {
+		return err
+	}
 
 	sock, err := daemonSocketPath(a.cfg)
 	if err != nil {

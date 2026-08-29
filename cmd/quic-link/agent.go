@@ -13,10 +13,24 @@ import (
 	"github.com/mauriciomem/quic-link/internal/backoff"
 	"github.com/mauriciomem/quic-link/internal/buildinfo"
 	"github.com/mauriciomem/quic-link/internal/config"
+	"github.com/mauriciomem/quic-link/internal/daemon"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/router"
 	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
+)
+
+// disableCoreDumpFunc and loadKeyFunc point at the production
+// implementations by default. agentRun calls through these variables rather
+// than the named functions directly so a test can substitute either one and
+// observe agentRun's startup ordering — matching the readMetaFunc precedent
+// in internal/daemon/daemon.go, which exists for the identical reason: the
+// thing under test (order, and whether a call happens at all) cannot be
+// observed by reading real process/kernel state without a side effect that
+// would corrupt every other test sharing the same binary.
+var (
+	disableCoreDumpFunc = daemon.DisableCoreDump
+	loadKeyFunc         = identity.LoadKey
 )
 
 func newAgentCmd(a *app) *cobra.Command {
@@ -189,6 +203,25 @@ future release. Use "agent" in new deployments.`,
 func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized pinList, idCfg config.Identity) error {
 	listen, dial := ag.Listen, ag.Dial
 	routes, vhosts := ag.Routes, ag.Vhosts
+
+	// Disable core dumps before anything below loads the Ed25519 private key
+	// into memory. daemon.Run does the same thing for the daemon's own
+	// startup path (that is where the underlying implementation lives; see
+	// internal/daemon/coredump_export.go) - the agent needs the identical
+	// protection because it loads the same kind of key a few lines down.
+	// Non-fatal: not every platform supports lowering RLIMIT_CORE, and a
+	// missing protection here is a reason to warn, not a reason to refuse to
+	// serve.
+	//
+	// Called through disableCoreDumpFunc, not daemon.DisableCoreDump
+	// directly, so a test can substitute it and observe that this call
+	// happens, and happens before loadKeyFunc below, without depending on
+	// real process-wide RLIMIT_CORE state (which is irreversible for the
+	// rest of a test binary once lowered — see coredump_unix_test.go).
+	if err := disableCoreDumpFunc(); err != nil {
+		slog.Warn("agent: could not disable core dumps", "role", "agent", "err", err)
+	}
+
 	// Captured here, at the top of the function that does the agent's real
 	// work, rather than in main() or an init(): this is the closest thing
 	// the tree has to a tracked "agent process start time" today, and
@@ -207,7 +240,13 @@ func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized p
 
 	// Authentication (the pin handshake) is enforced at the TLS layer; route-
 	// table authorisation is allow-all with an injectable deny policy.
-	key, err := identity.LoadKey(expandTilde(keyFile))
+	//
+	// Called through loadKeyFunc, not identity.LoadKey directly, for the
+	// same reason as disableCoreDumpFunc above: it gives a test a seam to
+	// record when the key was actually loaded, relative to the core-dump
+	// call, with no other production behavior change (loadKeyFunc's default
+	// value is identity.LoadKey itself).
+	key, err := loadKeyFunc(expandTilde(keyFile))
 	if err != nil {
 		return fmt.Errorf("load identity key: %w", err)
 	}

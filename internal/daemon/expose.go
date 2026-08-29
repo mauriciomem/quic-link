@@ -134,6 +134,15 @@ func exposeFailure(server string, err error) error {
 			"the agent at server %q refuses remote changes to what it publishes; "+
 				"its operator can allow them", server)}
 	case codes.AlreadyExists:
+		// status.Convert(err).Message() is the connected agent's own gRPC
+		// status text — worded by whoever answered this session's handshake,
+		// which pinning proves the identity of but not the intentions of.
+		// Carried raw here: routesErrorResponse (internal/ipc/server.go) is
+		// this codebase's one documented sanitisation boundary for a
+		// RoutesError.Msg, and sanitising twice on the way there produces a
+		// mangled nested truncation marker if the first pass ever truncates,
+		// with no benefit — nothing between here and that boundary logs or
+		// otherwise acts on this string.
 		return &ipc.RoutesError{Status: 3, Msg: fmt.Sprintf(
 			"server %q already publishes that name: %s", server, status.Convert(err).Message())}
 	case codes.InvalidArgument:

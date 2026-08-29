@@ -75,6 +75,40 @@ func ParsePin(s string) (string, error) {
 	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
+// ErrPinNotCanonical is returned by ParsePinStrict when a pin decodes to a
+// valid 32-byte digest but is not written in its own canonical spelling —
+// surrounding whitespace, or a non-canonical base64 trailing-bit variant of
+// the same digest, are the two ways this happens in practice. ParsePin
+// repairs both; ParsePinStrict does not, because every caller of
+// ParsePinStrict is handling a stored credential, and a credential that is
+// not already in its expected form is refused rather than corrected.
+var ErrPinNotCanonical = errors.New("pin is not canonical")
+
+// ParsePinStrict is ParsePin's stricter sibling: it validates s exactly as
+// ParsePin does, but additionally refuses any input that is not already
+// byte-identical to ParsePin's own canonical return value. Every entry point
+// that treats a pin as a credential to trust is held to this rule before the
+// value is used — a config file's pin or authorized_clients entry (enforced
+// by internal/config's validation), a --authorized-client flag (checked
+// directly at parse time, by pinList.Set), a --server-pin flag and a verb's
+// own --pin flag such as ping's (both checked later, when the effective
+// config is validated — a --server-pin is parsed leniently as it is read
+// and that lenient result is discarded, so nothing before validation
+// enforces canonicality), and stdio's own --pin flag (checked directly,
+// like --authorized-client) — so one
+// definition of "canonical" governs every pin the tree accepts, rather than
+// each caller re-deriving the comparison for itself.
+func ParsePinStrict(s string) (string, error) {
+	canonical, err := ParsePin(s)
+	if err != nil {
+		return "", err
+	}
+	if canonical != s {
+		return "", ErrPinNotCanonical
+	}
+	return canonical, nil
+}
+
 // PinForKeyFile returns the pin of the key stored at path, expanding a leading
 // ~ the way every other path in the config is. It is a convenience for callers
 // that need to recognise their own identity without keeping the key itself

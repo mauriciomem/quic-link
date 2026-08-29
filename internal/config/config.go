@@ -463,13 +463,14 @@ func validateServers(c *Config) ([]string, error) {
 	var warns []string
 	for name, srv := range c.Servers {
 		disabled := srv.Enabled != nil && !*srv.Enabled
+		err := validateServer(name, srv)
 		if disabled {
-			if err := validateServer(name, srv); err != nil {
+			if err != nil {
 				warns = append(warns, fmt.Sprintf("servers.%s (disabled): %v", name, err))
 			}
 			continue
 		}
-		if err := validateServer(name, srv); err != nil {
+		if err != nil {
 			return warns, err
 		}
 	}
@@ -547,6 +548,12 @@ func validateServer(name string, srv Server) error {
 //
 // label is used only to say where a problem is. It may be any wording that
 // helps the reader locate it.
+//
+// The pin is checked with identity.ParsePinStrict, not identity.ParsePin: a
+// pin that decodes correctly but was not written in its own canonical
+// spelling is refused outright rather than repaired, because a pin is an
+// authentication credential and a credential that arrives in the wrong form
+// is a sign the file is wrong, not a hint to be quietly corrected.
 func ValidateServerSettings(label string, srv Server) error {
 	bothSet := srv.Addr != "" && srv.Listen != ""
 	neitherSet := srv.Addr == "" && srv.Listen == ""
@@ -562,7 +569,10 @@ func ValidateServerSettings(label string, srv Server) error {
 			label, ErrInvalid,
 		)
 	}
-	if _, err := identity.ParsePin(srv.Pin); err != nil {
+	if _, err := identity.ParsePinStrict(srv.Pin); err != nil {
+		if errors.Is(err, identity.ErrPinNotCanonical) {
+			return fmt.Errorf("servers.%s: pin is not canonical: %w", label, ErrInvalid)
+		}
 		return fmt.Errorf("servers.%s: pin is required and must be valid base64(SHA-256): %v: %w",
 			label, err, ErrInvalid,
 		)
@@ -615,7 +625,10 @@ func validateAgent(c *Config) error {
 		)
 	}
 	for i, pin := range a.AuthorizedClients {
-		if _, err := identity.ParsePin(pin); err != nil {
+		if _, err := identity.ParsePinStrict(pin); err != nil {
+			if errors.Is(err, identity.ErrPinNotCanonical) {
+				return fmt.Errorf("agent.authorized_clients[%d]: pin is not canonical: %w", i, ErrInvalid)
+			}
 			return fmt.Errorf("agent.authorized_clients[%d]: invalid pin: %v: %w", i, err, ErrInvalid)
 		}
 	}
@@ -675,8 +688,13 @@ func validateAgentWarnings(a *Agent) []string {
 		w = append(w, "agent (inactive for client role): authorized_clients must be non-empty")
 	}
 	for i, pin := range a.AuthorizedClients {
-		if _, err := identity.ParsePin(pin); err != nil {
+		if _, err := identity.ParsePinStrict(pin); err != nil {
+			if errors.Is(err, identity.ErrPinNotCanonical) {
+				w = append(w, fmt.Sprintf("agent (inactive for client role): authorized_clients[%d]: pin is not canonical", i))
+				continue
+			}
 			w = append(w, fmt.Sprintf("agent (inactive for client role): authorized_clients[%d]: invalid pin: %v", i, err))
+			continue
 		}
 	}
 

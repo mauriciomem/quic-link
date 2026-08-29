@@ -193,6 +193,21 @@ func classifyListenBindError(srvName, listen string, err error) error {
 // before the pool and edges are built, so status --json reports only the
 // scoped server rather than the full fleet.
 func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope, configPath string) error {
+	// Disable core dumps as the very first thing this function does, before
+	// any config narrowing, socket probing, or key loading below. daemon.Run
+	// also calls this (see internal/daemon/daemon.go), but by the time this
+	// function reaches that call the identity key has already been loaded a
+	// few lines down and the session pool has already dialed out - both of
+	// which put private-key-bearing state into this process's memory well
+	// before Run's own call would take effect. Calling it here closes that
+	// gap; Run's call stays in place as a second call for the benefit of any
+	// other caller of daemon.Run (tests do call it directly), and a second
+	// call is harmless - the resource limit is already at zero when this
+	// one runs.
+	if err := daemon.DisableCoreDump(); err != nil {
+		slog.Warn("daemon: could not disable core dumps", "role", "daemon", "err", err)
+	}
+
 	// Validate scope against the config before doing any I/O.
 	if scope != "" {
 		srv, ok := cfg.Servers[scope]

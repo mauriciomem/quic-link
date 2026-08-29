@@ -110,6 +110,23 @@ type RoutesError struct {
 // Error implements the error interface.
 func (e *RoutesError) Error() string { return e.Msg }
 
+// routesErrorResponse turns a *RoutesError into the Response this socket
+// actually sends, running its Msg through SanitizeAgentString first.
+//
+// A RoutesError's Msg is, at several of its construction sites in
+// internal/daemon, a gRPC status message the connected agent worded itself
+// (status.Convert(err).Message()) — text an authenticated, correctly-pinned
+// peer chose, not text this build wrote. Being pinned proves which key
+// answered a handshake; it says nothing about what that key's holder puts in
+// a status message. Every one of handleRPC's four relay cases (routes,
+// vhosts, withdraw, expose) turns a *RoutesError into a Response the same
+// way, so that conversion happens exactly once, here, rather than once per
+// case — a fifth relay added later gets this by construction instead of by
+// remembering to call the sanitizer itself.
+func routesErrorResponse(re *RoutesError) Response {
+	return errorResponse(re.Status, SanitizeAgentString(re.Msg))
+}
+
 // routesRPCTimeout bounds how long the routes relay's own call to the agent
 // may take, applied on top of whatever bound the daemon enforces internally
 // on the control-plane call itself. It is generous headroom over that inner
@@ -410,11 +427,18 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// A separate method with a separate shape. The status response is a
 		// contract other programs read; diagnosis output is not, and mixing
 		// them would freeze something that still needs to change.
-		if s.doctor == nil {
+		//
+		// The provider is read once, here, under the lock (getDoctor), rather
+		// than as a direct field access repeated through the rest of this
+		// case — SetDoctor can be called concurrently from another goroutine,
+		// and a direct field read racing with that write is exactly the
+		// defect this snapshot avoids.
+		doctor := s.getDoctor()
+		if doctor == nil {
 			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer diagnosis requests"))
 			return
 		}
-		snap, err := s.doctor.DoctorJSON(req.Meta["probe"])
+		snap, err := doctor.DoctorJSON(req.Meta["probe"])
 		if err != nil {
 			slog.Warn("ipc: build doctor snapshot", "role", "daemon", "err", err)
 			_ = writeResponse(conn, errorResponse(1, "internal error building the report"))
@@ -442,7 +466,12 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// agent is bounded by routesRPCTimeout (10s), so holding the slot
 		// for that long is a deliberate, bounded trade-off, not an
 		// oversight — there is no unbounded hold to guard against here.
-		if s.routes == nil {
+		//
+		// The provider is read once, under the lock (getRoutes), for the
+		// same reason as the "doctor" case above: SetRoutes can be called
+		// from another goroutine while this request is in flight.
+		routes := s.getRoutes()
+		if routes == nil {
 			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer route relay requests"))
 			return
 		}
@@ -451,15 +480,17 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			return
 		}
 		rctx, cancel := context.WithTimeout(ctx, routesRPCTimeout)
-		body, err := s.routes.RoutesJSON(rctx, req.Server)
+		body, err := routes.RoutesJSON(rctx, req.Server)
 		cancel()
 		if err != nil {
 			var re *RoutesError
 			if errors.As(err, &re) {
 				// The provider already knows exactly why and exactly what
-				// status that belongs to — relay both verbatim rather than
-				// replacing a distinguishable reason with a generic one.
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				// status that belongs to — relay both, through the same
+				// sanitizing boundary every RoutesError crosses (see
+				// routesErrorResponse), rather than replacing a
+				// distinguishable reason with a generic one.
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay routes", "role", "daemon", "server", req.Server, "err", err)
@@ -490,7 +521,11 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// with the server name travelling in req.Server as it does for the route
 		// listing. It holds its connection slot for the whole relay for the same
 		// reason — the call to the agent is bounded, so the hold is bounded too.
-		if s.vhosts == nil {
+		//
+		// The provider is read once, under the lock (getVhosts); see the
+		// "doctor" case above for why.
+		vhosts := s.getVhosts()
+		if vhosts == nil {
 			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer published-name requests"))
 			return
 		}
@@ -499,12 +534,12 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			return
 		}
 		vctx, vcancel := context.WithTimeout(ctx, routesRPCTimeout)
-		vbody, verr := s.vhosts.VhostsJSON(vctx, req.Server)
+		vbody, verr := vhosts.VhostsJSON(vctx, req.Server)
 		vcancel()
 		if verr != nil {
 			var re *RoutesError
 			if errors.As(verr, &re) {
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay vhosts", "role", "daemon", "server", req.Server, "err", verr)
@@ -529,7 +564,11 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// Changes the far side, so like publishing it is bounded in time and the
 		// name is checked for shape here, before anything is asked of the agent:
 		// a local mistake is answered locally.
-		if s.withdraw == nil {
+		//
+		// The provider is read once, under the lock (getWithdraw); see the
+		// "doctor" case above for why.
+		withdraw := s.getWithdraw()
+		if withdraw == nil {
 			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer withdraw requests"))
 			return
 		}
@@ -543,16 +582,30 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			return
 		}
 		wctx, wcancel := context.WithTimeout(ctx, routesRPCTimeout)
-		wbody, werr := s.withdraw.WithdrawJSON(wctx, req.Server, whost)
+		wbody, werr := withdraw.WithdrawJSON(wctx, req.Server, whost)
 		wcancel()
 		if werr != nil {
 			var re *RoutesError
 			if errors.As(werr, &re) {
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay withdraw", "role", "daemon", "server", req.Server, "err", werr)
 			_ = writeResponse(conn, errorResponse(1, "internal error withdrawing a name"))
+			return
+		}
+		// WithdrawSnapshot carries three agent-worded strings (Host,
+		// ShadowedBy, ShadowedByAddress), so its JSON encoding can exceed
+		// this socket's frame the same way a route or vhost listing can —
+		// checked before the write for the same reason those three siblings
+		// check it, so an oversized reply is a named refusal instead of a
+		// bare socket error indistinguishable from a dead daemon.
+		if len(wbody) > maxFrameSize-routesBodyHeadroom {
+			slog.Warn("ipc: relay withdraw: reply too large for the local socket",
+				"role", "daemon", "server", req.Server, "body_bytes", len(wbody))
+			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
+				"server %q sent a withdrawal reply too large to relay over the local socket (%d bytes as JSON); "+
+					"this is a local IPC limit, not a problem with the name", req.Server, len(wbody))))
 			return
 		}
 		_ = writeResponse(conn, okResponse(wbody))
@@ -567,7 +620,11 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// whole relay rather than releasing it early: the call to the agent is
 		// bounded by the same timeout, so the hold is a bounded, deliberate
 		// trade-off rather than something to guard against.
-		if s.expose == nil {
+		//
+		// The provider is read once, under the lock (getExpose); see the
+		// "doctor" case above for why.
+		expose := s.getExpose()
+		if expose == nil {
 			_ = writeResponse(conn, errorResponse(1, "this daemon does not answer publish requests"))
 			return
 		}
@@ -587,12 +644,12 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			return
 		}
 		ectx, ecancel := context.WithTimeout(ctx, routesRPCTimeout)
-		ebody, eerr := s.expose.ExposeJSON(ectx, req.Server, host, port)
+		ebody, eerr := expose.ExposeJSON(ectx, req.Server, host, port)
 		ecancel()
 		if eerr != nil {
 			var re *RoutesError
 			if errors.As(eerr, &re) {
-				_ = writeResponse(conn, errorResponse(re.Status, re.Msg))
+				_ = writeResponse(conn, routesErrorResponse(re))
 				return
 			}
 			slog.Warn("ipc: relay expose", "role", "daemon", "server", req.Server, "err", eerr)
@@ -687,12 +744,19 @@ func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, r
 	// The Once in releaseConn guarantees the slot is released exactly once
 	// even if this closure is called and then the defer in the accept goroutine
 	// fires again later.
+	//
+	// resp.Msg on a non-OK ack is the agent's own wording, carried here over
+	// the QUIC wire from wherever the agent's route table refused the attach —
+	// the same kind of far-end-worded text a RoutesError carries, and it
+	// crosses this socket into the CLI's stderr the same way. Sanitized for
+	// the same reason routesErrorResponse sanitizes a RoutesError's Msg.
 	relayAck := func(resp proto.Response) error {
 		var writeErr error
 		if resp.Status == proto.StatusOK {
 			writeErr = writeResponse(conn, okResponse(nil))
 		} else {
-			writeErr = writeResponse(conn, errorResponse(uint(proto.ExitCodeForStatus(resp.Status)), resp.Msg))
+			writeErr = writeResponse(conn, errorResponse(
+				uint(proto.ExitCodeForStatus(resp.Status)), SanitizeAgentString(resp.Msg)))
 		}
 		if writeErr != nil {
 			return writeErr
@@ -716,21 +780,88 @@ func (s *Server) handleAttach(ctx context.Context, conn net.Conn, req Request, r
 // SetDoctor supplies the diagnosis provider. It is set separately rather than
 // passed to the constructor because a daemon without one is a working daemon —
 // it simply says so when asked — and every existing caller stays as it was.
-func (s *Server) SetDoctor(d DoctorProvider) { s.doctor = d }
+//
+// Guarded by s.mu, the same mutex Serve/Close already use: every production
+// caller sets providers once, before Serve starts, but nothing in the type
+// enforced that, and the request-handling reads in handleRPC run concurrently
+// with each other once Serve is accepting connections. The mutex makes a
+// late or concurrent call to this method safe rather than merely unlikely to
+// be exercised. See getDoctor for the matching read.
+func (s *Server) SetDoctor(d DoctorProvider) {
+	s.mu.Lock()
+	s.doctor = d
+	s.mu.Unlock()
+}
 
 // SetExpose supplies the publish-relay provider. Set separately for the same
 // reason SetRoutes is: a daemon without one answers every other method
-// perfectly well and refuses this one by name.
-func (s *Server) SetExpose(e ExposeProvider) { s.expose = e }
+// perfectly well and refuses this one by name. Guarded by s.mu; see SetDoctor.
+func (s *Server) SetExpose(e ExposeProvider) {
+	s.mu.Lock()
+	s.expose = e
+	s.mu.Unlock()
+}
 
-// SetWithdraw installs the name-withdrawal relay, on the same terms as SetExpose.
-func (s *Server) SetWithdraw(w WithdrawProvider) { s.withdraw = w }
+// SetWithdraw installs the name-withdrawal relay, on the same terms as
+// SetExpose. Guarded by s.mu; see SetDoctor.
+func (s *Server) SetWithdraw(w WithdrawProvider) {
+	s.mu.Lock()
+	s.withdraw = w
+	s.mu.Unlock()
+}
 
 // SetRoutes supplies the route-relay provider. Like SetDoctor, it is set
 // separately rather than passed to the constructor because a daemon without
 // one is a working daemon for every other RPC — it simply refuses the
-// "routes" method with a clear message until this is called.
-func (s *Server) SetRoutes(r RoutesProvider) { s.routes = r }
+// "routes" method with a clear message until this is called. Guarded by
+// s.mu; see SetDoctor.
+func (s *Server) SetRoutes(r RoutesProvider) {
+	s.mu.Lock()
+	s.routes = r
+	s.mu.Unlock()
+}
 
-// SetVhosts installs the published-name relay, on the same terms as SetRoutes.
-func (s *Server) SetVhosts(v VhostsProvider) { s.vhosts = v }
+// SetVhosts installs the published-name relay, on the same terms as
+// SetRoutes. Guarded by s.mu; see SetDoctor.
+func (s *Server) SetVhosts(v VhostsProvider) {
+	s.mu.Lock()
+	s.vhosts = v
+	s.mu.Unlock()
+}
+
+// getDoctor, getExpose, getWithdraw, getRoutes and getVhosts read the
+// corresponding provider field under s.mu and return it. handleRPC calls
+// these once per request at the top of each case, rather than reading the
+// field directly, so the value it acts on for the rest of that case is a
+// consistent snapshot taken under the lock — not a value that could still
+// change underneath it mid-request. A provider swapped in immediately after
+// the snapshot is taken affects only the next request, never this one.
+func (s *Server) getDoctor() DoctorProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.doctor
+}
+
+func (s *Server) getExpose() ExposeProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.expose
+}
+
+func (s *Server) getWithdraw() WithdrawProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.withdraw
+}
+
+func (s *Server) getRoutes() RoutesProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.routes
+}
+
+func (s *Server) getVhosts() VhostsProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.vhosts
+}

@@ -84,6 +84,17 @@ type listenEntry struct {
 	// a peer the way it blocks for a dial in the other direction. It is
 	// replaced on every drop.
 	waiting chan struct{}
+	// waitErr is set by failWaiters just before it closes waiting, so a Get
+	// call that wakes from that close has something to read besides the
+	// still-nil current connection. It is cleared by promote — not because a
+	// stale value has been observed to survive a promote today, but because
+	// two things close that gap by construction and are worth recording so a
+	// future change does not reopen it: every failWaiters call site (in
+	// runLoop) is immediately followed by return, so no promote on this
+	// entry can ever run after one; and Get itself checks conn before
+	// waitErr, so even if a stale waitErr somehow outlived a promote, a live
+	// connection would still win the race to be read first.
+	waitErr error
 
 	// watchers tracks the per-session goroutines so shutdown can join them.
 	watchers sync.WaitGroup
@@ -206,11 +217,32 @@ func (e *listenEntry) promote(ctx context.Context, conn transport.Conn) bool {
 	openCtx, cancel := context.WithTimeout(ctx, controlOpenTimeout)
 	cclient, err := openControlStream(openCtx, conn)
 	cancel()
-	if err != nil {
-		if ctx.Err() != nil {
-			_ = conn.CloseWithError(0, "daemon shutting down")
-			return false
+
+	// From here on, this connection and control client (if any) either get
+	// installed as the live session below, or get closed right here — one of
+	// the two, on every return path, so neither is ever silently dropped.
+	//
+	// Shutdown is checked before the err branch, not inside it, on purpose:
+	// whether openControlStream above succeeded or failed, a shutdown already
+	// in progress must win. If it only lived inside "if err != nil", a control
+	// stream that happened to finish opening after Close had already started
+	// would fall straight through to installation below and outlive the
+	// shutdown that was supposed to tear it down. Nothing about that outcome
+	// should depend on some other call underneath happening to notice the
+	// dying context first — this is the one place that decides whether
+	// anything gets installed, so this is where the decision has to be made
+	// explicit, not left to an incidental side effect of a call this function
+	// doesn't control.
+	if ctx.Err() != nil {
+		// openControlStream can succeed even this late; if it did, we own
+		// that client now and it closes here, or nothing else ever will.
+		if cclient != nil {
+			_ = cclient.Close()
 		}
+		_ = conn.CloseWithError(0, "daemon shutting down")
+		return false
+	}
+	if err != nil {
 		slog.Warn("incoming connection did not become usable; keeping any existing session",
 			"role", "daemon", "session", e.name, "peer", peer, "err", err)
 		_ = conn.CloseWithError(controlStreamMissingCode, "control stream could not be opened")
@@ -226,6 +258,7 @@ func (e *listenEntry) promote(ctx context.Context, conn transport.Conn) bool {
 	e.since = e.clock.Now()
 	firstEver := !e.everConnected
 	e.everConnected = true
+	e.waitErr = nil
 	close(e.waiting)
 	e.waiting = make(chan struct{})
 	e.mu.Unlock()
@@ -359,16 +392,21 @@ func (e *listenEntry) Get(ctx context.Context) (Conn, error) {
 	for {
 		e.mu.Lock()
 		conn := e.current
+		waitErr := e.waitErr
 		wait := e.waiting
 		e.mu.Unlock()
 
 		if conn != nil {
 			return conn, nil
 		}
+		if waitErr != nil {
+			return nil, fmt.Errorf("server %q: no agent has connected yet: %w", e.name, waitErr)
+		}
 
 		select {
 		case <-wait:
-			// A peer arrived; loop and pick it up.
+			// Either a peer arrived or failWaiters ran; loop and pick up
+			// whichever one it was from e.current/e.waitErr above.
 		case <-ctx.Done():
 			return nil, fmt.Errorf("server %q: no agent has connected yet: %w", e.name, ctx.Err())
 		}
@@ -469,9 +507,12 @@ func (e *listenEntry) Close(err error) {
 	}
 }
 
-// failWaiters wakes anyone blocked in Get during shutdown.
-func (e *listenEntry) failWaiters(_ error) {
+// failWaiters wakes anyone blocked in Get during shutdown, recording err so
+// they can report why rather than merely waking with nothing to say — the
+// same shape dialEntry uses for the same purpose (its dialErr/dialing pair).
+func (e *listenEntry) failWaiters(err error) {
 	e.mu.Lock()
+	e.waitErr = err
 	close(e.waiting)
 	e.waiting = make(chan struct{})
 	e.mu.Unlock()

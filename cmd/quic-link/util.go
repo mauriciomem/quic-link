@@ -70,16 +70,20 @@ func expandTilde(p string) string {
 	return p
 }
 
-// pinList collects repeatable --authorized-client flags.  Each value is
-// validated and canonicalised via identity.ParsePin as it is set, so a
-// bad pin is rejected immediately rather than at connection time.
+// pinList collects repeatable --authorized-client flags. Each value is
+// checked with identity.ParsePinStrict as it is set, so a bad pin — or a
+// valid-but-non-canonical spelling of one — is rejected immediately rather
+// than at connection time.
 type pinList []string
 
 func (p *pinList) String() string { return strings.Join(*p, ",") }
 
 func (p *pinList) Set(v string) error {
-	norm, err := identity.ParsePin(v)
+	norm, err := identity.ParsePinStrict(v)
 	if err != nil {
+		if errors.Is(err, identity.ErrPinNotCanonical) {
+			return fmt.Errorf("--authorized-client %q: pin is not canonical", v)
+		}
 		return err
 	}
 	*p = append(*p, norm)

@@ -3,22 +3,18 @@ package main
 import (
 	"fmt"
 	"io"
-	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/mauriciomem/quic-link/internal/daemon"
+	"github.com/mauriciomem/quic-link/internal/ipc"
 )
 
-// maxAgentFieldLen bounds how much of a single agent-controlled string (a
-// route's target name or address, as reported live by "status --routes") is
-// ever rendered, in either TTY or --json output. It is generous for any
-// real route — router.ValidateRouteName caps a legitimate route name at 64
-// bytes, and a real address is a short host:port or unix path — so this
-// bound is purely defence against a compromised-but-pinned agent using its
-// GetStatus reply as an amplification vector against the CLI's own output
-// (a multi-megabyte "route name" flooding a terminal or a script's parser).
-const maxAgentFieldLen = 256
+// maxAgentFieldLen mirrors ipc.MaxSanitizedFieldLen under the name this
+// package's own tests already know it by. It is kept as a separate constant
+// rather than a direct alias reference in every call site so this file's
+// tests can assert against a name local to the package being tested, but
+// the two values are defined once, in internal/ipc, and must never drift:
+// see sanitizeAgentString below.
+const maxAgentFieldLen = ipc.MaxSanitizedFieldLen
 
 // sanitizeAgentString renders an agent-controlled string safe to place in
 // BOTH a human terminal and a --json document, before either the CLI's own
@@ -32,82 +28,16 @@ const maxAgentFieldLen = 256
 // run on the agent side, since the agent is precisely the party the threat
 // model distrusts here.
 //
-// It strips every C0 control byte (0x00-0x1F, which includes ESC, BEL, CR
-// and LF), every C1 control byte (0x7F-0x9F, which includes DEL and the
-// single-byte 8-bit form some terminals accept as an escape introducer),
-// and every Unicode format character (category Cf — e.g. U+202E RIGHT-TO-
-// LEFT OVERRIDE and its relatives). A format character is valid UTF-8 and
-// cannot forge a newline or break JSON syntax, so it is not a script- or
-// escape-injection vector; its entire purpose is to change how
-// already-rendered text visually reorders on screen, which is exactly
-// enough for a hostile agent to make an honest route address *look* like
-// something else to whoever is reading a terminal, even though the
-// underlying bytes never lied. Stripping it means the human-visible
-// rendering can never be made to lie, at no cost to any legitimate route
-// name, which never contains one. It also drops any byte sequence that is
-// not valid UTF-8, and truncates the result to maxAgentFieldLen bytes.
-//
-// Deliberately NOT special-cased: recognising and stripping specific escape
-// *sequences* (e.g. "ESC ] ... BEL" for OSC) would be an allow-list-shaped
-// defense that has to be extended every time a terminal emulator adds a new
-// sequence grammar. Removing the control bytes that give any such sequence
-// its structure is a strictly smaller, complete defense: whatever printable
-// text remains (e.g. "]0;pwned" from an OSC payload) renders as inert
-// literal text, because the terminal never sees the ESC/BEL bytes that would
-// have made it act as a command.
-//
-// Whether to sanitise --json too, or rely solely on encoding/json's own
-// escaping, is a deliberate call, not a default: json.Marshal correctly
-// escapes control bytes so the JSON *document itself* stays syntactically
-// valid and a forged value can never break out of its string context or
-// forge a new key. But a downstream tool that decodes that JSON and prints
-// a field's value raw (`jq -r '.routes[].target'` piped straight to a
-// terminal, or a shell `eval`) would still be exposed to whatever bytes
-// were inside the string — encoding/json only protects the JSON layer, not
-// whatever the next tool in a pipeline does with the decoded value.
-// Machine-readable output is a contract other programs build on, so this
-// function is applied identically before both the TTY renderer and the
-// --json marshaller; there is exactly one sanitisation boundary, not two.
+// This is a thin wrapper over ipc.SanitizeAgentString, which is what
+// actually strips control bytes, Unicode format characters, and invalid
+// UTF-8, and bounds the result — see that function's doc for the full
+// reasoning. The logic lives there, in a package both this CLI and the
+// daemon-side IPC relay can import, so a compromised-but-pinned peer's
+// wording is cleaned by exactly one implementation rather than two that
+// could quietly drift apart. This wrapper exists only so the CLI's own
+// call sites and tests keep the name they already use.
 func sanitizeAgentString(s string) string {
-	truncated := false
-	if len(s) > maxAgentFieldLen {
-		s = s[:maxAgentFieldLen]
-		truncated = true
-	}
-
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); {
-		r, size := utf8.DecodeRuneInString(s[i:])
-		switch {
-		case r == utf8.RuneError && size == 1:
-			// Not valid UTF-8 at this position. Drop the byte rather than
-			// emit a replacement character per bad byte, which would let a
-			// long run of garbage inflate the output instead of shrinking it.
-		case r < 0x20 || (r >= 0x7f && r <= 0x9f):
-			// C0 and C1 control bytes: the framing an escape or OSC
-			// sequence needs, and the CR/LF that would forge a second line.
-		case unicode.Is(unicode.Cf, r):
-			// Unicode format characters: no framing power over an escape
-			// sequence or JSON syntax, but the whole point of one (like a
-			// bidi override) is to make already-honest bytes render in a
-			// different, misleading order.
-		case unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
-			// Line and paragraph separators, which are neither control nor
-			// format characters and so are missed by both cases above. A
-			// consumer that treats one as a line break reads output as having
-			// more lines than were written.
-		default:
-			b.WriteRune(r)
-		}
-		i += size
-	}
-
-	out := b.String()
-	if truncated {
-		out += "...[truncated]"
-	}
-	return out
+	return ipc.SanitizeAgentString(s)
 }
 
 // sanitizedRoute is the CLI's own shape for one route entry, distinct from

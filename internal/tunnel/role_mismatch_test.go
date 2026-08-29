@@ -135,6 +135,63 @@ func TestRoleMismatch_IsNotAnAuthenticationFailure(t *testing.T) {
 	}
 }
 
+// TestNoPeerIdentity_IsNotReportedAsRoleMismatch is the regression test for the
+// close-code overload: a peer with no certificate at all is a different
+// condition from a peer presenting our own certificate, and the two must not
+// share a close code, because transport.IsRoleMismatch keys on the code alone
+// and a caller that treats it as a role collision would tell an operator to
+// generate a separate key for a peer that never presented one to compare.
+//
+// mem.WithCert with a nil leaf reproduces "no certificate" the same way
+// router.IdentityFromCerts sees it in production: PeerCertificates() returns
+// an empty slice, which is exactly what a QUIC peer that never completed a
+// client-certificate handshake would also produce (documented in serveConn's
+// comment as "should be unreachable" defense-in-depth — this test exercises
+// that defense-in-depth path directly, without needing an unreachable real
+// handshake state).
+func TestNoPeerIdentity_IsNotReportedAsRoleMismatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	hub := mem.NewHub()
+	agentCert, agentPin, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+
+	ln, err := hub.Transport("noident-agent:1", mem.WithCert(agentCert)).Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	go func() { _ = tunnel.Serve(ctx, ln, rtr, tunnel.ServeOpts{OwnPin: agentPin}) }()
+
+	// No mem.WithCert: this dialer presents no certificate at all, which is a
+	// distinct condition from presenting the agent's own identity.
+	conn, err := hub.Transport("noident-client:1").Dial(ctx, "noident-agent:1")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	select {
+	case <-conn.Context().Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("a peer with no certificate was served instead of refused")
+	}
+
+	cause := context.Cause(conn.Context())
+	if transport.IsRoleMismatch(cause) {
+		t.Errorf("close cause = %v, want NOT a role mismatch: a peer with no "+
+			"certificate at all is not the same condition as a peer presenting "+
+			"our own identity, and must not share its close code", cause)
+	}
+}
+
 // TestServeConn_ServesADistinctPeerNormally is the control: the refusal must
 // depend on the identity actually colliding, not fire whenever OwnPin is set.
 func TestServeConn_ServesADistinctPeerNormally(t *testing.T) {

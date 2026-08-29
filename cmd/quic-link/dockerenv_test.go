@@ -128,6 +128,57 @@ pin  = "`+pin+`"
 	}
 }
 
+// TestDockerEnv_UnknownServer_Exit2_NotExit3 is the regression for this: before the
+// fix, an unknown SERVER name fell into docker-env's own "not managed by
+// the running daemon" branch, which constructs errDockerNotReady and maps
+// to exit 3 — the same code as a genuine docker-not-ready condition, even
+// though the mistake here is the server name itself, which every sibling
+// verb (ping, status --routes, vhosts, ssh) treats as exit 2. The fix adds
+// requireKnownServer before docker-env ever asks the daemon for status, so
+// no errDockerNotReady is constructed for a name that was never known at
+// all — errDockerNotReady's exit-3 mapping in exitCodeForError is checked
+// ahead of errUsage's exit-2 mapping, so wrapping the existing error
+// would not have worked; the name has to be rejected before that error
+// type is ever built.
+func TestDockerEnv_UnknownServer_Exit2_NotExit3(t *testing.T) {
+	unsetQLEnvForTest(t)
+	withDaemonSocketEnv(t)
+	pin := mustTestPin(t)
+	path := writeTestConfig(t, `
+schema = 1
+[servers.server1]
+addr = "127.0.0.1:7443"
+pin  = "`+pin+`"
+`)
+	sockPath, err := daemonSocketPath(nil)
+	if err != nil {
+		t.Fatalf("daemonSocketPath: %v", err)
+	}
+	statusJSON := `{"schema":1,"servers":[{"name":"server1","session":"connected","transport":"dial","since_ms":10,"local_ports":{"ssh":42000,"docker":42001}}]}`
+	startServerAtPath(t, sockPath, statusJSON)
+
+	root := newRootCmd()
+	var stdout, stderr strings.Builder
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--config", path, "docker-env", "nosuch"})
+	runErr := root.ExecuteContext(context.Background())
+
+	if runErr == nil {
+		t.Fatal("expected an error for an unknown server")
+	}
+	if got := exitCode(runErr); got != 2 {
+		t.Errorf("exitCode = %d, want 2 (usage — the server name is the mistake), err=%v, stderr=%q",
+			got, runErr, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout must be empty, got %q", stdout.String())
+	}
+	if !strings.Contains(runErr.Error(), "nosuch") {
+		t.Errorf("error should name the unknown server, got: %v", runErr)
+	}
+}
+
 // TestDockerEnv_DisabledServer_ExplainsWhy pins the fix for a defect found by
 // empirical check: before the fix, a disabled server (session="disabled" in
 // the daemon's live status) fell into the generic "not connected
