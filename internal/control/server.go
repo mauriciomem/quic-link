@@ -102,10 +102,10 @@ func (server) Ping(_ context.Context, req *controlpb.PingRequest) (*controlpb.Pi
 // new handler for it to be covered.
 func (s server) authorize(
 	ctx context.Context,
-	req interface{},
+	req any,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
-) (interface{}, error) {
+) (any, error) {
 	method := path.Base(info.FullMethod)
 	if err := s.policy.Authorize(s.peer, method); err != nil {
 		// A refused call stops here and never reaches its handler, so a
@@ -138,10 +138,10 @@ func (s server) authorize(
 // authorization check that runs before dispatch.
 func (s server) contain(
 	ctx context.Context,
-	req interface{},
+	req any,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
-) (resp interface{}, err error) {
+) (resp any, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("a control-plane call failed unexpectedly and was contained",
