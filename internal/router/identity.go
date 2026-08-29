@@ -13,6 +13,11 @@ import (
 // Empty Pin = unauthenticated.
 type Identity struct{ Pin string }
 
+// IdentityFromCerts derives the caller's Identity from the certificate chain
+// a completed handshake returns. certs[0] is the leaf the peer presented.
+// An empty chain is an error: every caller in this tree runs after the TLS
+// handshake requires a client certificate, so an empty chain here means that
+// requirement was not met — the handshake should never have completed.
 func IdentityFromCerts(certs []*x509.Certificate) (Identity, error) {
 	if len(certs) == 0 {
 		return Identity{}, errors.New("router: peer presented no certificate")
