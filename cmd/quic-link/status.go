@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -86,17 +85,7 @@ func runStatusPlain(cmd *cobra.Command, a *app, jsonFlag bool) error {
 	c := ipc.NewClient(sock)
 	raw, err := c.StatusJSON()
 	if err != nil {
-		if errors.Is(err, ipc.ErrDaemonAbsent) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is not running; start it with: quic-link daemon")
-			return err
-		}
-		if errors.Is(err, ipc.ErrSchemaMismatch) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is a stale version; restart it with: quic-link daemon")
-			return err
-		}
-		return fmt.Errorf("status: %w", err)
+		return relayIPCError(cmd, "status", err, false)
 	}
 
 	if jsonFlag {
@@ -136,26 +125,11 @@ func runStatusRoutes(cmd *cobra.Command, a *app, args []string, jsonFlag bool) e
 
 	raw, err := ipc.NewClient(sock).RoutesJSON(serverName)
 	if err != nil {
-		if errors.Is(err, ipc.ErrDaemonAbsent) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is not running; start it with: quic-link daemon")
-			return err
-		}
-		if errors.Is(err, ipc.ErrSchemaMismatch) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is a stale version; restart it with: quic-link daemon")
-			return err
-		}
-		var re *ipc.RoutesError
-		if errors.As(err, &re) {
-			// The daemon's routesProvider already picked the exact,
-			// distinguishable message and status for this failure — relay
-			// both verbatim, matching the taxonomy documented in
-			// internal/daemon/routes.go rather than re-wording it here.
-			fmt.Fprintln(cmd.ErrOrStderr(), re.Msg)
-			return &errFinalExitCode{code: int(re.Status), msg: re.Msg}
-		}
-		return fmt.Errorf("routes: %w", err)
+		// The daemon's routesProvider already picked the exact,
+		// distinguishable message and status for a RoutesError — relayIPCError
+		// relays both verbatim, matching the taxonomy documented in
+		// internal/daemon/routes.go rather than re-wording it here.
+		return relayIPCError(cmd, "routes", err, true)
 	}
 
 	var snap daemon.RoutesSnapshot

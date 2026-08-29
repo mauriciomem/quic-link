@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -77,17 +76,7 @@ func runDockerEnv(cmd *cobra.Command, a *app, args []string) error {
 
 	raw, err := ipc.NewClient(sock).StatusJSON()
 	if err != nil {
-		if errors.Is(err, ipc.ErrDaemonAbsent) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is not running; start it with: quic-link daemon")
-			return err
-		}
-		if errors.Is(err, ipc.ErrSchemaMismatch) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is a stale version; restart it with: quic-link daemon")
-			return err
-		}
-		return fmt.Errorf("status: %w", err)
+		return relayIPCError(cmd, "status", err, false)
 	}
 
 	var snap daemon.StatusSnapshot

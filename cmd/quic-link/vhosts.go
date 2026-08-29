@@ -8,7 +8,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 
@@ -175,22 +174,7 @@ func runVhostsRm(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error
 
 	raw, err := ipc.NewClient(sock).WithdrawJSON(serverName, host)
 	if err != nil {
-		if errors.Is(err, ipc.ErrDaemonAbsent) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is not running; start it with: quic-link daemon")
-			return err
-		}
-		if errors.Is(err, ipc.ErrSchemaMismatch) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is a stale version; restart it with: quic-link daemon")
-			return err
-		}
-		var re *ipc.RoutesError
-		if errors.As(err, &re) {
-			fmt.Fprintln(cmd.ErrOrStderr(), re.Msg)
-			return &errFinalExitCode{code: int(re.Status), msg: re.Msg}
-		}
-		return fmt.Errorf("withdraw: %w", err)
+		return relayIPCError(cmd, "withdraw", err, true)
 	}
 
 	var snap daemon.WithdrawSnapshot
@@ -261,22 +245,7 @@ func runVhosts(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error {
 
 	raw, err := ipc.NewClient(sock).VhostsJSON(serverName)
 	if err != nil {
-		if errors.Is(err, ipc.ErrDaemonAbsent) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is not running; start it with: quic-link daemon")
-			return err
-		}
-		if errors.Is(err, ipc.ErrSchemaMismatch) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is a stale version; restart it with: quic-link daemon")
-			return err
-		}
-		var re *ipc.RoutesError
-		if errors.As(err, &re) {
-			fmt.Fprintln(cmd.ErrOrStderr(), re.Msg)
-			return &errFinalExitCode{code: int(re.Status), msg: re.Msg}
-		}
-		return fmt.Errorf("vhosts: %w", err)
+		return relayIPCError(cmd, "vhosts", err, true)
 	}
 
 	var snap daemon.VhostsSnapshot
