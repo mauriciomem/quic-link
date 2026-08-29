@@ -89,10 +89,13 @@ var ErrPinNotCanonical = errors.New("pin is not canonical")
 // byte-identical to ParsePin's own canonical return value. Every entry point
 // that treats a pin as a credential to trust is held to this rule before the
 // value is used — a config file's pin or authorized_clients entry (enforced
-// by internal/config's validation), a --server-pin or --authorized-client
-// flag (checked directly at parse time), and a verb's own --pin flag such as
-// stdio's (checked directly) or ping's (checked when the effective config is
-// validated, the same gate a config-file pin goes through) — so one
+// by internal/config's validation), a --authorized-client flag (checked
+// directly at parse time, by pinList.Set), a --server-pin flag and a verb's
+// own --pin flag such as ping's (both checked later, when the effective
+// config is validated — a --server-pin is parsed leniently as it is read
+// and that lenient result is discarded, so nothing before validation
+// enforces canonicality), and stdio's own --pin flag (checked directly,
+// like --authorized-client) — so one
 // definition of "canonical" governs every pin the tree accepts, rather than
 // each caller re-deriving the comparison for itself.
 func ParsePinStrict(s string) (string, error) {
