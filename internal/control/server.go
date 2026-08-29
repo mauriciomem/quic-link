@@ -211,9 +211,29 @@ func Serve(ctx context.Context, stream transport.Stream, peer PeerIdentity, poli
 	// Containment is outermost so that it also covers the authorization check,
 	// which runs before any handler and is as capable of being handed
 	// something unexpected as they are.
+	//
+	// MaxRecvMsgSize matches maxControlRecvMsgSize, the same 64 KiB bound
+	// NewClient already applies to what this agent will accept from the
+	// daemon's own replies (client.go), rather than gRPC's stock 4 MiB
+	// default. The reasoning there is symmetric: the largest legitimate
+	// request any current RPC needs is AddVhost/RemoveVhost's host field, a
+	// hostname bounded at 253 bytes by router.ValidateVhostKey, plus a port
+	// number — a few hundred bytes at most once framed. 64 KiB is already
+	// generous headroom over that, chosen to match the client's own cap
+	// rather than invent a second number, so a compromised-but-correctly-
+	// pinned caller cannot use the stock 4 MiB default as amplification
+	// against this agent's memory. Unlike the client-side cap, this one also
+	// matters for cost incurred before authorization ever runs: gRPC
+	// unmarshals a unary request before ChainUnaryInterceptor's authorize
+	// step is consulted, so every read-only method (Ping, GetStatus,
+	// ListVhosts — always callable, no operator opt-in required) and even a
+	// denied mutation pays this parse cost regardless of what the policy
+	// decides. Bounding it here is the only point that protects that cost,
+	// not merely the successful call it precedes.
 	gs := grpc.NewServer(
 		grpc.StatsHandler(watcher),
 		grpc.ChainUnaryInterceptor(srv.contain, srv.authorize),
+		grpc.MaxRecvMsgSize(maxControlRecvMsgSize),
 	)
 	controlpb.RegisterControlServer(gs, srv)
 
