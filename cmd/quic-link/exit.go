@@ -90,11 +90,14 @@ func exitCodeForStatus(s proto.Status) int {
 	return proto.ExitCodeForStatus(s)
 }
 
-// statusError wraps an agent response status and the verbatim message from the
-// agent. The stdio verb returns this so main() can map it to the right exit
-// code via exitCodeForStatus, and so the "already reported" interface tells
-// main() NOT to emit a redundant slog.Error line (the agent message was already
-// written to stderr at the point of refusal).
+// statusError wraps an agent response status and the agent's message, already
+// sanitized by the caller (stdio's direct-dial path runs it through
+// ipc.SanitizeAgentString before constructing this, because that path never
+// touches the daemon or the IPC socket, so no other boundary will). The stdio
+// verb returns this so main() can map it to the right exit code via
+// exitCodeForStatus, and so the "already reported" interface tells main() NOT
+// to emit a redundant slog.Error line (the agent message was already written
+// to stderr at the point of refusal).
 type statusError struct {
 	status proto.Status
 	msg    string
@@ -105,7 +108,7 @@ func (e *statusError) Error() string {
 }
 
 // alreadyReported signals that the error was already communicated to the user
-// (the agent's refusal message was written to stderr verbatim). main() must
+// (the agent's sanitized refusal message was written to stderr). main() must
 // NOT emit an additional slog.Error line for these errors.
 func (e *statusError) alreadyReported() bool { return true }
 

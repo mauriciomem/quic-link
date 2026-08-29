@@ -269,8 +269,14 @@ func pingRun(ctx context.Context, server string, count int, keyFile, serverPin s
 		// Application-level control-stream RPC round-trip, labelled distinctly
 		// from the transport RTT. A control failure is non-fatal: the transport
 		// numbers above are still meaningful.
+		//
+		// res.RPCErr can carry proto.Response.Msg verbatim — control.Open
+		// (internal/control/open.go) returns the agent's own wording on a
+		// non-OK control-stream response, worded by whoever answered this
+		// probe's handshake, and this is the only place on that path that
+		// ever prints it. Sanitize before Printf ever sees it.
 		if res.RPCErr != nil {
-			fmt.Printf("           control_rpc: FAILED (%v)\n", res.RPCErr)
+			fmt.Printf("           control_rpc: FAILED (%s)\n", sanitizeAgentString(res.RPCErr.Error()))
 		} else {
 			fmt.Printf("           control_rpc_rtt=%v\n", res.RPCRoundTrip.Round(time.Microsecond))
 			// Surface an invariant violation loudly. This does not change the

@@ -31,6 +31,15 @@ type OpenOpts struct {
 //
 // On any failure the stream is reset and a non-nil error is returned; the
 // caller should treat the session as unusable.
+//
+// On a non-OK control-stream response, the returned error carries
+// proto.Response.Msg verbatim — text the agent that answered the handshake
+// worded itself. This package cannot sanitize it here: internal/ipc, which
+// holds the shared SanitizeAgentString this codebase's other far-end-text
+// boundaries use, already depends on internal/control (for the control-plane
+// client), so importing the other way would cycle. Every caller that surfaces
+// this error to an operator terminal, a log line, or a --json document must
+// sanitize it itself before doing so.
 func Open(ctx context.Context, conn transport.Conn, version string, opts OpenOpts) (*Client, error) {
 	stream, err := conn.OpenStream(ctx)
 	if err != nil {

@@ -257,13 +257,22 @@ func stdioRun(ctx context.Context, server, target, keyFile, serverPin string) er
 	}
 
 	if resp.Status != proto.StatusOK {
-		// Write the agent's refusal message verbatim to stderr so the operator
-		// can read it (stdout carries only tunnelled bytes and must stay clean).
-		fmt.Fprintf(os.Stderr, "agent refused: %s\n", resp.Msg)
+		// resp.Msg is proto.Response.Msg, worded by whichever agent answered
+		// this stream's handshake. This direct-dial path never touches the
+		// daemon or the IPC socket, so none of the sanitisation those
+		// boundaries apply (internal/ipc.SanitizeAgentString at
+		// internal/ipc/server.go, routesErrorResponse for a RoutesError) ever
+		// sees this string — this call is the only place on this path that
+		// can. Sanitize once, then reuse the result for both the line
+		// written to stderr and the value carried into statusError, whose
+		// Error() a future caller could print without going through this
+		// Fprintf again.
+		safeMsg := ipc.SanitizeAgentString(resp.Msg)
+		fmt.Fprintf(os.Stderr, "agent refused: %s\n", safeMsg)
 		stream.Reset(proto.StreamResetCode)
 		// Return a statusError so main() exits with the right code without
 		// emitting an additional slog.Error line (the message is already above).
-		return &statusError{status: resp.Status, msg: resp.Msg}
+		return &statusError{status: resp.Status, msg: safeMsg}
 	}
 
 	// Splice stdin/stdout through the stream. The stdioRW adapter implements

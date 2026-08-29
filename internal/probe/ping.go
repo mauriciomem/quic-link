@@ -45,7 +45,12 @@ type Result struct {
 	// affects the exit code.
 	RPCInvariantViolation error
 	// RPCErr records why the control-stream Ping failed, if it did. The
-	// transport measurements are still valid when this is set.
+	// transport measurements are still valid when this is set. RPCErr can
+	// carry proto.Response.Msg verbatim (via control.Open, on a non-OK
+	// control-stream response) — text the agent that answered this probe's
+	// handshake worded itself. A caller that prints RPCErr to an operator
+	// terminal or log must sanitize it first; ping's own cmd/quic-link
+	// renderer does.
 	RPCErr error
 }
 
