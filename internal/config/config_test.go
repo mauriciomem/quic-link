@@ -1602,10 +1602,10 @@ pin  = "`+variant+`"
 }
 
 // TestValidate_RefusesRatherThanWarnsWhenStoredPinIsNotCanonical replaces the
-// old warning-only assertion: D11 requires a non-canonical pin to be a
-// startup config error (exit 2), never a warning. This test asserts the
-// refusal fires and that no WARN-level record about it is emitted — a warning
-// here would mean the deliberately-removed leniency crept back in.
+// old warning-only assertion: a non-canonical pin must be a startup config
+// error (exit 2), never a warning. This test asserts the refusal fires and
+// that no WARN-level record about it is emitted — a warning here would mean
+// the deliberately-removed leniency crept back in.
 func TestValidate_RefusesRatherThanWarnsWhenStoredPinIsNotCanonical(t *testing.T) {
 	unsetAllQLEnv(t)
 	canonical := mustPin(t)
