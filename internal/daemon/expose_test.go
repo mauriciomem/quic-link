@@ -199,3 +199,36 @@ func TestExposeJSON_RefusesAPortItCannotCarry(t *testing.T) {
 		}
 	}
 }
+
+// TestExposeJSON_AgentTextIsNotSanitizedTwice is the regression test for the
+// nested-truncation-marker defect: exposeFailure used to sanitize the
+// agent's own gRPC status text inline (with ipc.SanitizeAgentString) before
+// handing the RoutesError to the relay, which sanitizes the whole Msg again
+// at the one documented boundary (routesErrorResponse). Sanitizing twice is
+// harmless on ordinary text, but when the inner pass's own output is long
+// enough to be truncated, the outer pass truncates the inner marker too,
+// producing a mangled "...[tr...[truncated]" that an operator could
+// reasonably read as corruption. This asserts the RoutesError this package
+// hands to the relay carries the agent's text unmodified, so there is
+// exactly one sanitizing pass between the agent and the operator.
+func TestExposeJSON_AgentTextIsNotSanitizedTwice(t *testing.T) {
+	ln := heldHTTPListener(t)
+	agentText := "already published as: " + strings.Repeat("x", 300)
+	pool := &fakeRoutesPool{
+		state: "connected",
+		controlFn: func(context.Context, func(context.Context, *control.Client) error) error {
+			return status.Error(codes.AlreadyExists, agentText)
+		},
+	}
+	p := daemon.NewExposeProvider(pool, daemon.NamingListeners{HTTP: ln})
+
+	_, err := p.ExposeJSON(context.Background(), "srv1", "grafana.srv1.internal", 3000)
+	var re *ipc.RoutesError
+	if !errors.As(err, &re) {
+		t.Fatalf("error is not a named relay failure: %v", err)
+	}
+	if !strings.Contains(re.Msg, agentText) {
+		t.Errorf("RoutesError.Msg = %q, want the agent's text carried unmodified "+
+			"(sanitisation belongs at the relay boundary, not here)", re.Msg)
+	}
+}

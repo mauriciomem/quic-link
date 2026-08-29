@@ -110,11 +110,15 @@ func withdrawFailure(server, host string, err error) error {
 				"from here; the operator of that agent decides what it configures", server, host)}
 	case codes.InvalidArgument:
 		// status.Convert(err).Message() is the connected agent's own gRPC
-		// status text — worded by whoever answered this session's handshake.
-		// Sanitized here for the same reason expose.go's AlreadyExists/
-		// InvalidArgument cases are: pinning proves which key answered, not
-		// what that key's holder puts in a status message.
-		return &ipc.RoutesError{Status: 2, Msg: ipc.SanitizeAgentString(status.Convert(err).Message())}
+		// status text — worded by whoever answered this session's handshake,
+		// which pinning proves the identity of but not the intentions of.
+		// Carried raw here: routesErrorResponse (internal/ipc/server.go) is
+		// this codebase's one documented sanitisation boundary for a
+		// RoutesError.Msg, and sanitising twice on the way there produces a
+		// mangled nested truncation marker if the first pass ever truncates,
+		// with no benefit — nothing between here and that boundary logs or
+		// otherwise acts on this string.
+		return &ipc.RoutesError{Status: 2, Msg: status.Convert(err).Message()}
 	default:
 		slog.Debug("withdraw: control call failed; reporting as reconnecting",
 			"role", "daemon", "session", server, "err", err)

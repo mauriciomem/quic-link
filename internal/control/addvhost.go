@@ -109,6 +109,18 @@ const maxAuditedNameLen = 128
 // or reformat text can make a rendered line say something other than what it
 // records, so they are removed rather than escaped: escaping depends on the
 // output format, and the format is the operator's choice, not this code's.
+//
+// internal/ipc.SanitizeAgentString is this function's general-purpose
+// sibling, solving the identical problem for far-end text crossing the IPC
+// relay boundary rather than a name written to this agent's own log. The two
+// cannot share an implementation — internal/ipc already depends on
+// internal/control, so importing the other way would cycle — and agree on
+// all five rune classes removed, but differ deliberately: bound (128 here,
+// 256 there), U+FFFD handling (dropped here even when legitimately typed,
+// since a hostname has no legitimate use for it; kept there when it decoded
+// cleanly), and this function emits no truncation marker, while that one
+// does. A change to the rune-class rule on one side is worth checking
+// against the other.
 func auditName(s string) string {
 	if len(s) > maxAuditedNameLen {
 		s = s[:maxAuditedNameLen]

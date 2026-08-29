@@ -84,6 +84,26 @@ func TestEachWithdrawalRefusalHasItsOwnMessage(t *testing.T) {
 	}
 }
 
+// TestWithdrawJSON_AgentTextIsNotSanitizedTwice is the regression test for
+// the nested-truncation-marker defect on this relay's InvalidArgument case:
+// withdrawFailure used to sanitize the agent's own gRPC status text inline
+// before handing the RoutesError to the relay, which sanitizes the whole
+// Msg again at the one documented boundary (routesErrorResponse in
+// internal/ipc/server.go). This asserts the RoutesError this package hands
+// to the relay carries the agent's text unmodified, so there is exactly one
+// sanitizing pass between the agent and the operator.
+func TestWithdrawJSON_AgentTextIsNotSanitizedTwice(t *testing.T) {
+	agentText := "invalid host: " + strings.Repeat("x", 300)
+	re, err := withdrawWith(codes.InvalidArgument, agentText)
+	if re == nil {
+		t.Fatalf("want an actionable failure, got %v", err)
+	}
+	if !strings.Contains(re.Msg, agentText) {
+		t.Errorf("RoutesError.Msg = %q, want the agent's text carried unmodified "+
+			"(sanitisation belongs at the relay boundary, not here)", re.Msg)
+	}
+}
+
 // TestASuccessfulWithdrawalSaysWhenTheNameStillAnswers covers the shadow report
 // crossing the relay: a withdrawal can be true and leave the name served.
 func TestASuccessfulWithdrawalSaysWhenTheNameStillAnswers(t *testing.T) {
