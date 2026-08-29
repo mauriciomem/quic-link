@@ -625,6 +625,107 @@ func TestDialAndServe_StopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestDialAndServe_CancelDuringDialFailureWait_ReturnsPromptly is the
+// regression test for the ctx.Done() arm of the pre-existing dial-failure
+// wait's select (dial.go, the retry path). It uses gatedClock rather than
+// elapsed-time measurement so it can tell "the loop is parked in the wait,
+// and cancelling ctx wakes it" apart from "the loop is not waiting on ctx at
+// all, and would only exit once the clock happened to deliver" — deleting
+// the ctx.Done() case entirely still lets the loop return once release() is
+// called, so only a test that cancels ctx WITHOUT ever releasing the gate
+// can catch that regression.
+func TestDialAndServe_CancelDuringDialFailureWait_ReturnsPromptly(t *testing.T) {
+	hub := mem.NewHub()
+	leaf, _, err := mem.NewIdentity()
+	if err != nil {
+		t.Fatalf("NewIdentity: %v", err)
+	}
+	// No listener registered at this address: every dial fails, driving the
+	// loop straight into the dial-failure wait on the first iteration.
+	dialer := &countingDialer{inner: hub.Transport("unreachable-dial-agent:1", mem.WithCert(leaf))}
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	clock := newGatedClock()
+	// The gate is not released before the assertions below run — releasing
+	// early would let the loop exit via clock.After instead of ctx.Done(),
+	// which is the exact ambiguity this test exists to rule out. Released
+	// via Cleanup purely so the clock's own internal goroutine (which blocks
+	// on the gate, independent of ctx) does not leak past the test.
+	t.Cleanup(clock.release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- tunnel.DialAndServe(ctx, dialer, "nowhere:1", rtr, zeroPolicy{}, clock)
+	}()
+
+	if !pollUntilTrue(3*time.Second, func() bool { return clock.afterCallCount() >= 1 }) {
+		t.Fatal("clock.After was never called; the loop did not reach the dial-failure wait")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not return promptly after ctx was cancelled while parked in the " +
+			"dial-failure wait — the ctx.Done() arm of that select may have been lost")
+	}
+}
+
+// TestDialAndServe_CancelDuringPostDropWait_ReturnsPromptly is the same
+// regression test for the newer post-handshake-drop wait (dial.go:184-188),
+// which shares the exact select shape with the dial-failure wait above and
+// the exact coverage gap: nothing previously drove ctx.Done() to fire while
+// the loop was parked there specifically, as opposed to at some other point
+// in the loop.
+func TestDialAndServe_CancelDuringPostDropWait_ReturnsPromptly(t *testing.T) {
+	hub, dialer, at := agentDialRig(t)
+	client := newWaitingClient(t, hub, at)
+	rtr, err := router.New(nil, router.AllowAll{})
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+
+	clock := newGatedClock()
+	// Same reasoning as the sibling test above: not released before the
+	// assertions run, only via Cleanup afterward so the clock's own
+	// goroutine does not leak.
+	t.Cleanup(clock.release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- tunnel.DialAndServe(ctx, dialer, at, rtr, zeroPolicy{}, clock) }()
+
+	first := client.accept(t, ctx)
+	if dialer.count() != 1 {
+		t.Fatalf("dial count = %d before any drop, want exactly 1", dialer.count())
+	}
+	if err := first.CloseWithError(0, "test-forced drop"); err != nil {
+		t.Fatalf("CloseWithError: %v", err)
+	}
+
+	if !pollUntilTrue(3*time.Second, func() bool { return clock.afterCallCount() >= 1 }) {
+		t.Fatal("clock.After was never called after the drop; the loop did not reach the post-drop wait")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not return promptly after ctx was cancelled while parked in the " +
+			"post-drop wait — the ctx.Done() arm of that select may have been lost")
+	}
+}
+
 // TestDialAndServe_UsesSharedBackoff proves the loop takes the shared schedule
 // rather than a second copy that could drift from it.
 func TestDialAndServe_UsesSharedBackoff(t *testing.T) {
