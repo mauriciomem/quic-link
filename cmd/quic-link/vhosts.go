@@ -174,7 +174,7 @@ func runVhostsRm(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error
 
 	raw, err := ipc.NewClient(sock).WithdrawJSON(serverName, host)
 	if err != nil {
-		return relayIPCError(cmd, "withdraw", err, true)
+		return relayIPCError(cmd, "withdraw", err, relayCanReturnRoutesError)
 	}
 
 	var snap daemon.WithdrawSnapshot
@@ -245,7 +245,7 @@ func runVhosts(cmd *cobra.Command, a *app, args []string, jsonFlag bool) error {
 
 	raw, err := ipc.NewClient(sock).VhostsJSON(serverName)
 	if err != nil {
-		return relayIPCError(cmd, "vhosts", err, true)
+		return relayIPCError(cmd, "vhosts", err, relayCanReturnRoutesError)
 	}
 
 	var snap daemon.VhostsSnapshot

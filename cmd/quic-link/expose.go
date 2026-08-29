@@ -88,7 +88,7 @@ func runExpose(cmd *cobra.Command, a *app, args []string, label string) error {
 
 	raw, err := ipc.NewClient(sock).ExposeJSON(serverName, host, port)
 	if err != nil {
-		return relayIPCError(cmd, "expose", err, true)
+		return relayIPCError(cmd, "expose", err, relayCanReturnRoutesError)
 	}
 
 	var snap daemon.ExposeSnapshot

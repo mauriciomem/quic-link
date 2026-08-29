@@ -76,7 +76,7 @@ func runDockerEnv(cmd *cobra.Command, a *app, args []string) error {
 
 	raw, err := ipc.NewClient(sock).StatusJSON()
 	if err != nil {
-		return relayIPCError(cmd, "status", err, false)
+		return relayIPCError(cmd, "status", err, relayCannotReturnRoutesError)
 	}
 
 	var snap daemon.StatusSnapshot

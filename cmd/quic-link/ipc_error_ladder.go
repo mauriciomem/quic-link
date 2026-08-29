@@ -28,6 +28,19 @@ import (
 // conditions. That is not a gap relative to the other four call sites; it is
 // this parameter saying "this call's method cannot produce a RoutesError",
 // which is simply true for those two and false nowhere it should be true.
+// Call sites pass relayCanReturnRoutesError or relayCannotReturnRoutesError
+// rather than a bare literal, so which is meant is readable without landing
+// here first.
+
+// relayCanReturnRoutesError and relayCannotReturnRoutesError name the two
+// values relayIPCError's routesAware parameter takes, so a call site reads
+// as a statement about the client method it just called rather than a bare
+// true/false a reader has to trace back to this file to decode.
+const (
+	relayCanReturnRoutesError    = true
+	relayCannotReturnRoutesError = false
+)
+
 func relayIPCError(cmd *cobra.Command, verb string, err error, routesAware bool) error {
 	if errors.Is(err, ipc.ErrDaemonAbsent) {
 		fmt.Fprintln(cmd.ErrOrStderr(),

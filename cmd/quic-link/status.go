@@ -85,7 +85,7 @@ func runStatusPlain(cmd *cobra.Command, a *app, jsonFlag bool) error {
 	c := ipc.NewClient(sock)
 	raw, err := c.StatusJSON()
 	if err != nil {
-		return relayIPCError(cmd, "status", err, false)
+		return relayIPCError(cmd, "status", err, relayCannotReturnRoutesError)
 	}
 
 	if jsonFlag {
@@ -129,7 +129,7 @@ func runStatusRoutes(cmd *cobra.Command, a *app, args []string, jsonFlag bool) e
 		// distinguishable message and status for a RoutesError — relayIPCError
 		// relays both verbatim, matching the taxonomy documented in
 		// internal/daemon/routes.go rather than re-wording it here.
-		return relayIPCError(cmd, "routes", err, true)
+		return relayIPCError(cmd, "routes", err, relayCanReturnRoutesError)
 	}
 
 	var snap daemon.RoutesSnapshot
