@@ -79,6 +79,12 @@ type dataRouter interface {
 // import the route table's own package. That is what makes this bundle
 // unable to grow a way to reach a mutator later: the widest any of these
 // can become is still a control-plane interface.
+//
+// Concurrency: a controlPlane value is built once in serveConn (fields set,
+// then never assigned again) and passed by value — not by pointer — into
+// every per-stream goroutine spawned for that connection. Each goroutine
+// therefore holds its own copy of a value nothing else can mutate; there is
+// no shared state here to guard with a lock.
 type controlPlane struct {
 	// routes answers an administrative read of the route table. A nil value
 	// means this session reports no routes, which is a valid configuration
@@ -279,8 +285,12 @@ const (
 	// client may take to open its control stream. Past it, the agent closes
 	// the session with 0x03.
 	controlOpenDeadline = 5 * time.Second
-	// agentVersionMsg is carried in the control stream's ok response.
-	// TODO: replace with the build version once it is wired through.
+	// agentVersionMsg is carried in the control stream's ok response. It is a
+	// fixed string, not opt.Version, deliberately: opt.Version is already
+	// reported to a client via the GetStatus RPC (see ServeOpts.Version and
+	// control.ServeOpts.Version below), and changing this constant would
+	// change the ok response's wire content for every client on every
+	// session — a behavior change this comment does not make on its own.
 	agentVersionMsg = "quic-link agent"
 )
 
@@ -378,6 +388,14 @@ func serveConn(ctx context.Context, conn transport.Conn, rtr *router.Router, opt
 	}
 
 	cs := &controlState{}
+	// openTimer's callback runs on its own goroutine after controlOpenDeadline
+	// and can race serveControl's cs.markOpen() call. Both orders are safe:
+	// isOpen and markOpen share cs.mu, so the callback either finds the
+	// session already open (and does nothing) or closes it before markOpen
+	// runs (in which case markOpen still succeeds, but serveControl's later
+	// writes fail against the now-closing connection and are handled as any
+	// write failure is). Neither goroutine can observe a state the other
+	// disagrees with.
 	openTimer := time.AfterFunc(controlOpenDeadline, func() {
 		if !cs.isOpen() {
 			_ = conn.CloseWithError(0x03, "control stream not opened within deadline")
@@ -575,6 +593,12 @@ func serveControl(
 
 // controlState tracks whether this session's one-per-session control stream has
 // been opened, so the open deadline can be cancelled and a duplicate refused.
+//
+// mu guards exactly one field: open. Two goroutines touch it concurrently —
+// the openTimer callback (isOpen, on its own goroutine after
+// controlOpenDeadline) and whichever stream-handler goroutine first reads a
+// control-kind header (markOpen) — so every access goes through the mutex;
+// there is no unguarded read or write of open anywhere in this file.
 type controlState struct {
 	mu   sync.Mutex
 	open bool
