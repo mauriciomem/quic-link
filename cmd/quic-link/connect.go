@@ -66,32 +66,28 @@ func resolveConnectScope(cfg *config.Config, configPath string, args []string) (
 	// running daemon the way autoSelectServer does, so its wording says "in
 	// your settings" unconditionally rather than branching on where the
 	// answer came from.
+	//
+	// The single-entry case is checked first, same as autoSelectServer, so
+	// that neither of the two remaining cases (0 or many) is the function's
+	// last statement — each ends in its own unconditional return, so nothing
+	// after this point needs a terminator the compiler cannot already see.
 	enabled := enabledServers(cfg.Servers)
-	switch len(enabled) {
-	case 0:
+	if len(enabled) == 1 {
+		for name := range enabled {
+			return name, nil
+		}
+	}
+	if len(enabled) == 0 {
 		return "", usageErrorf(
 			"no SERVER given and no enabled servers in your settings; add a "+
 				"[servers.<name>] entry to %s, or use 'daemon' with server flags",
 			config.FileInUse(configPath))
-	case 1:
-		// Exactly one server: return it. The loop runs exactly once;
-		// the return inside the loop is always reached.
-		for name := range enabled {
-			return name, nil
-		}
-	default:
-		return "", usageErrorf(
-			"no SERVER given and %d servers are enabled in your settings; "+
-				"specify one: connect SERVER, or use: daemon --server NAME\n"+
-				"  available: %s",
-			len(enabled), serverNameList(enabled))
 	}
-	// This line is unreachable: the switch above covers all possible values
-	// of len(enabled) (0, 1, and >1 via default), and every branch either
-	// returns directly or falls through to here only from case 1 — but case 1
-	// always returns inside the for loop. The compiler requires a return
-	// statement here because it cannot prove the for loop body executes.
-	panic("unreachable: enabled map with len=1 had no entries")
+	return "", usageErrorf(
+		"no SERVER given and %d servers are enabled in your settings; "+
+			"specify one: connect SERVER, or use: daemon --server NAME\n"+
+			"  available: %s",
+		len(enabled), serverNameList(enabled))
 }
 
 // enabledServers returns the subset of servers for which enabled is nil or true.
