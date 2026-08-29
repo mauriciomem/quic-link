@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/ipc"
@@ -63,12 +64,28 @@ func newStdioCmd(a *app) *cobra.Command {
 			// defined on that daemon's command line ever has, since it exists in
 			// that process and in no file.
 			if !ok && !flags.Changed("server") && !flags.Changed("pin") {
-				names, _, known := knownServers(a)
-				if _, managed := names[serverName]; !known || !managed {
+				names, fromDaemon, known := knownServers(a)
+				_, managed := names[serverName]
+				switch {
+				case !known:
 					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
 					return usageErrorf(
-						"server %q is not in your settings and is not managed by a running daemon "+
-							"(and --server/--pin were not given)", serverName)
+						"no servers are known in your settings or from a running daemon "+
+							"(and --server/--pin were not given): add a [servers.<name>] entry "+
+							"to %s, or give one to 'quic-link daemon' on the command line",
+						config.FileInUse(a.configPath))
+				case fromDaemon && !managed:
+					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+					return usageErrorf(
+						"server %q is not managed by the running daemon (and --server/--pin "+
+							"were not given); it manages %s",
+						serverName, serverNameList(namesAsServers(names)))
+				case !managed:
+					fmt.Fprintln(cmd.ErrOrStderr(), cmd.UsageString())
+					return usageErrorf(
+						"server %q not found in config (and --server/--pin were not given); "+
+							"available servers: %s",
+						serverName, serverNameList(namesAsServers(names)))
 				}
 			}
 

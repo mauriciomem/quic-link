@@ -35,7 +35,7 @@ config, that server is used automatically.`,
 			fmt.Fprintln(cmd.ErrOrStderr(),
 				"warning: 'connect' is deprecated and will be removed; use 'daemon --server NAME' instead")
 
-			scope, err := resolveConnectScope(a.cfg, args)
+			scope, err := resolveConnectScope(a.cfg, a.configPath, args)
 			if err != nil {
 				return err
 			}
@@ -55,19 +55,24 @@ config, that server is used automatically.`,
 //   - No argument, exactly one enabled server: use that server automatically.
 //   - No argument, more than one enabled server: exit 2 — the user must name one.
 //   - No argument, no enabled servers: exit 2.
-func resolveConnectScope(cfg *config.Config, args []string) (string, error) {
+func resolveConnectScope(cfg *config.Config, configPath string, args []string) (string, error) {
 	if len(args) == 1 {
 		// Positional arg given: pass through to runDaemonOwner which validates it.
 		return args[0], nil
 	}
 
-	// No argument: auto-select from enabled servers.
+	// No argument: auto-select from enabled servers. connect is a settings-only
+	// owner verb by design (see newConnectCmd's doc comment) — it never asks a
+	// running daemon the way autoSelectServer does, so its wording says "in
+	// your settings" unconditionally rather than branching on where the
+	// answer came from.
 	enabled := enabledServers(cfg.Servers)
 	switch len(enabled) {
 	case 0:
 		return "", usageErrorf(
-			"no SERVER given and no enabled servers in config; " +
-				"add a [servers.<name>] entry or use 'daemon'")
+			"no SERVER given and no enabled servers in your settings; add a "+
+				"[servers.<name>] entry to %s, or use 'daemon' with server flags",
+			config.FileInUse(configPath))
 	case 1:
 		// Exactly one server: return it. The loop runs exactly once;
 		// the return inside the loop is always reached.
@@ -76,7 +81,7 @@ func resolveConnectScope(cfg *config.Config, args []string) (string, error) {
 		}
 	default:
 		return "", usageErrorf(
-			"no SERVER given and %d enabled servers in config; "+
+			"no SERVER given and %d servers are enabled in your settings; "+
 				"specify one: connect SERVER, or use: daemon --server NAME\n"+
 				"  available: %s",
 			len(enabled), serverNameList(enabled))
