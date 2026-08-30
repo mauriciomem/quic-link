@@ -117,24 +117,46 @@ digits, dots, dashes, and underscores.
 
 ```toml
 [agent.vhosts]                              # optional: publish services under hostnames
-app = "tcp://127.0.0.1:3000"                # reachable as app.internal (see 'quic-link init')
+"app.myserver.internal" = "tcp://127.0.0.1:3000"   # reachable as app.myserver.internal
 ```
 
-`[agent.vhosts]` maps a hostname to a target address, which is how a client that
-routes by name — a browser, say — reaches a service directly instead of naming a
-route. It shares a table with anything published at runtime over the control
-plane (see `allow_remote_route_mutation` below and `quic-link expose` in
-[getting started](getting-started.md#3-an-extended-configuration-file)), and the
-two kinds of entry count against one limit together: at most 128 published
-names total, config-file and runtime-published combined. A config file that
-exceeds that on its own fails to load, naming the count and the limit; it is a
-load error, not a silent truncation. A name published here, in the file, can
-never be withdrawn remotely — only a name published at runtime over the control
-plane can be, and only by an authorized client, never one from the file.
-`quic-link vhosts` is a separate CLI verb for listing published names at
-runtime; it does not read this table directly.
+`[agent.vhosts]` maps a full hostname — not a bare label — to a target address,
+which is how a client that routes by name — a browser, say — reaches a service
+directly instead of naming a route. Lookup matches the whole hostname a client
+asks for, so a key here has to already be the name a client will actually
+request: the label the service is published under, then the server name (the
+one used with `daemon --server`, `ssh`, and friends), then the naming suffix
+(`internal` by default, see `[names]` below). A key that is only the label —
+`app` instead of `app.myserver.internal` — loads without error but never
+matches a real request, because nothing ever asks for the host literally named
+`app`.
+
+A key may also be a pattern: a first label of `*` stands for any single label
+in that position, so `"*.myserver.internal"` matches any hostname ending in
+`.myserver.internal` that has no more specific exact entry. An exact key is
+tried before any pattern, and among patterns the longest matching suffix wins,
+so `app.myserver.internal` (exact) takes precedence over `*.myserver.internal`,
+which in turn beats a shorter pattern further out. Pattern entries count
+toward the same limit as exact ones.
+
+The table shares its entries and its limit with anything published at runtime
+over the control plane (see `allow_remote_route_mutation` below and
+`quic-link expose` in
+[getting started](getting-started.md#3-an-extended-configuration-file)), and
+the two kinds of entry count against one limit together: at most 128 published
+names total, config-file and runtime-published combined, exact and pattern
+together. A config file that exceeds that on its own is rejected at startup,
+naming the count and the limit; it is a startup error, not a silent
+truncation. A name published here, in the file, can never be withdrawn
+remotely — only a name published at runtime over the control plane can be,
+and only by an authorized client, never one from the file. `quic-link vhosts`
+is a separate CLI verb for listing published names at runtime; it fetches the
+live list straight from the agent, so it includes names from this table
+alongside anything published at runtime, each reported with its provenance so
+the two are never confused.
 
 ```toml
+[agent]
 allow_remote_route_mutation = true          # off by default
 ```
 
@@ -145,9 +167,12 @@ of that agent mutually trusting: withdrawal checks a name's *provenance* (was
 it published over the control plane at all?), not *which* client published it,
 so any authorized client can withdraw a name a different authorized client
 published. Any authorized client can also exhaust the shared 128-name table on
-its own. This is a documented property of an opt-in you turned on, not a
-disclosed defect — the agent still refuses to start with no authorized
-clients, and this setting only widens what an already-trusted client may do.
+its own. Publishing an exact name is also not checked against an
+operator-configured pattern that would otherwise have covered it, so an
+authorized client can publish an exact name that shadows a pattern from this
+file and take over the traffic that pattern was serving. This is a documented
+property of an opt-in you turned on, not a disclosed defect — the agent still
+refuses to start with no authorized clients.
 
 It is deliberately settable only here, in the file — never by a flag, never by
 an environment variable. Anything that prepares a process environment (a
@@ -211,6 +236,8 @@ resolver without taking a real domain away from anybody. Setting `suffix` to
 anything else — a domain you actually control — also requires setting
 `suffix_is_mine = true`: it exists so that pointing your machine's resolver at
 a real domain is a deliberate act, not a typo left over from testing. The
-three ports each need to be distinct and above 1023, matching the same rule
-every other port in this file follows.
+three ports each need to be distinct and above 1023 — the same floor a
+`listen` address is held to elsewhere in this file, though `[names]` is the
+one place that floor is checked while the config file is being read, rather
+than later when something tries to bind.
 
