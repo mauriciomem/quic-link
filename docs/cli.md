@@ -21,10 +21,40 @@ by hand and can lag behind it.
 | `docker-env` | Print an `export DOCKER_HOST=...` line for a connected server. | none |
 | `fwd` | Ad-hoc local port forward to any route-table target, not just `ssh`/`docker`. | `SERVER TARGET[:LOCAL_PORT]` |
 | `attach` | Shorthand for attaching to a tmux session over `ssh`. | `SERVER SESSION` |
+| `expose` | Ask a server's agent to publish one of its local ports under a hostname, for as long as that agent runs. | `[SERVER] PORT --name NAME` (`--name` required), `--json` |
+| `vhosts` | List the hostnames a server currently publishes, and where each came from. | `[SERVER]`, `--json` |
+| `vhosts rm` | Withdraw a hostname that was published on a running agent. | `NAME [SERVER]`, `--json` |
+| `doctor` | Report what is set up on this machine, and what is not. Changes nothing. | `--json` |
+| `init` | Set this machine up to reach servers by name. | `--yes` (skip confirmation), `--undo` (remove what a previous run installed) |
 | `version` | Print the CLI's build version and the wire protocol version. | `--json` |
 
 `connect` still works but is a deprecated alias for `daemon --server NAME`; use
 `daemon` in anything new.
+
+`expose` publishes a name only for as long as that agent process runs, and writes
+nothing to disk on either side; a change accepted under an operator's permission
+should not outlive the process that accepted it. It needs the agent to have opted
+into `allow_remote_route_mutation`. `SERVER` can be left out of `expose`, `vhosts`,
+and `vhosts rm` when exactly one server is enabled.
+
+`vhosts` lists what a server's agent is publishing right now, not what a config
+file says, and reports each name's provenance, since only a runtime-published name
+can later be withdrawn; reading needs no permission from the agent's operator.
+`vhosts rm` can only withdraw a runtime-published name; a name from the agent's
+own configuration is refused, and the refusal says which kind is in the way. Like
+`expose`, it needs `allow_remote_route_mutation` on. If a wildcard pattern in the
+agent's configuration also covers the withdrawn name, that name keeps resolving
+afterward at whatever address the pattern points to; both are reported when it
+happens. Both verbs' `--json` output is a frozen shape (marked `CONTRACT` in
+`--help`); see `quic-link vhosts --help` and `quic-link vhosts rm --help` for the
+exact fields.
+
+`init` run with `sudo` writes exactly one system file, the resolver
+registration, which is the only part needing a password. Run without `sudo` it
+installs nothing and instead reports which of your own account's files are in
+place and the command for each missing one. It is idempotent and reports what it
+will do before doing anything. Skipping `init` entirely is supported: everything
+except reaching a server by name in a browser works without it.
 
 ## Exit codes
 
