@@ -2,13 +2,22 @@
 
 This is the code-structure companion to [`docs/architecture.md`](../architecture.md).
 That page explains the conceptual model — two roles, one binary, the connection
-model, life of a byte. This page maps that model onto the actual source tree: one
-entry per package, what it owns, and why it is separate from its neighbors.
+model, life of a byte. This page maps that model onto the actual source tree:
+one heading per package that carries its own hand-written doc comment, what it
+owns, and why it is separate from its neighbors. Two packages have no heading of
+their own because neither has a hand-written doc comment to ground one:
+`internal/control/proto` (protoc-generated, covered under `internal/control`)
+and `internal/transport/mem` (covered under `internal/transport`, its parent).
 
 Every description below is grounded in that package's own doc comment (most
 packages have a `// Package X ...` comment at the top of one file) or, where none
 exists, in a representative file's actual declarations. If a package's doc comment
 disagrees with this page, the doc comment wins — read it directly.
+
+This describes how the codebase is structured today, for anyone reading the
+source or building from it. It is not an invitation to open a pull request — see
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) for the project's current stance on
+external contributions.
 
 ## `cmd/quic-link`
 
@@ -24,7 +33,10 @@ deliberately thin — the accept-loop and protocol logic it wraps live in
 Provides the reconnect schedule shared by both sides of a tunnel. Whichever end
 dials owns reconnection — the client in forward mode, the agent in reverse mode —
 so the policy cannot live in either side's own package without one importing the
-other. One small package, one exported schedule, used by `internal/tunnel`.
+other. One small package, one exported schedule. `internal/tunnel` takes it as
+a parameter and runs it; `internal/daemon` aliases its policy type and default
+for the client-side pool; `cmd/quic-link` (the `agent` verb, for reverse mode)
+passes `backoff.Default()` straight through to `tunnel.DialAndServe`.
 
 ## `internal/buildinfo`
 
@@ -57,7 +69,11 @@ queries, vhost publish/withdraw). It deliberately does not import
 different assets, each guarded by its own boundary, and `control`'s own types
 (`PeerIdentity`, `RouteDetail`) mirror router's shapes rather than sharing them,
 so a change to one side's identity representation cannot silently move to
-the other.
+the other. `internal/control/proto` is its sibling: the protoc-generated
+message and gRPC-stub code (`controlpb`) built from `control.proto`, imported
+by `control` but never edited directly — it has no hand-written doc comment of
+its own to ground an entry the way every package above and below it does, so
+it is covered here rather than getting its own heading.
 
 ## `internal/daemon`
 
@@ -70,8 +86,9 @@ loops, the IPC accept loop, per-connection handlers, edge accept loops, splice
 goroutines, the signal-cancel goroutine) and states that none is fire-and-forget:
 every one has a clear exit path rooted in a cancelled context or a closed
 listener, verified by `goleak` in the package's own test suite. This is the
-heaviest-tested package in the tree by a wide margin (12 source files, 32 test
-files), which tracks with owning the process's entire shutdown discipline.
+most-tested package in the tree by test-file count (12 source files, 32 test
+files; `internal/tunnel`, the runner-up, has 20), which tracks with owning the
+process's entire shutdown discipline.
 
 ## `internal/edge`
 
@@ -111,12 +128,15 @@ builders).
 ## `internal/ipc`
 
 Implements the local unix-socket protocol between CLI verbs (`status`, `ssh`,
-`fwd`, `docker-env`, ...) and the daemon process. Two kinds of traffic ride the
+`fwd`, `docker-env`) and the daemon process. Two kinds of traffic ride the
 same socket: RPC (`kind="rpc"`, one request, one response, connection closes) and
 attach (`kind="attach"`, the daemon opens a QUIC stream and splices the socket
-connection directly to it after one ack). Frames use CBOR with a
+connection directly to it after one ack — `handleAttach` in `server.go` calls
+`tunnel.DoAttach`, which runs the real bidirectional splice; the package's own
+top-of-file doc comment predates this and still describes the splice as future
+work returning a "stub ack", which is no longer accurate). Frames use CBOR with a
 version|length|payload envelope, distinct from the wire protocol's own framing —
-its own doc comment is explicit that this mirrors the wire protocol's philosophy
+the same doc comment is explicit that this mirrors the wire protocol's philosophy
 without sharing its bytes or version space. A `socket_schema` field in every frame
 lets a stale daemon be detected and refused before any action is taken.
 
@@ -192,9 +212,10 @@ sockets, QUIC crypto, or OS privileges.
 Wires together the transport layer and local TCP services: the code that opens a
 stream, sends the header, awaits the response, and splices bytes in both
 directions — the mechanics behind "Life of a byte" in `docs/architecture.md`.
-Alongside `internal/daemon`, this is the other most heavily tested package in the
-tree (4 source files, 20 test files), which tracks with it sitting on the
-reconnect and splice path every session depends on.
+Alongside `internal/daemon`, this is the other most heavily tested package in
+the tree by test-file count (4 source files, 20 test files, second only to
+`daemon`'s 32), which tracks with it sitting on the reconnect and splice path
+every session depends on.
 
 ## The overall shape
 

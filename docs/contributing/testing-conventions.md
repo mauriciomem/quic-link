@@ -72,12 +72,12 @@ disappears once the daemon is stopped was never about your change.
 ## Other targets worth knowing
 
 The `Makefile` is a thin dispatcher — every target forwards to a script in
-`scripts/`, and each recipe is a single line. Two reasons are recorded in its own
-header comment: CI's macOS runners ship GNU Make 3.81 (2006, because Apple will
-not distribute GPLv3), so a rule that works locally can still fail on a runner,
-and CodeQL's Go analysis runs bare `make` as its build step, which makes the
-default goal (`build`) part of a security scan's behavior — so it stays a plain
-build and nothing more.
+`scripts/`, and each recipe is a single line. One reason for that is recorded in
+its own header comment: CI's macOS runners ship GNU Make 3.81 (2006, because
+Apple will not distribute GPLv3), so a rule that works locally can still fail on
+a runner. CodeQL's own workflow (`.github/workflows/codeql.yml`) builds with
+`go build ./...` directly and never invokes `make`, so a change here has no
+bearing on that scan.
 
 Beyond `build`, `test`, and `test-race`, the targets are: `lint`
 (`golangci-lint run ./...`, pinned per `CONTRIBUTING.md`; `.golangci.yml`

@@ -63,12 +63,12 @@ If your verb accepts a `SERVER` argument, resolve it through
 `a.cfg.Servers` directly. `requireKnownServer` asks the running daemon first and
 falls back to the settings file, because a server defined purely on a command
 line to `quic-link daemon` exists only in that process's memory — a second
-command has no file to read it from and must ask the daemon instead. Every
-server-name-taking verb except `ping` follows this pattern
-(`dockerenv`, `expose`, `fwd`, `ping`'s own error-wording path, `status`, `stdio`,
-`vhosts`).
+command has no file to read it from and must ask the daemon instead. Six verbs
+call it today: `dockerenv`, `expose`, `fwd`, `ssh`, `status`, and `vhosts`
+(both the listing and its nested `rm`). `ping` and `stdio` are the two
+exceptions, each for its own reason.
 
-`ping` is the one deliberate exception, not a precedent to copy without reason.
+`ping` is a deliberate exception, not a precedent to copy without reason.
 Each `ping` probe opens its own fresh QUIC connection (`ping.go:29-31`), so it
 needs a real address and pin up front — something the daemon's status socket
 does not expose. `ping.go:47` indexes `a.cfg.Servers` directly on its happy path,
@@ -76,6 +76,16 @@ and only reaches `knownServers` inside `pingUnknownServerError` to word a failur
 message, never to resolve. If your new verb has the same structural reason (it
 opens its own connection rather than asking the daemon to act on its behalf),
 following `ping`'s shape is correct. Otherwise, use `requireKnownServer`.
+
+`stdio` (`stdio.go:67`) is the other exception, for a different reason: it
+calls `knownServers` directly instead of `requireKnownServer`. `stdio` has a
+third resolution path the other verbs do not — `--server`/`--pin` flags that
+bypass config entirely for a config-free direct dial — so its unknown-server
+check only runs when neither flag was given, and each of its three error
+branches says so explicitly ("... and --server/--pin were not given"), pointing
+the caller at the alternative. `requireKnownServer`'s fixed wording has no way
+to express that third path, so `stdio` writes its own switch over
+`knownServers`'s result instead of delegating to it.
 
 ## 4. Register the command in `root.go`
 
