@@ -352,10 +352,9 @@ func (c *Client) Attach(server, target string, meta map[string]string) (net.Conn
 	}
 
 	// Bound the ack read with a short deadline so a hung daemon does not
-	// block the caller forever. The ack is just one CBOR frame; 10s is ample.
-	// No deadline is set after the ack: the returned conn is a live splice
-	// that may legitimately idle for hours.
-	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	// block the caller forever. No deadline is set after the ack: the
+	// returned conn is a live splice that may legitimately idle for hours.
+	if err := conn.SetReadDeadline(time.Now().Add(attachAckReadDeadline)); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("ipc: set ack deadline: %w", err)
 	}

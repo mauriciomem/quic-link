@@ -33,19 +33,19 @@ const defaultAttachCap = 256
 // injects a real implementation; tests inject a stub. Returning raw JSON bytes
 // decouples the IPC package from the daemon's snapshot type so internal/ipc
 // does not import internal/daemon.
+type StatusProvider interface {
+	// StatusJSON returns the JSON-encoded status snapshot ready to embed as
+	// a CBOR raw message in the Response.Body field. The returned bytes MUST
+	// be valid JSON.
+	StatusJSON() ([]byte, error)
+}
+
 // DoctorProvider answers what only the daemon knows. probe is a label the
 // caller has just looked up; the answer says whether that lookup reached the
 // responder, which is the difference between "a name resolved" and "this
 // machine's resolver is pointed here".
 type DoctorProvider interface {
 	DoctorJSON(probe string) ([]byte, error)
-}
-
-type StatusProvider interface {
-	// StatusJSON returns the JSON-encoded status snapshot ready to embed as
-	// a CBOR raw message in the Response.Body field. The returned bytes MUST
-	// be valid JSON.
-	StatusJSON() ([]byte, error)
 }
 
 // RoutesProvider relays a live route-table query to a named server's agent
@@ -414,12 +414,86 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn, releaseConn func
 	}
 }
 
+// relayCall describes one live relay to a remote agent: what to call, and
+// this case's own wording for every place that wording legitimately differs
+// from its siblings. relay itself owns everything that must NOT differ —
+// the timeout applied to the call, the *RoutesError-to-response translation
+// (sanitized through routesErrorResponse), the frame-size bound checked
+// against the reply, and the final write. A relay case cannot reach the
+// write without passing through that sequence, because relay is the only
+// path to it: there is no way to add a fifth relay that calls writeResponse
+// directly and skips the bound or the sanitization, short of not using this
+// type at all. That is the entire point of it existing.
+type relayCall struct {
+	// method names this relay for log lines (matches req.Method, e.g. "routes").
+	method string
+	// server is the target server name, already validated non-empty by the caller.
+	server string
+	// call performs the provider round trip. relay supplies it a context
+	// already bounded by routesRPCTimeout; call does not need to apply its
+	// own bound.
+	call func(ctx context.Context) ([]byte, error)
+	// genericErrMsg is the response text when call fails with an error that
+	// is not a *RoutesError — an unexpected local failure, masked the same
+	// way "doctor" and "status" mask theirs.
+	genericErrMsg string
+	// tooLargeLogMsg is the slog message logged when the reply cannot fit
+	// this socket's frame.
+	tooLargeLogMsg string
+	// tooLargeRespMsg builds this case's own wording for that same refusal,
+	// given the body length that overflowed.
+	tooLargeRespMsg func(bodyLen int) string
+}
+
+// relay runs one live agent relay to completion and writes exactly one
+// Response. Every one of handleRPC's relay cases (routes, vhosts, withdraw,
+// expose) funnels through here rather than repeating the sequence inline,
+// so a reply that is too large for this socket's frame is always caught
+// before the write, and a *RoutesError's Msg always crosses the same
+// sanitizing boundary before it reaches the caller — on every relay that
+// exists today, and on any relay added after this one, whether or not
+// whoever adds it remembers either rule.
+func (s *Server) relay(ctx context.Context, conn net.Conn, rc relayCall) {
+	rctx, cancel := context.WithTimeout(ctx, routesRPCTimeout)
+	body, err := rc.call(rctx)
+	cancel()
+	if err != nil {
+		var re *RoutesError
+		if errors.As(err, &re) {
+			// The provider already knows exactly why and exactly what status
+			// that belongs to — relay both, through the same sanitizing
+			// boundary every RoutesError crosses (see routesErrorResponse),
+			// rather than replacing a distinguishable reason with a generic
+			// one.
+			_ = writeResponse(conn, routesErrorResponse(re))
+			return
+		}
+		slog.Warn("ipc: relay "+rc.method, "role", "daemon", "server", rc.server, "err", err)
+		_ = writeResponse(conn, errorResponse(1, rc.genericErrMsg))
+		return
+	}
+	// The provider replies with JSON, which costs materially more bytes per
+	// field than the protobuf wire format the control-plane call itself was
+	// capped at (repeated key names, quoting). A reply that fit under that
+	// cap can still, once re-encoded as JSON, exceed this socket's own frame
+	// cap — checked explicitly here, before attempting the write, so that
+	// case gets a named error response instead of writeFrame silently
+	// refusing the write later and leaving the caller with a bare socket
+	// error and no response frame at all.
+	if len(body) > maxFrameSize-routesBodyHeadroom {
+		slog.Warn(rc.tooLargeLogMsg, "role", "daemon", "server", rc.server, "body_bytes", len(body))
+		_ = writeResponse(conn, errorResponse(1, rc.tooLargeRespMsg(len(body))))
+		return
+	}
+	_ = writeResponse(conn, okResponse(body))
+}
+
 // handleRPC dispatches method-specific logic and writes a single Response.
 // ctx is the server's own lifetime context (cancelled on shutdown); it bounds
-// the "routes" case's relay call so a wedged agent cannot hold a handler open
-// indefinitely. An unrecognized req.Method falls through to the default case
-// below and degrades cleanly — no schema change is needed to add a method
-// here, and none is needed to reject one this daemon does not know.
+// each relay case's call (via relay) so a wedged agent cannot hold a handler
+// open indefinitely. An unrecognized req.Method falls through to the default
+// case below and degrades cleanly — no schema change is needed to add a
+// method here, and none is needed to reject one this daemon does not know.
 func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 	slog.Debug("ipc: rpc", "role", "daemon", "method", req.Method)
 	switch req.Method {
@@ -462,10 +536,10 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 		// for this one method.
 		//
 		// This handler does not release its connSem slot early the way
-		// handleAttach does for a long splice: the relay's own call to the
-		// agent is bounded by routesRPCTimeout (10s), so holding the slot
-		// for that long is a deliberate, bounded trade-off, not an
-		// oversight — there is no unbounded hold to guard against here.
+		// handleAttach does for a long splice: relay's own call to the agent
+		// is bounded by routesRPCTimeout (10s), so holding the slot for that
+		// long is a deliberate, bounded trade-off, not an oversight — there
+		// is no unbounded hold to guard against here.
 		//
 		// The provider is read once, under the lock (getRoutes), for the
 		// same reason as the "doctor" case above: SetRoutes can be called
@@ -479,42 +553,20 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			_ = writeResponse(conn, errorResponse(1, "routes: server name is required"))
 			return
 		}
-		rctx, cancel := context.WithTimeout(ctx, routesRPCTimeout)
-		body, err := routes.RoutesJSON(rctx, req.Server)
-		cancel()
-		if err != nil {
-			var re *RoutesError
-			if errors.As(err, &re) {
-				// The provider already knows exactly why and exactly what
-				// status that belongs to — relay both, through the same
-				// sanitizing boundary every RoutesError crosses (see
-				// routesErrorResponse), rather than replacing a
-				// distinguishable reason with a generic one.
-				_ = writeResponse(conn, routesErrorResponse(re))
-				return
-			}
-			slog.Warn("ipc: relay routes", "role", "daemon", "server", req.Server, "err", err)
-			_ = writeResponse(conn, errorResponse(1, "internal error relaying routes"))
-			return
-		}
-		// The provider replies with JSON, which costs materially more bytes
-		// per field than the protobuf wire format the control-plane call
-		// itself was capped at (repeated key names, quoting). A route table
-		// that fit under that cap can still, once re-encoded as JSON,
-		// exceed this socket's own frame cap — checked explicitly here,
-		// before attempting the write, so that case gets a named error
-		// response instead of writeFrame silently refusing the write later
-		// and leaving the caller with a bare socket error and no response
-		// frame at all.
-		if len(body) > maxFrameSize-routesBodyHeadroom {
-			slog.Warn("ipc: relay routes: route table too large for the local socket frame",
-				"role", "daemon", "server", req.Server, "body_bytes", len(body))
-			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
-				"server %q's route table is too large to relay over the local socket (%d bytes as JSON); this is a local IPC limit, not a problem with the agent",
-				req.Server, len(body))))
-			return
-		}
-		_ = writeResponse(conn, okResponse(body))
+		s.relay(ctx, conn, relayCall{
+			method: "routes",
+			server: req.Server,
+			call: func(rctx context.Context) ([]byte, error) {
+				return routes.RoutesJSON(rctx, req.Server)
+			},
+			genericErrMsg:  "internal error relaying routes",
+			tooLargeLogMsg: "ipc: relay routes: route table too large for the local socket frame",
+			tooLargeRespMsg: func(n int) string {
+				return fmt.Sprintf(
+					"server %q's route table is too large to relay over the local socket (%d bytes as JSON); this is a local IPC limit, not a problem with the agent",
+					req.Server, n)
+			},
+		})
 
 	case "vhosts":
 		// The read counterpart of publishing a name: a live relay to the agent,
@@ -533,32 +585,20 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			_ = writeResponse(conn, errorResponse(1, "vhosts: server name is required"))
 			return
 		}
-		vctx, vcancel := context.WithTimeout(ctx, routesRPCTimeout)
-		vbody, verr := vhosts.VhostsJSON(vctx, req.Server)
-		vcancel()
-		if verr != nil {
-			var re *RoutesError
-			if errors.As(verr, &re) {
-				_ = writeResponse(conn, routesErrorResponse(re))
-				return
-			}
-			slog.Warn("ipc: relay vhosts", "role", "daemon", "server", req.Server, "err", verr)
-			_ = writeResponse(conn, errorResponse(1, "internal error relaying published names"))
-			return
-		}
-		// Same reasoning as the route listing: JSON costs more bytes per field
-		// than the protobuf the control call was capped at, so a table that fit
-		// there can still exceed this socket's frame. Checked before the write so
-		// the caller gets a named error rather than a bare socket failure.
-		if len(vbody) > maxFrameSize-routesBodyHeadroom {
-			slog.Warn("ipc: relay vhosts: name table too large for the local socket frame",
-				"role", "daemon", "server", req.Server, "body_bytes", len(vbody))
-			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
-				"server %q publishes too many names to relay over the local socket (%d bytes as JSON); this is a local IPC limit, not a problem with the agent",
-				req.Server, len(vbody))))
-			return
-		}
-		_ = writeResponse(conn, okResponse(vbody))
+		s.relay(ctx, conn, relayCall{
+			method: "vhosts",
+			server: req.Server,
+			call: func(vctx context.Context) ([]byte, error) {
+				return vhosts.VhostsJSON(vctx, req.Server)
+			},
+			genericErrMsg:  "internal error relaying published names",
+			tooLargeLogMsg: "ipc: relay vhosts: name table too large for the local socket frame",
+			tooLargeRespMsg: func(n int) string {
+				return fmt.Sprintf(
+					"server %q publishes too many names to relay over the local socket (%d bytes as JSON); this is a local IPC limit, not a problem with the agent",
+					req.Server, n)
+			},
+		})
 
 	case "withdraw":
 		// Changes the far side, so like publishing it is bounded in time and the
@@ -581,34 +621,26 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 			_ = writeResponse(conn, errorResponse(1, "withdraw: name is required"))
 			return
 		}
-		wctx, wcancel := context.WithTimeout(ctx, routesRPCTimeout)
-		wbody, werr := withdraw.WithdrawJSON(wctx, req.Server, whost)
-		wcancel()
-		if werr != nil {
-			var re *RoutesError
-			if errors.As(werr, &re) {
-				_ = writeResponse(conn, routesErrorResponse(re))
-				return
-			}
-			slog.Warn("ipc: relay withdraw", "role", "daemon", "server", req.Server, "err", werr)
-			_ = writeResponse(conn, errorResponse(1, "internal error withdrawing a name"))
-			return
-		}
-		// WithdrawSnapshot carries three agent-worded strings (Host,
-		// ShadowedBy, ShadowedByAddress), so its JSON encoding can exceed
-		// this socket's frame the same way a route or vhost listing can —
-		// checked before the write for the same reason those three siblings
-		// check it, so an oversized reply is a named refusal instead of a
-		// bare socket error indistinguishable from a dead daemon.
-		if len(wbody) > maxFrameSize-routesBodyHeadroom {
-			slog.Warn("ipc: relay withdraw: reply too large for the local socket",
-				"role", "daemon", "server", req.Server, "body_bytes", len(wbody))
-			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
-				"server %q sent a withdrawal reply too large to relay over the local socket (%d bytes as JSON); "+
-					"this is a local IPC limit, not a problem with the name", req.Server, len(wbody))))
-			return
-		}
-		_ = writeResponse(conn, okResponse(wbody))
+		s.relay(ctx, conn, relayCall{
+			method: "withdraw",
+			server: req.Server,
+			call: func(wctx context.Context) ([]byte, error) {
+				return withdraw.WithdrawJSON(wctx, req.Server, whost)
+			},
+			genericErrMsg:  "internal error withdrawing a name",
+			tooLargeLogMsg: "ipc: relay withdraw: reply too large for the local socket",
+			// WithdrawSnapshot carries three agent-worded strings (Host,
+			// ShadowedBy, ShadowedByAddress), so its JSON encoding can
+			// exceed this socket's frame the same way a route or vhost
+			// listing can — refused by name here for the same reason those
+			// two siblings are, rather than a bare socket error
+			// indistinguishable from a dead daemon.
+			tooLargeRespMsg: func(n int) string {
+				return fmt.Sprintf(
+					"server %q sent a withdrawal reply too large to relay over the local socket (%d bytes as JSON); "+
+						"this is a local IPC limit, not a problem with the name", req.Server, n)
+			},
+		})
 
 	case "expose":
 		// A live relay that changes something on the far side, so unlike the
@@ -643,33 +675,25 @@ func (s *Server) handleRPC(ctx context.Context, conn net.Conn, req Request) {
 				"expose: %q is not a port between 1 and 65535", req.Meta["port"])))
 			return
 		}
-		ectx, ecancel := context.WithTimeout(ctx, routesRPCTimeout)
-		ebody, eerr := expose.ExposeJSON(ectx, req.Server, host, port)
-		ecancel()
-		if eerr != nil {
-			var re *RoutesError
-			if errors.As(eerr, &re) {
-				_ = writeResponse(conn, routesErrorResponse(re))
-				return
-			}
-			slog.Warn("ipc: relay expose", "role", "daemon", "server", req.Server, "err", eerr)
-			_ = writeResponse(conn, errorResponse(1, "internal error relaying a publish request"))
-			return
-		}
-		// The reply carries a name the agent chose, and JSON escaping can make
-		// a hostile one several times longer than the control plane's own cap
-		// allowed. Checked before the write, so an oversized reply is a named
-		// answer rather than a caller left holding a bare socket error with no
-		// response at all.
-		if len(ebody) > maxFrameSize-routesBodyHeadroom {
-			slog.Warn("ipc: relay expose: reply too large for the local socket",
-				"role", "daemon", "server", req.Server, "body_bytes", len(ebody))
-			_ = writeResponse(conn, errorResponse(1, fmt.Sprintf(
-				"server %q sent a reply too large to relay over the local socket (%d bytes as JSON); "+
-					"this is a local IPC limit, not a problem with the name", req.Server, len(ebody))))
-			return
-		}
-		_ = writeResponse(conn, okResponse(ebody))
+		s.relay(ctx, conn, relayCall{
+			method: "expose",
+			server: req.Server,
+			call: func(ectx context.Context) ([]byte, error) {
+				return expose.ExposeJSON(ectx, req.Server, host, port)
+			},
+			genericErrMsg:  "internal error relaying a publish request",
+			tooLargeLogMsg: "ipc: relay expose: reply too large for the local socket",
+			// The reply carries a name the agent chose, and JSON escaping
+			// can make a hostile one several times longer than the control
+			// plane's own cap allowed — refused by name here for the same
+			// reason, rather than a bare socket error with no response at
+			// all.
+			tooLargeRespMsg: func(n int) string {
+				return fmt.Sprintf(
+					"server %q sent a reply too large to relay over the local socket (%d bytes as JSON); "+
+						"this is a local IPC limit, not a problem with the name", req.Server, n)
+			},
+		})
 
 	default:
 		_ = writeResponse(conn, errorResponse(1, fmt.Sprintf("unknown method %q", req.Method)))

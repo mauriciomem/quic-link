@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -110,12 +109,6 @@ type fakeSplicePool struct {
 	closeOnce sync.Once
 }
 
-func (p *fakeSplicePool) addConn(c daemon.Conn) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.conns = append(p.conns, c)
-}
-
 func (p *fakeSplicePool) Get(_ context.Context, _ string) (daemon.Conn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -151,23 +144,6 @@ func (p *fakeSplicePool) Close() {
 			c.CloseWithError(0, "daemon shutting down") //nolint:errcheck
 		}
 	})
-}
-
-// attachHoldingPool wraps fakeSplicePool and signals when a blocking IPC
-// handler starts, so the test can verify an attach is live before cancelling.
-type attachHoldingPool struct {
-	*fakeSplicePool
-	attachStarted chan struct{}
-	closedAt      atomic.Int64 // unix nano when Close() was called
-}
-
-func (p *attachHoldingPool) EntryState(server string) (string, error) {
-	return p.fakeSplicePool.EntryState(server)
-}
-
-func (p *attachHoldingPool) Close() {
-	p.closedAt.Store(time.Now().UnixNano())
-	p.fakeSplicePool.Close()
 }
 
 // TestDaemon_ShutdownMidAttach verifies that daemon.Run returns promptly after

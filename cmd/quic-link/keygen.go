@@ -61,7 +61,7 @@ func runKeygen(args []string) error {
 // keygenRun is the implementation shared by the cobra RunE and the test-facing
 // runKeygen wrapper.  It creates or prints the Ed25519 identity key.
 func keygenRun(out string, force bool) error {
-	keyPath := expandTilde(out)
+	keyPath := identity.ExpandHome(out)
 
 	_, statErr := os.Stat(keyPath)
 	exists := statErr == nil

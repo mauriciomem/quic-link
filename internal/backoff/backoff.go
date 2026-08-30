@@ -24,7 +24,7 @@ type Policy interface {
 // Exponential is the production policy: full-jitter exponential backoff. Base
 // multiplied by Factor each attempt gives a ceiling, capped at Cap, and the
 // actual wait is drawn uniformly from zero up to that ceiling. After
-// StableAfter_ of connected uptime the attempt counter resets.
+// StableFor of connected uptime the attempt counter resets.
 //
 // The jitter is the point, not a refinement. Without it every client that lost
 // the same agent retries in lockstep, so each retry round arrives as a
@@ -35,10 +35,10 @@ type Policy interface {
 // jitter and decorrelated jitter, spread differently and are not what is
 // specified here.
 type Exponential struct {
-	Base         time.Duration
-	Factor       float64
-	Cap          time.Duration
-	StableAfter_ time.Duration
+	Base      time.Duration
+	Factor    float64
+	Cap       time.Duration
+	StableFor time.Duration
 
 	// Rand draws the jitter fraction, in [0,1). Leave it nil in production:
 	// nil means the shared generator from the standard library, which is
@@ -69,16 +69,16 @@ func (p Exponential) Backoff(n int) time.Duration {
 
 // StableAfter returns the uptime after which the backoff counter resets on drop.
 func (p Exponential) StableAfter() time.Duration {
-	return p.StableAfter_
+	return p.StableFor
 }
 
 // Default returns the project-standard reconnect schedule: 250ms base, x2
 // factor, 15s cap, reset after 60s of stable uptime.
 func Default() Policy {
 	return Exponential{
-		Base:         250 * time.Millisecond,
-		Factor:       2,
-		Cap:          15 * time.Second,
-		StableAfter_: 60 * time.Second,
+		Base:      250 * time.Millisecond,
+		Factor:    2,
+		Cap:       15 * time.Second,
+		StableFor: 60 * time.Second,
 	}
 }

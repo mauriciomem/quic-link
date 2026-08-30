@@ -234,7 +234,7 @@ func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized p
 	// Check the age of the local identity key before binding any network
 	// resources. An absent .meta file means the key age is unknown — we
 	// silently skip the check rather than treating the absence as an alarm.
-	if err := checkKeyAge(expandTilde(keyFile), idCfg); err != nil {
+	if err := checkKeyAge(identity.ExpandHome(keyFile), idCfg); err != nil {
 		return err
 	}
 
@@ -246,7 +246,7 @@ func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized p
 	// record when the key was actually loaded, relative to the core-dump
 	// call, with no other production behavior change (loadKeyFunc's default
 	// value is identity.LoadKey itself).
-	key, err := loadKeyFunc(expandTilde(keyFile))
+	key, err := loadKeyFunc(identity.ExpandHome(keyFile))
 	if err != nil {
 		return fmt.Errorf("load identity key: %w", err)
 	}

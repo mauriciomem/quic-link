@@ -1,3 +1,46 @@
+// Package router resolves a logical name a client asked for into a network
+// address, and decides whether the connection asking for it may have it. A
+// client never names an address directly — a stream carries a target or a
+// host, never a raw ip:port, and this package is the only place that turns
+// either into somewhere to dial. That makes it the sole resolution and
+// authorization boundary on the agent: nothing else on the data-plane path
+// decides where a stream may go or whether it is allowed to go there.
+//
+// Two tables answer two separate namespaces. The route table answers short,
+// operator-chosen target names — "ssh", "docker", and anything --route or
+// [agent.routes] added on top of those built-ins. The vhost table answers
+// hostnames, including wildcard patterns, published either in the operator's
+// configuration or at runtime over the control plane. Each table protects
+// itself with its own lock, because the two are read and written at
+// different rates and a stream only ever touches one of them: it names a
+// target or a host, never both.
+//
+// Every entry in either table carries a Provenance recording where it came
+// from — compiled into the binary, set by the operator, or published while
+// the agent was running. Provenance answers where an entry originated, never
+// who is asking right now: nothing here carries caller identity, so the
+// table cannot distinguish one authorized caller's runtime entry from
+// another's. Treat the set of Provenance values as open, the same way every
+// other open set in this tree is documented — a value not recognized today
+// does not mean there will never be one.
+//
+// The vhost table is bounded (MaxVhosts): one agent holds at most that many
+// published names at once, counting the operator's configuration and every
+// runtime publish together rather than each against its own limit. Only a
+// name published at runtime, over the control plane, can be withdrawn the
+// same way — a name that came from the operator's own configuration is
+// immutable to any remote caller, whoever they are. That rule is enforced in
+// vhost.go's remove, not in the route table itself; the distinction matters
+// at the point a name is taken away, not at the point it resolves.
+//
+// Authorization is a separate step from resolution: once a name resolves,
+// Router asks its Policy — via Policy.Authorize — whether the peer may have
+// it. The default Policy,
+// AllowAll, permits every authenticated peer for every target while per-key
+// access control stays an open question, but the check-point itself is
+// unconditional — it runs on every dial regardless of what the policy in
+// place decides, so putting a real policy in later is a swap of one value,
+// not new plumbing.
 package router
 
 import (

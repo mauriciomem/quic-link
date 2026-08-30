@@ -283,7 +283,7 @@ func runDaemonOwner(cmd *cobra.Command, cfg *config.Config, scope, configPath st
 	}
 
 	// Load the identity key.
-	keyPath := expandTilde(cfg.Identity.KeyFile)
+	keyPath := identity.ExpandHome(cfg.Identity.KeyFile)
 	key, err := identity.LoadKey(keyPath)
 	if err != nil {
 		return fmt.Errorf("daemon: load identity key: %w", err)

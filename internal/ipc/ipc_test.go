@@ -15,7 +15,6 @@ import (
 	"github.com/mauriciomem/quic-link/internal/control"
 	"github.com/mauriciomem/quic-link/internal/ipc"
 	"github.com/mauriciomem/quic-link/internal/router"
-	"github.com/mauriciomem/quic-link/internal/transport"
 	"github.com/mauriciomem/quic-link/internal/transport/mem"
 	"github.com/mauriciomem/quic-link/internal/tunnel"
 )
@@ -69,13 +68,6 @@ func (p *stubPool) OpenConn(_ context.Context, server string) (tunnel.StreamConn
 		return nil, "", fmt.Errorf("server %q: no conn configured in stub", server)
 	}
 	return p.conn, "stub1234", nil
-}
-
-// errNotReadyStreamConn is a StreamConn that always fails OpenStream.
-type errNotReadyStreamConn struct{}
-
-func (e *errNotReadyStreamConn) OpenStream(_ context.Context) (transport.Stream, error) {
-	return nil, fmt.Errorf("stub: stream open failed")
 }
 
 // newMemSetupForIPC creates an in-memory agent (tunnel.Serve with echo target)

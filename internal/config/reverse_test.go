@@ -40,7 +40,9 @@ func loadReverseConfig(t *testing.T, body string) (*config.Config, error) {
 	return cfg, verr
 }
 
-// TestValidate_DuplicatePinsAcrossListenServers_Rejected is the D4 rule.
+// TestValidate_DuplicatePinsAcrossListenServers_Rejected asserts that two
+// listening servers may not share one pin: the daemon could not tell which
+// server an authenticated peer meant.
 func TestValidate_DuplicatePinsAcrossListenServers_Rejected(t *testing.T) {
 	pin := reversePin(t)
 	_, err := loadReverseConfig(t, `

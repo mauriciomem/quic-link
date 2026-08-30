@@ -217,13 +217,8 @@ func NewRealPoolWithLiveness(
 			return nil, err
 		}
 
-		// Capture name and srv for the closure — do not use the loop variable
-		// directly (Go loop-variable capture: each iteration creates fresh
-		// bindings in Go ≥1.22, but we make the capture explicit for clarity).
-		entryName := name
-		entrySrv := srv
 		factory := func() (transport.Transport, error) {
-			return makeTransport(entryName, entrySrv)
+			return makeTransport(name, srv)
 		}
 
 		entry := newDialEntry(ctx, name, srv.Addr, t, factory, sshPort, dockerPort, policy, clock, liveness)

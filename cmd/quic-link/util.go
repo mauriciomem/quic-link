@@ -57,19 +57,6 @@ func defaultKeyPath() string {
 	return filepath.Join(home, ".config", "quic-link", "key.pem")
 }
 
-// expandTilde expands a leading ~ or ~/ to the user's home directory.
-func expandTilde(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			if p == "~" {
-				return home
-			}
-			return filepath.Join(home, p[2:])
-		}
-	}
-	return p
-}
-
 // pinList collects repeatable --authorized-client flags. Each value is
 // checked with identity.ParsePinStrict as it is set, so a bad pin — or a
 // valid-but-non-canonical spelling of one — is rejected immediately rather
@@ -157,7 +144,7 @@ func (r *routeList) Type() string { return "route" }
 // clientTLSFromFlags loads the Ed25519 identity key and builds the client-side
 // pinning tls.Config for the expected server pin.  Shared by connect and ping.
 func clientTLSFromFlags(keyFile, serverPin string) (*tls.Config, error) {
-	key, err := identity.LoadKey(expandTilde(keyFile))
+	key, err := identity.LoadKey(identity.ExpandHome(keyFile))
 	if err != nil {
 		return nil, fmt.Errorf("load identity key: %w", err)
 	}

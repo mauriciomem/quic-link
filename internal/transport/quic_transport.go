@@ -68,6 +68,11 @@ type QUICTransport struct {
 // optimizations that quic-go enables only for sockets exposing out-of-band
 // control messages.
 //
+// This generality applies to Listen only. Dial (below) resolves its address
+// argument with net.ResolveUDPAddr, so a transport built around a non-UDP
+// PacketConn can accept connections but cannot dial out through this
+// method — the constructor accepts a broader type than Dial can fully use.
+//
 // tlsConf must not be nil; set NextProtos to []string{ALPN} on both sides.
 // quicConf may be nil to use the defaults returned by DefaultQUICConfig.
 func NewQUICTransport(conn net.PacketConn, tlsConf *tls.Config, quicConf *quic.Config) (*QUICTransport, error) {
@@ -112,7 +117,12 @@ func (t *QUICTransport) Listen() (Listener, error) {
 	return &quicListener{l: l}, nil
 }
 
-// Dial implements Transport.  addr must be a "host:port" string.
+// Dial implements Transport. addr must be a "host:port" string.
+//
+// This always resolves addr as a UDP address, regardless of what kind of
+// net.PacketConn the transport was constructed with — see the generality
+// note on NewQUICTransport. A transport built for outbound dialling should
+// be given a UDP-backed PacketConn.
 func (t *QUICTransport) Dial(ctx context.Context, addr string) (Conn, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {

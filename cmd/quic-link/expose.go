@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -89,25 +88,7 @@ func runExpose(cmd *cobra.Command, a *app, args []string, label string) error {
 
 	raw, err := ipc.NewClient(sock).ExposeJSON(serverName, host, port)
 	if err != nil {
-		if errors.Is(err, ipc.ErrDaemonAbsent) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is not running; start it with: quic-link daemon")
-			return err
-		}
-		if errors.Is(err, ipc.ErrSchemaMismatch) {
-			fmt.Fprintln(cmd.ErrOrStderr(),
-				"daemon is a stale version; restart it with: quic-link daemon")
-			return err
-		}
-		var re *ipc.RoutesError
-		if errors.As(err, &re) {
-			// The daemon already chose the exact reason and the status that
-			// belongs to it; relaying both unchanged keeps one description of
-			// each condition rather than two that can drift apart.
-			fmt.Fprintln(cmd.ErrOrStderr(), re.Msg)
-			return &errFinalExitCode{code: int(re.Status), msg: re.Msg}
-		}
-		return fmt.Errorf("expose: %w", err)
+		return relayIPCError(cmd, "expose", err, relayCanReturnRoutesError)
 	}
 
 	var snap daemon.ExposeSnapshot
