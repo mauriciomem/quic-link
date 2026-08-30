@@ -60,6 +60,7 @@ when both are present.
 
 The name "serve" is a deprecated alias for "agent" and will be removed in a
 future release. Use "agent" in new deployments.`,
+		Args: wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			flags := cmd.Flags()
 

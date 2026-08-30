@@ -41,14 +41,20 @@ function, and only one of those paths is wired to produce exit 2 by default.
 argument to your new verb exits 1 — silently wrong, and easy to miss because the
 verb otherwise works.
 
-11 of the 16 commands registered today already set a validator this way:
-`attach.go:24` (`ExactArgs(2)`), `connect.go:31` (`MaximumNArgs(1)`),
-`daemoncmd.go:120` (`NoArgs`), `dockerenv.go:49` (`MaximumNArgs(1)`),
-`expose.go:29` (`RangeArgs(1,2)`), `ping.go:36` (`MaximumNArgs(1)`),
+14 of the 16 commands registered today already set a validator this way:
+`agent.go:63` (`NoArgs`), `attach.go:24` (`ExactArgs(2)`),
+`connect.go:31` (`MaximumNArgs(1)`), `daemoncmd.go:120` (`NoArgs`),
+`doctor.go:86` (`NoArgs`), `dockerenv.go:49` (`MaximumNArgs(1)`),
+`expose.go:29` (`RangeArgs(1,2)`), `initcmd.go:56` (`NoArgs`),
+`keygen.go:33` (`NoArgs`), `ping.go:36` (`MaximumNArgs(1)`),
 `status.go:57` (`MaximumNArgs(1)`), `stdio.go:48` (`ExactArgs(2)`),
-`version.go:33` (`NoArgs`), `vhosts.go:108` (`MaximumNArgs(1)`), and
-`vhosts.go:144` (`RangeArgs(1,2)`). Pick whichever validator matches your verb's
-actual argument shape — `version` takes none, so it uses `cobra.NoArgs`.
+`version.go:33` (`NoArgs`), `vhosts.go:108` (`MaximumNArgs(1)`), and its
+nested `vhosts rm` at `vhosts.go:144` (`RangeArgs(1,2)`). `ssh` and `fwd` are
+the two deliberate exceptions — both parse their own positional args (see
+the "No Args validator" comment in each file) because their argument shape
+does not fit a canned cobra validator. Pick whichever validator matches your
+verb's actual argument shape — `version` takes none, so it uses
+`cobra.NoArgs`.
 
 ## 3. Resolving a server name, if your verb takes one
 

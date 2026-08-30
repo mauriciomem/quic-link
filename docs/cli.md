@@ -62,7 +62,7 @@ except reaching a server by name in a browser works without it.
 |---|---|
 | `0` | ok |
 | `1` | something else went wrong; the message on stderr says what |
-| `2` | bad usage (bad flags, missing arguments, invalid values) |
+| `2` | bad usage (bad flags, missing or extra arguments, invalid values) |
 | `3` | could not reach the agent, or the daemon is not running |
 | `4` | the pin did not match (authentication failure, either direction) |
 | `5` | the agent understood the request and refused it |
