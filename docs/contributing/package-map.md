@@ -3,11 +3,11 @@
 This is the code-structure companion to [`docs/architecture.md`](../architecture.md).
 That page explains the conceptual model — two roles, one binary, the connection
 model, life of a byte. This page maps that model onto the actual source tree:
-one heading per package that carries its own hand-written doc comment, what it
-owns, and why it is separate from its neighbors. Two packages have no heading of
-their own because neither has a hand-written doc comment to ground one:
-`internal/control/proto` (protoc-generated, covered under `internal/control`)
-and `internal/transport/mem` (covered under `internal/transport`, its parent).
+one heading per package a contributor would edit by hand, what it owns, and why
+it is separate from its neighbors. Two packages have no heading of their own:
+`internal/control/proto` (protoc-generated from `control.proto`, covered under
+`internal/control`) and `internal/transport/mem` (test infrastructure, covered
+under `internal/transport`, its parent).
 
 Every description below is grounded in that package's own doc comment (most
 packages have a `// Package X ...` comment at the top of one file) or, where none
@@ -71,8 +71,7 @@ different assets, each guarded by its own boundary, and `control`'s own types
 so a change to one side's identity representation cannot silently move to
 the other. `internal/control/proto` is its sibling: the protoc-generated
 message and gRPC-stub code (`controlpb`) built from `control.proto`, imported
-by `control` but never edited directly — it has no hand-written doc comment of
-its own to ground an entry the way every package above and below it does, so
+by `control` but never edited directly — nobody hand-edits generated code, so
 it is covered here rather than getting its own heading.
 
 ## `internal/daemon`
@@ -85,10 +84,9 @@ respectively. Its own doc comment catalogs every goroutine family it owns (dial
 loops, the IPC accept loop, per-connection handlers, edge accept loops, splice
 goroutines, the signal-cancel goroutine) and states that none is fire-and-forget:
 every one has a clear exit path rooted in a cancelled context or a closed
-listener, verified by `goleak` in the package's own test suite. This is the
-most-tested package in the tree by test-file count (12 source files, 32 test
-files; `internal/tunnel`, the runner-up, has 20), which tracks with owning the
-process's entire shutdown discipline.
+listener, verified by `goleak` in the package's own test suite (12 source
+files, 32 test files), which tracks with owning the process's entire shutdown
+discipline.
 
 ## `internal/edge`
 
@@ -212,10 +210,9 @@ sockets, QUIC crypto, or OS privileges.
 Wires together the transport layer and local TCP services: the code that opens a
 stream, sends the header, awaits the response, and splices bytes in both
 directions — the mechanics behind "Life of a byte" in `docs/architecture.md`.
-Alongside `internal/daemon`, this is the other most heavily tested package in
-the tree by test-file count (4 source files, 20 test files, second only to
-`daemon`'s 32), which tracks with it sitting on the reconnect and splice path
-every session depends on.
+Heavily tested by test-file count (4 source files, 20 test files), which
+tracks with it sitting on the reconnect and splice path every session depends
+on.
 
 ## The overall shape
 

@@ -79,13 +79,18 @@ following `ping`'s shape is correct. Otherwise, use `requireKnownServer`.
 
 `stdio` (`stdio.go:67`) is the other exception, for a different reason: it
 calls `knownServers` directly instead of `requireKnownServer`. `stdio` has a
-third resolution path the other verbs do not — `--server`/`--pin` flags that
-bypass config entirely for a config-free direct dial — so its unknown-server
-check only runs when neither flag was given, and each of its three error
-branches says so explicitly ("... and --server/--pin were not given"), pointing
-the caller at the alternative. `requireKnownServer`'s fixed wording has no way
-to express that third path, so `stdio` writes its own switch over
-`knownServers`'s result instead of delegating to it.
+third resolution path — `--server`/`--pin` flags that bypass config entirely
+for a config-free direct dial — so its unknown-server check only runs when
+neither flag was given, and each of its three error branches says so
+explicitly ("... and --server/--pin were not given"), pointing the caller at
+the alternative. `ssh` has the same flags and handles them the other way: it
+computes `flagMode` (`ssh.go:191`) once and skips the check entirely with
+`if !flagMode` (`ssh.go:225`), which is why it can still delegate to
+`requireKnownServer` for the rest. `stdio` folds the condition into each of
+its own messages instead, because `requireKnownServer`'s fixed wording has no
+way to append "(and --server/--pin were not given)" to itself — so `stdio`
+writes its own switch over `knownServers`'s result rather than delegating to
+it.
 
 ## 4. Register the command in `root.go`
 

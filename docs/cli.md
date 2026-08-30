@@ -10,13 +10,13 @@ by hand and can lag behind it.
 
 ## Verbs
 
-| Verb | What it does | Common flags |
+| Verb | What it does | Flags |
 |---|---|---|
 | `keygen` | Generate (or reuse) an Ed25519 identity and print its pin. Run once per host. | `--force` (rotate the key), `--out PATH` |
 | `agent` | Run the server-side endpoint: serve routes to an authorized client. | `--listen ADDR` (wait for the client) or `--dial ADDR` (connect out to a waiting client; the two are mutually exclusive), `--authorized-client PIN` (repeatable, required), `--ssh-addr`, `--docker-addr`, `--route NAME=ADDR`, `--key PATH` (identity key; note this is `--out` on `keygen`, not `--key`) |
-| `daemon` | Run the client-side session owner in the foreground: connects to the agent(s), or waits for one configured with `listen` to connect in, holds sessions, binds local ports. | `--server NAME` (scope to one server; default is all enabled servers) |
+| `daemon` | Run the client-side session owner in the foreground: connects to the agent(s), or waits for one configured with `listen` to connect in, holds sessions, binds local ports. | `--server NAME` (scope to one server; default is all enabled servers), `--server-add NAME=ADDR` (repeatable; replaces the servers in your settings file), `--server-pin NAME=PIN` (repeatable; the pin for a server defined with `--server-add`) |
 | `status` | Show the daemon's current session state, including which direction each server uses. | `--json` (machine-readable), `--routes` (also ask SERVER's agent for its live route table) |
-| `ping` | Measure handshake time and round-trip time to an agent. | `--count N`, `--server ADDR --pin PIN` (config-free) |
+| `ping` | Measure handshake time and round-trip time to an agent. | `--count N`, `--key PATH` (identity key), `--server ADDR --pin PIN` (config-free) |
 | `ssh` | SSH to a server through the tunnel; execs the real `ssh` binary. | `-- ssh-args...`, `--server ADDR --pin PIN` (config-free) |
 | `docker-env` | Print an `export DOCKER_HOST=...` line for a connected server. | none |
 | `fwd` | Ad-hoc local port forward to any route-table target, not just `ssh`/`docker`. | `[SERVER] TARGET[:LOCAL_PORT]` |

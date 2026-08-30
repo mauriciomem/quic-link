@@ -86,8 +86,9 @@ yourself.
 
 ```toml
 [agent]
-listen             = ":443"              # UDP address to wait on
-authorized_clients = ["<client-pin>"]    # required, non-empty: pins allowed to connect
+listen                       = ":443"              # UDP address to wait on
+authorized_clients           = ["<client-pin>"]    # required, non-empty: pins allowed to connect
+allow_remote_route_mutation  = false               # optional, default false; see below
 
 [agent.routes]                           # optional: add or override named targets
 # ssh    = "tcp://127.0.0.1:22"          # built in; override here if sshd is elsewhere
@@ -126,18 +127,20 @@ directly instead of naming a route. Lookup matches the whole hostname a client
 asks for, so a key here has to already be the name a client will actually
 request: the label the service is published under, then the server name (the
 one used with `daemon --server`, `ssh`, and friends), then the naming suffix
-(`internal` by default, see `[names]` below). A key that is only the label —
-`app` instead of `app.myserver.internal` — loads without error but never
-matches a real request, because nothing ever asks for the host literally named
-`app`.
+(`internal` by default, see `[names]` below). That middle label is the name the
+*client* knows this server by — the agent has no knowledge of it, so this key
+has to be written to match what the other machine calls it. A key that is only
+the label — `app` instead of `app.myserver.internal` — loads without error but
+never matches a real request, because nothing ever asks for the host literally
+named `app`.
 
-A key may also be a pattern: a first label of `*` stands for any single label
-in that position, so `"*.myserver.internal"` matches any hostname ending in
-`.myserver.internal` that has no more specific exact entry. An exact key is
-tried before any pattern, and among patterns the longest matching suffix wins,
-so `app.myserver.internal` (exact) takes precedence over `*.myserver.internal`,
-which in turn beats a shorter pattern further out. Pattern entries count
-toward the same limit as exact ones.
+A key may also be a pattern: a first label of `*` stands in for whatever
+comes before it, so `"*.myserver.internal"` matches any hostname ending in
+`.myserver.internal` — one label or several — that has no more specific
+exact entry. An exact key is tried before any pattern, and among patterns
+the longest matching suffix wins, so `app.myserver.internal` (exact) takes
+precedence over `*.myserver.internal`, which in turn beats a shorter pattern
+further out. Pattern entries count toward the same limit as exact ones.
 
 The table shares its entries and its limit with anything published at runtime
 over the control plane (see `allow_remote_route_mutation` below and
@@ -155,10 +158,10 @@ live list straight from the agent, so it includes names from this table
 alongside anything published at runtime, each reported with its provenance so
 the two are never confused.
 
-```toml
-[agent]
-allow_remote_route_mutation = true          # off by default
-```
+### `allow_remote_route_mutation`
+
+It lives directly under `[agent]`, alongside `listen` (or `dial`) and
+`authorized_clients` — it is not a separate table, whichever mode you chose.
 
 Off by default. Turning it on lets any of the agent's already-authorized
 clients publish a new hostname at runtime — with `quic-link expose`, no config
