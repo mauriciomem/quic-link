@@ -8,8 +8,8 @@ orientation page's summary is not enough for what you are about to do.
 ## Verbs in depth
 
 Detail for the verbs whose behavior does not fit in a table cell: the two that
-run the tunnel itself, the two that publish and withdraw hostnames on a running
-agent, and the one that sets up name resolution on this machine.
+run the tunnel itself, the three that list, publish, and withdraw hostnames on
+a running agent, and the one that sets up name resolution on this machine.
 
 ### `agent`
 
@@ -35,7 +35,7 @@ agent, and the one that sets up name resolution on this machine.
 - **No flag manages every enabled server**; `--server NAME` scopes the
   daemon to one.
 - **`--server-add NAME=ADDR` is repeatable and replaces the servers in your
-  settings file** for this run. It does not merge with them: naming one
+  config file** for this run. It does not merge with them: naming one
   server means only that server, not your whole configured fleet plus it.
 - **`--server-pin NAME=PIN` is repeatable and must pair with `--server-add`.**
   Each `--server-add` needs a matching `--server-pin` for the same name, and
@@ -50,7 +50,7 @@ agent, and the one that sets up name resolution on this machine.
 - **Requires `allow_remote_route_mutation`.** The agent's own configuration has to
   turn this on before `expose` is accepted; there is no other way to grant it.
 - **`SERVER` can be omitted** when exactly one server is known. "Known" means asked
-  of the running daemon first, then the settings file if no daemon answers. Neither
+  of the running daemon first, then the config file if no daemon answers. Neither
   source filters out a disabled server — that is why this page says "known," not
   "enabled."
 
@@ -88,9 +88,9 @@ what to do for the other.
 - **Run with `sudo`:** writes exactly one system file, the resolver registration.
   That is the only part of setup that needs a password.
 - **Run without `sudo`:** installs nothing. It reports which of your own account's
-  files are in place — an identity key and a settings file — and what to do about
+  files are in place — an identity key and a config file — and what to do about
   whichever is missing: a command (`quic-link keygen`) for the key, and a path to
-  write by hand for the settings file, since composing your own settings is not
+  write by hand for the config file, since composing your own settings is not
   something a command can do for you.
 
 `init` is idempotent. It reports what it will do before doing anything, and

@@ -85,6 +85,8 @@ use, and your configuration can pin them if you would rather choose your own.
 - [`docs/architecture.md`](docs/architecture.md): how the tunnel works
 - [`docs/cli.md`](docs/cli.md): every verb, its flags, and the exit codes
 - [`docs/configuration.md`](docs/configuration.md): the config file and its keys
+- [`docs/reference.md`](docs/reference.md): exhaustive per-verb and per-key detail
+  the two pages above leave out
 - [`docs/running-as-a-service.md`](docs/running-as-a-service.md): reference systemd user
   unit and launchd agent — files you copy and own, because quic-link installs none
 - [`docs/platform-notes.md`](docs/platform-notes.md): per-platform gotchas and the UDP

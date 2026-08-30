@@ -32,7 +32,7 @@ answered.
 One thing to know before mixing the two worlds:
 
 - **`--server-add` and `--server-pin` replace the server table, not merge with it.**
-  Give either flag and every server from the settings file is set aside for that run.
+  Give either flag and every server from the config file is set aside for that run.
 - **Everything else still comes from the file.** A suffix, an identity key path, and
   log settings are unaffected; only the server table changes.
 
@@ -260,6 +260,8 @@ handshake and exits 4, naming the mismatched pin.
 - [`docs/cli.md`](cli.md) — every verb, its flags, and the exit codes
 - [`docs/configuration.md`](configuration.md) — every config key, including the
   optional `[identity]` and `[log]` blocks
+- [`docs/reference.md`](reference.md) — exhaustive per-verb and per-key detail
+  the two pages above leave out
 - [`docs/architecture.md`](architecture.md) — how the tunnel works
 - [`docs/running-as-a-service.md`](running-as-a-service.md) — start the daemon at login
 - [`docs/platform-notes.md`](platform-notes.md) — platform gotchas
