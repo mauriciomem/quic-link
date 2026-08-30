@@ -10,6 +10,11 @@ by hand and can lag behind it.
 
 ## Verbs
 
+Every verb also accepts two flags from the root command, not listed per row below:
+`--config PATH` (use a different config file) and `--log-level LEVEL` (`debug`,
+`info`, `warn`, or `error`; default `info`). The table below lists each verb's own
+flags — not these two, since they apply everywhere.
+
 | Verb | What it does | Flags |
 |---|---|---|
 | `keygen` | Generate (or reuse) an Ed25519 identity and print its pin. Run once per host. | `--force` (rotate the key), `--out PATH` |
@@ -31,37 +36,18 @@ by hand and can lag behind it.
 `connect` still works but is a deprecated alias for `daemon --server NAME`; use
 `daemon` in anything new.
 
-`expose` publishes a name only for as long as that agent process runs, and writes
-nothing to disk on either side; a change accepted under an operator's permission
-should not outlive the process that accepted it. It needs the agent to have opted
-into `allow_remote_route_mutation`. `SERVER` can be left out of `expose`, `vhosts`,
-and `vhosts rm` when exactly one server is known — asked of the running daemon
-first, then the settings file; neither source filters out a disabled server, so
-"known" is the right word here, not "enabled".
+`expose`, `vhosts`, and `vhosts rm` publish, list, and withdraw hostnames on a
+running agent. Publishing and withdrawing both need the agent's operator to have
+turned on `allow_remote_route_mutation`; listing needs no permission. See
+[the reference page](reference.md#verbs-in-depth) for the full detail: what
+survives a restart (nothing), what happens when a wildcard pattern shadows a
+withdrawn name, and the frozen `--json` shapes.
 
-`vhosts` lists what a server's agent is publishing right now, not what a config
-file says, and reports each name's provenance, since only a runtime-published name
-can later be withdrawn; reading needs no permission from the agent's operator.
-`vhosts rm` can only withdraw a runtime-published name; a name from the agent's
-own configuration is refused, and the refusal says which kind is in the way. Like
-`expose`, it needs `allow_remote_route_mutation` on. If a wildcard pattern in the
-agent's configuration also covers the withdrawn name, that name keeps resolving
-afterward at whatever address the pattern points to; both are reported when it
-happens. Both verbs' `--json` output is a frozen shape (marked `CONTRACT` in
-`--help`); see `quic-link vhosts --help` and `quic-link vhosts rm --help` for the
-exact fields.
-
-`init` run with `sudo` writes exactly one system file, the resolver
-registration, which is the only part needing a password. Run without `sudo` it
-installs nothing and instead reports which of your own account's files are in
-place — an identity key and a settings file — and what to do about each missing
-one: a command (`quic-link keygen`) for the key, but for settings, only a path
-to write by hand, since composing your own settings file is not something a
-command can do for you. It is idempotent and reports what it will do before
-doing anything. Skipping `init` entirely is supported: everything except
-reaching a server by name in a browser works without it. Registering the
-resolver is `init`'s whole job; the daemon still does the actual work of
-binding the naming ports and answering lookups once it is running.
+`init` sets this machine up to reach servers by name. Run it with `sudo` to
+register the resolver, or without `sudo` to see which of your own account's files
+are ready. It is optional and idempotent — see
+[the reference page](reference.md#verbs-in-depth) for what each half does and
+what running without it costs you.
 
 ## Exit codes
 
