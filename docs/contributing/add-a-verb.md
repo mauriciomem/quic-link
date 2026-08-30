@@ -42,53 +42,68 @@ argument to your new verb exits 1 — silently wrong, and easy to miss because t
 verb otherwise works.
 
 15 of the 17 commands registered today already set a validator this way:
-`agent.go:63` (`NoArgs`), `attach.go:24` (`ExactArgs(2)`),
-`connect.go:31` (`MaximumNArgs(1)`), `daemoncmd.go:120` (`NoArgs`),
-`doctor.go:86` (`NoArgs`), `dockerenv.go:49` (`MaximumNArgs(1)`),
-`expose.go:29` (`RangeArgs(1,2)`), `initcmd.go:56` (`NoArgs`),
-`keygen.go:33` (`NoArgs`), `ping.go:36` (`MaximumNArgs(1)`),
-`status.go:57` (`MaximumNArgs(1)`), `stdio.go:48` (`ExactArgs(2)`),
-`version.go:33` (`NoArgs`), `vhosts.go:108` (`MaximumNArgs(1)`), and its
-nested `vhosts rm` at `vhosts.go:144` (`RangeArgs(1,2)`). `ssh` and `fwd` are
-the two deliberate exceptions — both parse their own positional args (see
-the "No Args validator" comment in each file) because their argument shape
-does not fit a canned cobra validator. Pick whichever validator matches your
-verb's actual argument shape — `version` takes none, so it uses
-`cobra.NoArgs`.
+
+| Command | File:line | Validator |
+|---|---|---|
+| `agent` | `agent.go:63` | `NoArgs` |
+| `attach` | `attach.go:24` | `ExactArgs(2)` |
+| `connect` | `connect.go:31` | `MaximumNArgs(1)` |
+| `daemon` | `daemoncmd.go:120` | `NoArgs` |
+| `doctor` | `doctor.go:86` | `NoArgs` |
+| `docker-env` | `dockerenv.go:49` | `MaximumNArgs(1)` |
+| `expose` | `expose.go:29` | `RangeArgs(1, 2)` |
+| `init` | `initcmd.go:56` | `NoArgs` |
+| `keygen` | `keygen.go:33` | `NoArgs` |
+| `ping` | `ping.go:36` | `MaximumNArgs(1)` |
+| `status` | `status.go:57` | `MaximumNArgs(1)` |
+| `stdio` | `stdio.go:48` | `ExactArgs(2)` |
+| `version` | `version.go:33` | `NoArgs` |
+| `vhosts` | `vhosts.go:108` | `MaximumNArgs(1)` |
+| `vhosts rm` | `vhosts.go:144` | `RangeArgs(1, 2)` |
+
+`ssh` and `fwd` are the two deliberate exceptions. Both parse their own
+positional args (see the "No Args validator" comment in each file) because
+their argument shape does not fit a canned cobra validator. Pick whichever
+validator matches your verb's actual argument shape. `version` takes none,
+so it uses `cobra.NoArgs`.
 
 ## 3. Resolving a server name, if your verb takes one
 
 If your verb accepts a `SERVER` argument, resolve it through
 `requireKnownServer` (`cmd/quic-link/resolve_server.go:65`), not by indexing
-`a.cfg.Servers` directly. `requireKnownServer` asks the running daemon first and
-falls back to the settings file, because a server defined purely on a command
-line to `quic-link daemon` exists only in that process's memory — a second
-command has no file to read it from and must ask the daemon instead. Six verbs
-call it today: `dockerenv`, `expose`, `fwd`, `ssh`, `status`, and `vhosts`
-(both the listing and its nested `rm`). `ping` and `stdio` are the two
-exceptions, each for its own reason.
+`a.cfg.Servers` directly. `requireKnownServer` asks the running daemon first
+and falls back to the settings file. A server defined purely on a command
+line to `quic-link daemon` exists only in that process's memory, so a second
+command has no file to read it from and must ask the daemon instead.
+
+Six verbs call it today: `dockerenv`, `expose`, `fwd`, `ssh`, `status`, and
+`vhosts` (both the listing and its nested `rm`). `ping` and `stdio` are the
+two exceptions, each for its own reason.
 
 `ping` is a deliberate exception, not a precedent to copy without reason.
 Each `ping` probe opens its own fresh QUIC connection (`ping.go:29-31`), so it
-needs a real address and pin up front — something the daemon's status socket
-does not expose. `ping.go:47` indexes `a.cfg.Servers` directly on its happy path,
-and only reaches `knownServers` inside `pingUnknownServerError` to word a failure
-message, never to resolve. If your new verb has the same structural reason (it
-opens its own connection rather than asking the daemon to act on its behalf),
-following `ping`'s shape is correct. Otherwise, use `requireKnownServer`.
+needs a real address and pin up front, something the daemon's status socket
+does not expose. `ping.go:47` indexes `a.cfg.Servers` directly on its happy
+path, and only reaches `knownServers` inside `pingUnknownServerError` to word
+a failure message, never to resolve. If your new verb has the same
+structural reason (it opens its own connection rather than asking the daemon
+to act on its behalf), following `ping`'s shape is correct. Otherwise, use
+`requireKnownServer`.
 
 `stdio` (`stdio.go:67`) is the other exception, for a different reason: it
 calls `knownServers` directly instead of `requireKnownServer`. `stdio` has a
-third resolution path — `--server`/`--pin` flags that bypass config entirely
-for a config-free direct dial — so its unknown-server check only runs when
+third resolution path: `--server`/`--pin` flags that bypass config entirely
+for a config-free direct dial. Its unknown-server check only runs when
 neither flag was given, and each of its three error branches says so
 explicitly ("... and --server/--pin were not given"), pointing the caller at
-the alternative. `ssh` has the same flags and handles them the other way: it
-computes `flagMode` (`ssh.go:191`) once and skips the check entirely with
+the alternative.
+
+`ssh` has the same flags and handles them the other way. It computes
+`flagMode` (`ssh.go:190`) once and skips the check entirely with
 `if !flagMode` (`ssh.go:225`), which is why it can still delegate to
 `requireKnownServer` for the rest. `stdio` folds the condition into each of
-its own messages instead, because `requireKnownServer`'s fixed wording has no
-way to append "(and --server/--pin were not given)" to itself — so `stdio`
+its own messages instead, because `requireKnownServer`'s fixed wording has
+no way to append "(and --server/--pin were not given)" to itself. So `stdio`
 writes its own switch over `knownServers`'s result rather than delegating to
 it.
 

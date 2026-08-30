@@ -29,22 +29,26 @@ either scope traceable to the scope it actually happened in.
 
 ## The `expected-counts.txt` canary
 
-`scripts/test.sh` counts test results actually *reported* — the `--- PASS:`,
-`--- SKIP:`, and `--- FAIL:` lines Go writes at column zero under `go test -v` —
-and compares that count against the numbers recorded in
-`scripts/expected-counts.txt`. This is the single most surprising local
-convention in the tree, and it exists for a concrete, previously-encountered
-reason: a test once closed the test process's own stdout, and twenty results
-went unreported while the suite still printed `FAIL` at the end. An exit status
-alone cannot see that kind of silent gap; a count can.
+`scripts/test.sh` counts test results actually *reported*: the `--- PASS:`,
+`--- SKIP:`, and `--- FAIL:` lines Go writes at column zero under
+`go test -v`. It compares that count against the numbers recorded in
+`scripts/expected-counts.txt`.
+
+This is the single most surprising local convention in the tree, and it
+exists for a concrete, previously-encountered reason: a test once closed the
+test process's own stdout, and twenty results went unreported while the
+suite still printed `FAIL` at the end. An exit status alone cannot see that
+kind of silent gap; a count can.
 
 The consequence for day-to-day work: **if you add or remove a test, update
-`scripts/expected-counts.txt` in the same commit.** If the number moves and you
-did not intend it to, something stopped reporting, and the fix is to find out
-why, not to update the file to make the check pass. Subtests (`t.Run` cases) are
-deliberately not counted — Go indents their result lines and the check is
-anchored to column zero — so adding a case to an existing table-driven test does
-not move either number; only a new or removed top-level `func Test...` does.
+`scripts/expected-counts.txt` in the same commit.** If the number moves and
+you did not intend it to, something stopped reporting, and the fix is to
+find out why, not to update the file to make the check pass.
+
+Subtests (`t.Run` cases) are deliberately not counted. Go indents their
+result lines, and the check is anchored to column zero. So adding a case to
+an existing table-driven test does not move either number; only a new or
+removed top-level `func Test...` does.
 
 ## `-count=1` and `goleak`
 
@@ -71,28 +75,26 @@ disappears once the daemon is stopped was never about your change.
 
 ## Other targets worth knowing
 
-The `Makefile` is a thin dispatcher — every target forwards to a script in
-`scripts/`, and each recipe is a single line. One reason for that is recorded in
-its own header comment: CI's macOS runners ship GNU Make 3.81 (2006, because
-Apple will not distribute GPLv3), so a rule that works locally can still fail on
-a runner. CodeQL's own workflow (`.github/workflows/codeql.yml`) builds with
-`go build ./...` directly and never invokes `make`, so a change here has no
-bearing on that scan.
+The `Makefile` is a thin dispatcher: every target forwards to a script in
+`scripts/`, and each recipe is a single line. One reason for that is
+recorded in its own header comment: CI's macOS runners ship GNU Make 3.81
+(2006, because Apple will not distribute GPLv3), so a rule that works
+locally can still fail on a runner. CodeQL's own workflow
+(`.github/workflows/codeql.yml`) builds with `go build ./...` directly and
+never invokes `make`, so a change here has no bearing on that scan.
 
-Beyond `build`, `test`, and `test-race`, the targets are: `lint`
-(`golangci-lint run ./...`, pinned per `CONTRIBUTING.md`; `.golangci.yml`
-deliberately lifts the default report caps, since the defaults of 50 findings
-per linter and 3 per repeated issue silently truncate a real report); `vuln`
-(`govulncheck ./...`, run for its text output on purpose — the JSON mode exits 0
-even when it finds something, which would make it useless as a gate); `proto`
-(runs `buf`: style rules first, then the check that matters — whether the wire
-protocol stayed compatible with the default branch); `bench` (accepts
-`COUNT=N` to average more runs: `make bench COUNT=20`); `bench-check` (only
-proves the benchmarks still compile and run, because timings on a shared CI
-runner are too noisy to gate on — this is what CI actually runs, never `bench`
-itself); `cross` (every supported platform still compiles); `release`
-(`VERSION=v0.1.0`, builds release artifacts locally exactly as CI does and
-verifies they are reproducible); and `clean`.
+Beyond `build`, `test`, and `test-race`:
+
+| Target | What it does |
+|---|---|
+| `lint` | `golangci-lint run ./...`, pinned per `CONTRIBUTING.md`. `.golangci.yml` deliberately lifts the default report caps, since the defaults of 50 findings per linter and 3 per repeated issue silently truncate a real report. |
+| `vuln` | `govulncheck ./...`, run for its text output on purpose. The JSON mode exits 0 even when it finds something, which would make it useless as a gate. |
+| `proto` | Runs `buf`: style rules first, then the check that matters, whether the wire protocol stayed compatible with the default branch. |
+| `bench` | Accepts `COUNT=N` to average more runs: `make bench COUNT=20`. |
+| `bench-check` | Only proves the benchmarks still compile and run, because timings on a shared CI runner are too noisy to gate on. This is what CI actually runs, never `bench` itself. |
+| `cross` | Every supported platform still compiles. |
+| `release` | `VERSION=v0.1.0`, builds release artifacts locally exactly as CI does and verifies they are reproducible. |
+| `clean` | Removes the build and test caches, and any `dist` output from `release`. |
 
 ## Test-file layout
 
