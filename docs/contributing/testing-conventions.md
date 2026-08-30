@@ -75,11 +75,12 @@ disappears once the daemon is stopped was never about your change.
 
 ## Other targets worth knowing
 
-The `Makefile` is a thin dispatcher: every target forwards to a script in
-`scripts/`, and each recipe is a single line. One reason for that is
-recorded in its own header comment: CI's macOS runners ship GNU Make 3.81
-(2006, because Apple will not distribute GPLv3), so a rule that works
-locally can still fail on a runner. CodeQL's own workflow
+The `Makefile` is a thin dispatcher: most targets forward to a script in
+`scripts/` in a single-line recipe. `clean` is the one exception, running
+`go clean` and `rm -rf` directly rather than delegating. One reason for the
+dispatcher pattern is recorded in its own header comment: CI's macOS runners
+ship GNU Make 3.81 (2006, because Apple will not distribute GPLv3), so a rule
+that works locally can still fail on a runner. CodeQL's own workflow
 (`.github/workflows/codeql.yml`) builds with `go build ./...` directly and
 never invokes `make`, so a change here has no bearing on that scan.
 

@@ -27,13 +27,15 @@ a running agent, and the one that sets up name resolution on this machine.
 - **`--key PATH` defaults to `~/.config/quic-link/key.pem`.** This is the
   same default `keygen` uses, but under a different flag name: `agent` reads
   the key with `--key`, while `keygen` writes it with `--out`. Passing `--key`
-  to `keygen` or `--out` to `agent` is a silent no-op, not an error. Worth
-  remembering before assuming a flag typo is the reason a key did not move.
+  to `keygen` or `--out` to `agent` is rejected outright as an unknown flag —
+  cobra exits 2 with a usage error rather than accepting either name on the
+  wrong verb. Worth remembering before assuming an unrelated cause is behind
+  that error.
 
 ### `daemon`
 
-- **No flag manages every enabled server**; `--server NAME` scopes the
-  daemon to one.
+- **With no `--server` flag, the daemon manages every enabled server.**
+  `--server NAME` narrows it to just that one.
 - **`--server-add NAME=ADDR` is repeatable and replaces the servers in your
   config file** for this run. It does not merge with them: naming one
   server means only that server, not your whole configured fleet plus it.

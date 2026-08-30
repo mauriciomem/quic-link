@@ -23,10 +23,12 @@ external contributions.
 
 The only package that imports `cobra` and owns CLI concerns: argument parsing,
 flag definitions, `--help` text, exit codes, and the local IPC calls that talk to
-a running daemon. Its own doc comment (`main.go`) lists every verb. It is
-deliberately thin — the accept-loop and protocol logic it wraps live in
-`internal/`, not here, so a verb's `.go` file is mostly wiring. See
-[`add-a-verb.md`](add-a-verb.md) for the shape a new verb takes.
+a running daemon. Its own doc comment (`main.go`) lists the 10 most-used verbs;
+`root.go`'s `AddCommand` call registers all 16, including the less-common ones
+main.go's comment leaves out (`connect`, `vhosts`, `fwd`, `expose`, `init`,
+`doctor`). It is deliberately thin — the accept-loop and protocol logic it
+wraps live in `internal/`, not here, so a verb's `.go` file is mostly wiring.
+See [`add-a-verb.md`](add-a-verb.md) for the shape a new verb takes.
 
 ## `internal/backoff`
 
@@ -213,11 +215,12 @@ every dial.
 ## `internal/setup`
 
 Owns the files `quic-link init` installs on the machine, and the checks that
-decide whether installing them will actually work. Every file it writes carries a
-marker on its first line, which is what distinguishes a file this tool may
-rewrite or remove from one that belongs to somebody else and happens to share a
-path — its own doc comment puts it plainly: without the marker, "undo" would be
-indistinguishable from "delete a stranger's configuration."
+decide whether installing them will actually work. Every file it writes
+carries a marker on its first line. The marker is what distinguishes a file
+this tool may rewrite or remove from one that belongs to somebody else and
+happens to share a path — its own doc comment puts it plainly: without the
+marker, "undo" would be indistinguishable from "delete a stranger's
+configuration."
 
 ## `internal/transport`
 
