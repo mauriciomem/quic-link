@@ -21,7 +21,7 @@ meaningful, distinguishable configuration.
 Contrast that with `Agent` and `Names`, which are `*Agent` and `*Names` —
 pointers. A pointer is required when the table's very absence is meaningful and
 must be distinguishable from an empty one: `Config.Agent == nil` means "this
-config never mentions `[agent]]` at all," which the agent-role validation path
+config never mentions `[agent]` at all," which the agent-role validation path
 needs to tell apart from `[agent]` written empty. The same reasoning shows up at
 field level: `Server.Enabled *bool` (`config.go:59`) carries the comment
 `// nil ≡ true (pointer detects unset)` — a pointer exists specifically so
