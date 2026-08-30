@@ -41,7 +41,7 @@ function, and only one of those paths is wired to produce exit 2 by default.
 argument to your new verb exits 1 — silently wrong, and easy to miss because the
 verb otherwise works.
 
-14 of the 16 commands registered today already set a validator this way:
+15 of the 17 commands registered today already set a validator this way:
 `agent.go:63` (`NoArgs`), `attach.go:24` (`ExactArgs(2)`),
 `connect.go:31` (`MaximumNArgs(1)`), `daemoncmd.go:120` (`NoArgs`),
 `doctor.go:86` (`NoArgs`), `dockerenv.go:49` (`MaximumNArgs(1)`),
@@ -59,7 +59,7 @@ verb's actual argument shape — `version` takes none, so it uses
 ## 3. Resolving a server name, if your verb takes one
 
 If your verb accepts a `SERVER` argument, resolve it through
-`requireKnownServer` (`cmd/quic-link/resolve_server.go:29`), not by indexing
+`requireKnownServer` (`cmd/quic-link/resolve_server.go:65`), not by indexing
 `a.cfg.Servers` directly. `requireKnownServer` asks the running daemon first and
 falls back to the settings file, because a server defined purely on a command
 line to `quic-link daemon` exists only in that process's memory — a second
