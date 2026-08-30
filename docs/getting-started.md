@@ -242,6 +242,10 @@ quic-link status --routes web     # ask web's agent, live, what it currently ser
 quic-link ping web --count 5      # handshake and round-trip time
 ```
 
+`ping` is the one command above that needs a direct address and pin, since each probe
+opens its own connection instead of asking the daemon: with no config file yet (section 1),
+run `quic-link ping --server ADDR --pin PIN --count 5` instead of naming `web`.
+
 Sessions reconnect on their own after a network drop, so a session that is briefly
 down is usually not something to act on. A wrong pin is different: it fails the
 handshake and exits 4, naming the mismatched pin.
