@@ -115,6 +115,55 @@ overridden, not removed; `[agent.routes]` is where you add anything beyond those
 two. Route names must be short (up to 64 characters), made only of letters,
 digits, dots, dashes, and underscores.
 
+```toml
+[agent.vhosts]                              # optional: publish services under hostnames
+app = "tcp://127.0.0.1:3000"                # reachable as app.internal (see 'quic-link init')
+```
+
+`[agent.vhosts]` maps a hostname to a target address, which is how a client that
+routes by name — a browser, say — reaches a service directly instead of naming a
+route. It shares a table with anything published at runtime over the control
+plane (see `allow_remote_route_mutation` below and `quic-link expose` in
+[getting started](getting-started.md#3-an-extended-configuration-file)), and the
+two kinds of entry count against one limit together: at most 128 published
+names total, config-file and runtime-published combined. A config file that
+exceeds that on its own fails to load, naming the count and the limit; it is a
+load error, not a silent truncation. A name published here, in the file, can
+never be withdrawn remotely — only a name published at runtime over the control
+plane can be, and only by an authorized client, never one from the file.
+`quic-link vhosts` is a separate CLI verb for listing published names at
+runtime; it does not read this table directly.
+
+```toml
+allow_remote_route_mutation = true          # off by default
+```
+
+Off by default. Turning it on lets any of the agent's already-authorized
+clients publish a new hostname at runtime — with `quic-link expose`, no config
+edit, no restart — and withdraw one later. This makes every authorized client
+of that agent mutually trusting: withdrawal checks a name's *provenance* (was
+it published over the control plane at all?), not *which* client published it,
+so any authorized client can withdraw a name a different authorized client
+published. Any authorized client can also exhaust the shared 128-name table on
+its own. This is a documented property of an opt-in you turned on, not a
+disclosed defect — the agent still refuses to start with no authorized
+clients, and this setting only widens what an already-trusted client may do.
+
+It is deliberately settable only here, in the file — never by a flag, never by
+an environment variable. Anything that prepares a process environment (a
+service unit, a container definition, a wrapper script) could otherwise flip
+it, which is a far wider and less reviewable surface than a file someone
+edited on purpose. Only the agent role reads it, so a config file shared
+between both roles carries it harmlessly on the client side.
+
+Because it lives in the file, it survives independently of how you start the
+agent. A `~/.config/quic-link/config.toml` left over from an earlier setup
+still applies its `allow_remote_route_mutation = true` even when you start
+`quic-link agent` with explicit flags for everything else — a flag only
+overrides a setting it names, and this one has no flag to override it. On a
+shared or long-lived box, that means it can be on without anyone having just
+passed it.
+
 ## Optional: `[identity]`
 
 ```toml
@@ -140,3 +189,28 @@ format = "text"   # text | json                    (env: QUIC_LINK_LOG_FORMAT)
 
 Logs go to stderr in either format; this only changes their verbosity and shape,
 never where they're written.
+
+## Optional: `[names]`
+
+```toml
+[names]
+suffix         = "internal"   # optional, default "internal"       (env: QUIC_LINK_NAMES_SUFFIX)
+dns_port       = 15353        # optional, default 15353            (env: QUIC_LINK_NAMES_DNS_PORT)
+http_port      = 18080        # optional, default 18080            (env: QUIC_LINK_NAMES_HTTP_PORT)
+https_port     = 18443        # optional, default 18443            (env: QUIC_LINK_NAMES_HTTPS_PORT)
+suffix_is_mine = false        # optional, default false            (env: QUIC_LINK_NAMES_SUFFIX_IS_MINE)
+```
+
+This whole table is optional; every field has a default, and leaving it out
+entirely is not an error. It controls the naming layer that `quic-link init`
+(see [getting started](getting-started.md#3-an-extended-configuration-file))
+turns on for the client role, letting names ending in the suffix resolve on
+this machine and reach a service directly. `suffix` is reserved for private
+use by default (`internal`), so quic-link can register it with the system
+resolver without taking a real domain away from anybody. Setting `suffix` to
+anything else — a domain you actually control — also requires setting
+`suffix_is_mine = true`: it exists so that pointing your machine's resolver at
+a real domain is a deliberate act, not a typo left over from testing. The
+three ports each need to be distinct and above 1023, matching the same rule
+every other port in this file follows.
+
