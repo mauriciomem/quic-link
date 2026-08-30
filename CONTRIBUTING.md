@@ -46,6 +46,19 @@ golangci-lint run ./...      # the static-analysis gate
 and the CI workflow calls the same scripts, so a green run locally means the same
 thing a green run in CI does.
 
+If you are reading the source rather than just building it, `docs/contributing/`
+has four pages worth knowing about:
+
+- [`package-map.md`](docs/contributing/package-map.md) — what each package owns
+  and why it is separate from its neighbors.
+- [`add-a-verb.md`](docs/contributing/add-a-verb.md) — how a CLI subcommand is
+  structured, walked through on an existing one.
+- [`add-a-config-key.md`](docs/contributing/add-a-config-key.md) — how a config
+  field is declared, defaulted, validated, and documented.
+- [`testing-conventions.md`](docs/contributing/testing-conventions.md) — what's
+  underneath `./scripts/test.sh`, including a hazard worth knowing before you
+  trust a red result.
+
 The linter is pinned to the version CI uses, because one that updates itself turns
 an unrelated push into a red build on code nobody touched:
 
