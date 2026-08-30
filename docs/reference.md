@@ -101,6 +101,88 @@ reaching a server by name in a browser. Registering the resolver is `init`'s who
 job — the daemon still does the real work, binding the naming ports and answering
 lookups, once it is running.
 
+## Configuration keys in depth
+
+### `[agent.vhosts]` in depth
+
+Full detail on how a vhost key is built, matched, and counted.
+
+**Composing the key.** A key is the label the service is published under, the
+server name (the same one you pass to `daemon --server`, `ssh`, and friends),
+and the naming suffix (`internal` by default; see the
+[`[names]`](configuration.md#optional-names) section).
+
+**The label is the client's word, not the agent's.** The middle label is the
+name the *client* knows this server by. The agent has no knowledge of it, so
+this key has to be written to match what the other machine calls it. A key
+that is only the label (`app` instead of `app.myserver.internal`) loads
+without error but never matches a real request, because nothing ever asks for
+the host literally named `app`.
+
+**Patterns and precedence.** A key may also be a pattern: a first label of
+`*` stands in for whatever comes before it, so `"*.myserver.internal"`
+matches any hostname ending in `.myserver.internal` (one label or several)
+that has no more specific exact entry. Precedence works like this:
+
+- An exact key is tried before any pattern.
+- Among patterns, the longest matching suffix wins. `app.myserver.internal`
+  (exact) beats `*.myserver.internal`, which in turn beats a shorter pattern
+  further out.
+- Pattern entries count toward the same limit as exact ones.
+
+**The shared 128-name limit.** This table shares its entries and its limit
+with anything published at runtime over the control plane (see
+[`allow_remote_route_mutation`](#allow_remote_route_mutation) and
+`quic-link expose` in
+[getting started](getting-started.md#3-an-extended-configuration-file)). The
+two kinds of entry count against one limit together: at most 128 published
+names total, config-file and runtime-published combined, exact and pattern
+together. A config file that exceeds that on its own is rejected at startup,
+naming the count and the limit. It is a startup error, not a silent
+truncation.
+
+**What can be withdrawn.** A name published here, in the file, can never be
+withdrawn remotely. Only a name published at runtime over the control plane
+can be, and only by an authorized client, never one from the file.
+`quic-link vhosts` is a separate CLI verb for listing published names at
+runtime; it fetches the live list straight from the agent, so it includes
+names from this table alongside anything published at runtime, each reported
+with its provenance so the two are never confused.
+
+### `allow_remote_route_mutation`
+
+It lives directly under `[agent]`, alongside `listen` (or `dial`) and
+`authorized_clients`. It is not a separate table, whichever mode you chose.
+
+Off by default. Turning it on lets any of the agent's already-authorized
+clients publish a new hostname at runtime — with `quic-link expose`, no config
+edit, no restart — and withdraw one later. This makes every authorized client
+of that agent mutually trusting: withdrawal checks a name's *provenance* (was
+it published over the control plane at all?), not *which* client published it,
+so any authorized client can withdraw a name a different authorized client
+published. Any authorized client can also exhaust the shared 128-name table on
+its own. Publishing an exact name is also not checked against an
+operator-configured pattern that would otherwise have covered it, so an
+authorized client can publish an exact name that shadows a pattern from this
+file and take over the traffic that pattern was serving. This is a documented
+property of an opt-in you turned on, not a disclosed defect — the agent still
+refuses to start with no authorized clients.
+
+It is deliberately settable only here, in the file, never by a flag, never by
+an environment variable. Anything that prepares a process environment (a
+service unit, a container definition, a wrapper script) could otherwise flip
+it, which is a far wider and less reviewable surface than a file someone
+edited on purpose. Only the agent role reads it, so a config file shared
+between both roles carries it harmlessly on the client side.
+
+Because it lives in the file, it survives independently of how you start the
+agent. A `~/.config/quic-link/config.toml` left over from an earlier setup
+still applies its `allow_remote_route_mutation = true` even when you start
+`quic-link agent` with explicit flags for everything else. A flag only
+overrides a setting it names, and this one has no flag to override it. On a
+shared or long-lived box, that means it can be on without anyone having just
+passed it.
+
 ---
 
 See [`docs/cli.md`](cli.md) for the full verb table and exit codes, and

@@ -26,6 +26,10 @@ client side (daemon) is available; if it has an `[agent]` block, the agent side 
 available. `quic-link agent` and `quic-link daemon` each look only at the section
 that matches their own role.
 
+**Every `toml` example on this page is a fragment**, not a full file. Where two
+examples share the same table header, pick one: they are alternatives, not
+pieces to combine.
+
 ## The `schema` key
 
 ```toml
@@ -121,76 +125,22 @@ digits, dots, dashes, and underscores.
 "app.myserver.internal" = "tcp://127.0.0.1:3000"   # reachable as app.myserver.internal
 ```
 
-`[agent.vhosts]` maps a full hostname — not a bare label — to a target address,
-which is how a client that routes by name — a browser, say — reaches a service
-directly instead of naming a route. Lookup matches the whole hostname a client
-asks for, so a key here has to already be the name a client will actually
-request: the label the service is published under, then the server name (the
-one used with `daemon --server`, `ssh`, and friends), then the naming suffix
-(`internal` by default, see `[names]` below). That middle label is the name the
-*client* knows this server by — the agent has no knowledge of it, so this key
-has to be written to match what the other machine calls it. A key that is only
-the label — `app` instead of `app.myserver.internal` — loads without error but
-never matches a real request, because nothing ever asks for the host literally
-named `app`.
+`[agent.vhosts]` maps a full hostname to a target address. This is how a
+browser or other name-aware client reaches a service directly, instead of
+going through a named route.
 
-A key may also be a pattern: a first label of `*` stands in for whatever
-comes before it, so `"*.myserver.internal"` matches any hostname ending in
-`.myserver.internal` — one label or several — that has no more specific
-exact entry. An exact key is tried before any pattern, and among patterns
-the longest matching suffix wins, so `app.myserver.internal` (exact) takes
-precedence over `*.myserver.internal`, which in turn beats a shorter pattern
-further out. Pattern entries count toward the same limit as exact ones.
-
-The table shares its entries and its limit with anything published at runtime
-over the control plane (see `allow_remote_route_mutation` below and
-`quic-link expose` in
-[getting started](getting-started.md#3-an-extended-configuration-file)), and
-the two kinds of entry count against one limit together: at most 128 published
-names total, config-file and runtime-published combined, exact and pattern
-together. A config file that exceeds that on its own is rejected at startup,
-naming the count and the limit; it is a startup error, not a silent
-truncation. A name published here, in the file, can never be withdrawn
-remotely — only a name published at runtime over the control plane can be,
-and only by an authorized client, never one from the file. `quic-link vhosts`
-is a separate CLI verb for listing published names at runtime; it fetches the
-live list straight from the agent, so it includes names from this table
-alongside anything published at runtime, each reported with its provenance so
-the two are never confused.
+A bare label alone never matches. The key has to be the whole hostname a
+client will actually ask for. See
+[the deep dive](reference.md#agentvhosts-in-depth) for exactly how that name
+is built and what else this table can hold.
 
 ### `allow_remote_route_mutation`
 
-It lives directly under `[agent]`, alongside `listen` (or `dial`) and
-`authorized_clients` — it is not a separate table, whichever mode you chose.
-
-Off by default. Turning it on lets any of the agent's already-authorized
-clients publish a new hostname at runtime — with `quic-link expose`, no config
-edit, no restart — and withdraw one later. This makes every authorized client
-of that agent mutually trusting: withdrawal checks a name's *provenance* (was
-it published over the control plane at all?), not *which* client published it,
-so any authorized client can withdraw a name a different authorized client
-published. Any authorized client can also exhaust the shared 128-name table on
-its own. Publishing an exact name is also not checked against an
-operator-configured pattern that would otherwise have covered it, so an
-authorized client can publish an exact name that shadows a pattern from this
-file and take over the traffic that pattern was serving. This is a documented
-property of an opt-in you turned on, not a disclosed defect — the agent still
-refuses to start with no authorized clients.
-
-It is deliberately settable only here, in the file — never by a flag, never by
-an environment variable. Anything that prepares a process environment (a
-service unit, a container definition, a wrapper script) could otherwise flip
-it, which is a far wider and less reviewable surface than a file someone
-edited on purpose. Only the agent role reads it, so a config file shared
-between both roles carries it harmlessly on the client side.
-
-Because it lives in the file, it survives independently of how you start the
-agent. A `~/.config/quic-link/config.toml` left over from an earlier setup
-still applies its `allow_remote_route_mutation = true` even when you start
-`quic-link agent` with explicit flags for everything else — a flag only
-overrides a setting it names, and this one has no flag to override it. On a
-shared or long-lived box, that means it can be on without anyone having just
-passed it.
+Off by default, as shown in the `[agent]` example above. It can only be set
+directly in the file, under `[agent]`, never by a flag or an environment
+variable. Turning it on has real security implications for a shared agent.
+Read [the deep dive](reference.md#allow_remote_route_mutation) before you
+enable it.
 
 ## Optional: `[identity]`
 
