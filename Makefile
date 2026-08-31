@@ -1,16 +1,15 @@
 # A dispatcher, not a build system.
 #
 # Every target here forwards to a script in scripts/, which is where the real
-# work lives. Two reasons for that split, both learned rather than assumed:
+# work lives. One reason for that split, learned rather than assumed:
 #
 # The macOS runners CI uses ship GNU Make 3.81 from 2006, because Apple will not
 # distribute GPLv3. Anything written here has to avoid a decade and a half of
 # make features, and a rule that works on a developer's machine can fail on a
 # runner for reasons that have nothing to do with this project.
 #
-# CodeQL's Go analysis runs bare `make` as its build step, before anything else
-# it tries. That makes the default goal part of a security scan's behaviour, so
-# it stays a plain build and nothing more.
+# CodeQL's own workflow builds with `go build ./...` directly rather than
+# `make`, so this file's default goal has no bearing on that scan.
 #
 # Requires nothing beyond make and a POSIX shell. Every recipe is a single line.
 

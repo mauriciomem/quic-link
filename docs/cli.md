@@ -10,21 +10,44 @@ by hand and can lag behind it.
 
 ## Verbs
 
-| Verb | What it does | Common flags |
+Every verb also accepts two flags from the root command, not listed per row below:
+`--config PATH` (use a different config file) and `--log-level LEVEL` (`debug`,
+`info`, `warn`, or `error`; default `info`). The table below lists each verb's own
+flags — not these two, since they apply everywhere.
+
+| Verb | What it does | Flags |
 |---|---|---|
 | `keygen` | Generate (or reuse) an Ed25519 identity and print its pin. Run once per host. | `--force` (rotate the key), `--out PATH` |
-| `agent` | Run the server-side endpoint: serve routes to an authorized client. | `--listen ADDR` (wait for the client) or `--dial ADDR` (connect out to a waiting client; the two are mutually exclusive), `--authorized-client PIN` (repeatable, required), `--ssh-addr`, `--docker-addr`, `--route NAME=ADDR` |
-| `daemon` | Run the client-side session owner in the foreground: connects to the agent(s), or waits for one configured with `listen` to connect in, holds sessions, binds local ports. | `--server NAME` (scope to one server; default is all enabled servers) |
-| `status` | Show the daemon's current session state, including which direction each server uses. | `--json` (machine-readable) |
-| `ping` | Measure handshake time and round-trip time to an agent. | `--count N`, `--server ADDR --pin PIN` (config-free) |
+| `agent` | Run the server-side endpoint: serve routes to an authorized client. | `--listen ADDR` or `--dial ADDR` (mutually exclusive), `--authorized-client PIN`, `--ssh-addr`, `--docker-addr`, `--route NAME=ADDR`, `--key PATH`. See [the reference page](reference.md#agent). |
+| `daemon` | Run the client-side session owner in the foreground: connects to the agent(s), or waits for one configured with `listen` to connect in, holds sessions, binds local ports. | `--server NAME`, `--server-add NAME=ADDR`, `--server-pin NAME=PIN`. See [the reference page](reference.md#daemon). |
+| `status` | Show the daemon's current session state, including which direction each server uses. | `--json` (machine-readable), `--routes` (also ask SERVER's agent for its live route table) |
+| `ping` | Measure handshake time and round-trip time to an agent. | `--count N`, `--key PATH` (identity key), `--server ADDR --pin PIN` (config-free) |
 | `ssh` | SSH to a server through the tunnel; execs the real `ssh` binary. | `-- ssh-args...`, `--server ADDR --pin PIN` (config-free) |
 | `docker-env` | Print an `export DOCKER_HOST=...` line for a connected server. | none |
-| `fwd` | Ad-hoc local port forward to any route-table target, not just `ssh`/`docker`. | `SERVER TARGET[:LOCAL_PORT]` |
+| `fwd` | Ad-hoc local port forward to any route-table target, not just `ssh`/`docker`. | `[SERVER] TARGET[:LOCAL_PORT]` |
 | `attach` | Shorthand for attaching to a tmux session over `ssh`. | `SERVER SESSION` |
+| `expose` | Ask a server's agent to publish one of its local ports under a hostname, for as long as that agent runs. | `[SERVER] PORT --name NAME` (`--name` required) |
+| `vhosts` | List the hostnames a server currently publishes, and where each came from. | `[SERVER]`, `--json` |
+| `vhosts rm` | Withdraw a hostname that was published on a running agent. | `NAME [SERVER]`, `--json` |
+| `doctor` | Report what is set up on this machine, and what is not. Changes nothing. | `--json` |
+| `init` | Set this machine up to reach servers by name. | `--yes` (skip confirmation), `--undo` (remove what a previous run installed) |
 | `version` | Print the CLI's build version and the wire protocol version. | `--json` |
 
 `connect` still works but is a deprecated alias for `daemon --server NAME`; use
 `daemon` in anything new.
+
+`expose`, `vhosts`, and `vhosts rm` publish, list, and withdraw hostnames on a
+running agent. Publishing and withdrawing both need the agent's operator to have
+turned on `allow_remote_route_mutation`; listing needs no permission. See
+[the reference page](reference.md#verbs-in-depth) for the full detail: what
+survives a restart (nothing), what happens when a wildcard pattern shadows a
+withdrawn name, and the frozen `--json` shapes.
+
+`init` sets this machine up to reach servers by name. Run it with `sudo` to
+register the resolver, or without `sudo` to see which of your own account's files
+are ready. It is optional and idempotent — see
+[the reference page](reference.md#verbs-in-depth) for what each half does and
+what running without it costs you.
 
 ## Exit codes
 
@@ -32,7 +55,7 @@ by hand and can lag behind it.
 |---|---|
 | `0` | ok |
 | `1` | something else went wrong; the message on stderr says what |
-| `2` | bad usage (bad flags, missing arguments, invalid values) |
+| `2` | bad usage (bad flags, missing or extra arguments, invalid values), or the daemon's socket path is occupied by something that does not answer like a daemon |
 | `3` | could not reach the agent, or the daemon is not running |
 | `4` | the pin did not match (authentication failure, either direction) |
 | `5` | the agent understood the request and refused it |

@@ -83,6 +83,7 @@ func newDoctorCmd(a *app) *cobra.Command {
 		Short:        "Report what is set up on this machine, and what is not",
 		Long:         `Look at this machine and say plainly what is in place, what is missing, and the one thing to do next. Changes nothing.`,
 		SilenceUsage: true,
+		Args:         wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r := diagnose(cmd, a)
 			if asJSON {

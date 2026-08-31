@@ -53,6 +53,7 @@ answered only for whoever asks this machine's responder directly.
 It reports what it will do before doing anything, does only what is missing,
 and can be run any number of times.`,
 		SilenceUsage: true,
+		Args:         wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			n, err := a.cfg.Naming()
 			if err != nil {

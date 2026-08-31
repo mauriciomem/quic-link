@@ -29,10 +29,12 @@ Both flags are repeatable, and each `--server-add` needs a matching `--server-pi
 a server cannot be reached without one, since the pin is what proves which key
 answered.
 
-One thing to know before mixing the two worlds: **`--server-add` and `--server-pin`
-*replace* the servers in your settings file rather than merging with them.** Every
-other setting merges normally: for these two options, command-line arguments always
-take precedence over the equivalent settings in the configuration file.
+One thing to know before mixing the two worlds:
+
+- **`--server-add` and `--server-pin` replace the server table, not merge with it.**
+  Give either flag and every server from the config file is set aside for that run.
+- **Everything else still comes from the file.** A suffix, an identity key path, and
+  log settings are unaffected; only the server table changes.
 
 The agent side takes flags just as readily. `ssh` and `docker` are always present;
 `--route` adds anything else:
@@ -141,11 +143,16 @@ app = "tcp://127.0.0.1:3000"
 The `homelab` server above uses **reverse mode**: it waits instead of calling out,
 which is why the agent that pairs with it says `dial`. Section 4 explains why.
 
-**Reaching services by hostname** is the other big one. Run `sudo quic-link init`
-once. That is the single operation needing root, it writes exactly one file, and
-`quic-link init --undo` removes it. After that, names ending in `.internal` resolve
-on this machine and a browser can reach a service directly. Then, against a running agent
-that opted in with `allow_remote_route_mutation`:
+**Reaching services by hostname** is the other big one.
+
+Run `sudo quic-link init` once. It is the only operation that needs root: it
+writes exactly one file, and `quic-link init --undo` removes it again. After
+that, names ending in `.internal` resolve on this machine, so a browser can
+reach a service directly. Skipping `init` is fully supported; everything
+except reaching a server by name in a browser works without it.
+
+With that done, publish and manage names on a running agent that opted in
+with `allow_remote_route_mutation`:
 
 ```bash
 quic-link expose homelab 3000 --name app   # publishes a name; no restart, no config edit
@@ -153,12 +160,10 @@ quic-link vhosts homelab                   # list names, and where each came fro
 quic-link vhosts rm app homelab            # withdraw one published at runtime
 ```
 
-Publishing and withdrawing both need that opt-in; *listing* does not, since reporting
-what a name table holds is not changing it. A name from the agent's own config file
-cannot be withdrawn remotely at all, because it belongs to whoever runs that agent.
-
-Skipping `init` is fully supported. Everything except reaching a server by name in a
-browser works without it.
+**Publishing and withdrawing both need that opt-in.** *Listing* does not,
+since reporting what a name table holds is not changing it. A name from the
+agent's own config file can never be withdrawn remotely: it belongs to
+whoever runs that agent.
 
 ## 4. Reverse mode
 
@@ -173,14 +178,13 @@ Connections have a direction, and the two directions are not equally easy.
 - **Outbound** means a machine starts the conversation. This works almost anywhere.
 - **Inbound** means something on the internet starts a conversation with that machine.
   This very often does not work at all.
+- **NAT** is why: every device in a household usually shares one public address, the
+  one the rest of the internet sees, so no address arrives at your machine in particular.
+- **Carrier-grade NAT** goes further: an ISP shares one address across many customers,
+  so there is nothing to forward even if you administer the router yourself.
+- **An office or campus network** you do not control has the same effect.
 
-A home machine usually sits behind NAT, an arrangement where every device in the house
-shares one public address (the address the rest of the internet sees). Because it is
-shared, no address arrives at your machine in particular. Many ISPs go further with
-carrier grade NAT, sharing one address among many customers, and then there is nothing
-you could forward even if you administered the router yourself. An office or campus
-network you do not control has the same effect. Reverse mode lets the machine in that
-position be the one that calls out.
+Reverse mode lets the machine in that position be the one that calls out.
 
 ### The honest limit
 
@@ -215,17 +219,18 @@ Start the workstation half and it logs `waiting for agent to connect`, with
 
 ### Rules worth memorising
 
-Each end picks exactly one direction, and the two ends must **disagree**. On the
-client that is `addr` (this machine connects out) or `listen` (this machine waits);
-on the agent it is `listen` or `dial`. Setting both is refused rather than guessed
-at. A `listen` port below 1024 is refused too, because the daemon deliberately takes
-no privilege, so use 1024 or above. Two `listen` servers need different pins, since
-an inbound connection is identified by its pin and nothing else. Pins themselves are
-unaffected by direction: which identities each end trusts is the same question
-whoever places the call.
-
-Whichever end waits needs its UDP port reachable: allow the port through that machine's
-firewall, and if it sits behind a router you control, forward that UDP port to it.
+- **Each end picks exactly one direction, and the two ends must disagree.** On the
+  client that is `addr` (connects out) or `listen` (waits); on the agent it is
+  `dial` (connects out) or `listen` (waits). Setting both on one end is refused.
+- **A `listen` port below 1024 is refused.** The daemon deliberately takes no
+  privilege, so use 1024 or above.
+- **Two `listen` servers need different pins.** An inbound connection is
+  identified by its pin and nothing else.
+- **Pins are unaffected by direction.** Which identities each end trusts is the
+  same question whoever places the call.
+- **Whichever end waits needs its UDP port reachable.** Allow the port through
+  that machine's firewall, and forward it if the machine sits behind a router
+  you control.
 
 Nothing else changes. You still type `quic-link ssh homelab` on the daemon's machine,
 the agent still decides which services may be reached, and once the connection is up it
@@ -242,6 +247,10 @@ quic-link status --routes web     # ask web's agent, live, what it currently ser
 quic-link ping web --count 5      # handshake and round-trip time
 ```
 
+`ping` is the one command above that needs a direct address and pin, since each probe
+opens its own connection instead of asking the daemon: with no config file yet (section 1),
+run `quic-link ping --server ADDR --pin PIN --count 5` instead of naming `web`.
+
 Sessions reconnect on their own after a network drop, so a session that is briefly
 down is usually not something to act on. A wrong pin is different: it fails the
 handshake and exits 4, naming the mismatched pin.
@@ -251,6 +260,8 @@ handshake and exits 4, naming the mismatched pin.
 - [`docs/cli.md`](cli.md) — every verb, its flags, and the exit codes
 - [`docs/configuration.md`](configuration.md) — every config key, including the
   optional `[identity]` and `[log]` blocks
+- [`docs/reference.md`](reference.md) — exhaustive per-verb and per-key detail
+  the two pages above leave out
 - [`docs/architecture.md`](architecture.md) — how the tunnel works
 - [`docs/running-as-a-service.md`](running-as-a-service.md) — start the daemon at login
 - [`docs/platform-notes.md`](platform-notes.md) — platform gotchas

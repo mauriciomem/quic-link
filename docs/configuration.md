@@ -26,6 +26,10 @@ client side (daemon) is available; if it has an `[agent]` block, the agent side 
 available. `quic-link agent` and `quic-link daemon` each look only at the section
 that matches their own role.
 
+**Every `toml` example on this page is a fragment**, not a full file. Where two
+examples share the same table header, pick one: they are alternatives, not
+pieces to combine.
+
 ## The `schema` key
 
 ```toml
@@ -86,8 +90,9 @@ yourself.
 
 ```toml
 [agent]
-listen             = ":443"              # UDP address to wait on
-authorized_clients = ["<client-pin>"]    # required, non-empty: pins allowed to connect
+listen                       = ":443"              # UDP address to wait on
+authorized_clients           = ["<client-pin>"]    # required, non-empty: pins allowed to connect
+allow_remote_route_mutation  = false               # optional, default false; see below
 
 [agent.routes]                           # optional: add or override named targets
 # ssh    = "tcp://127.0.0.1:22"          # built in; override here if sshd is elsewhere
@@ -115,6 +120,28 @@ overridden, not removed; `[agent.routes]` is where you add anything beyond those
 two. Route names must be short (up to 64 characters), made only of letters,
 digits, dots, dashes, and underscores.
 
+```toml
+[agent.vhosts]                              # optional: publish services under hostnames
+"app.myserver.internal" = "tcp://127.0.0.1:3000"   # reachable as app.myserver.internal
+```
+
+`[agent.vhosts]` maps a full hostname to a target address. This is how a
+browser or other name-aware client reaches a service directly, instead of
+going through a named route.
+
+A bare label alone never matches. The key has to be the whole hostname a
+client will actually ask for. See
+[the deep dive](reference.md#agentvhosts-in-depth) for exactly how that name
+is built and what else this table can hold.
+
+### `allow_remote_route_mutation`
+
+Off by default, as shown in the `[agent]` example above. It can only be set
+directly in the file, under `[agent]`, never by a flag or an environment
+variable. Turning it on has real security implications for a shared agent.
+Read [the deep dive](reference.md#allow_remote_route_mutation) before you
+enable it.
+
 ## Optional: `[identity]`
 
 ```toml
@@ -140,3 +167,30 @@ format = "text"   # text | json                    (env: QUIC_LINK_LOG_FORMAT)
 
 Logs go to stderr in either format; this only changes their verbosity and shape,
 never where they're written.
+
+## Optional: `[names]`
+
+```toml
+[names]
+suffix         = "internal"   # optional, default "internal"       (env: QUIC_LINK_NAMES_SUFFIX)
+dns_port       = 15353        # optional, default 15353            (env: QUIC_LINK_NAMES_DNS_PORT)
+http_port      = 18080        # optional, default 18080            (env: QUIC_LINK_NAMES_HTTP_PORT)
+https_port     = 18443        # optional, default 18443            (env: QUIC_LINK_NAMES_HTTPS_PORT)
+suffix_is_mine = false        # optional, default false            (env: QUIC_LINK_NAMES_SUFFIX_IS_MINE)
+```
+
+This whole table is optional; every field has a default, and leaving it out
+entirely is not an error. It controls the naming layer that `quic-link init`
+(see [getting started](getting-started.md#3-an-extended-configuration-file))
+turns on for the client role, letting names ending in the suffix resolve on
+this machine and reach a service directly. `suffix` is reserved for private
+use by default (`internal`), so quic-link can register it with the system
+resolver without taking a real domain away from anybody. Setting `suffix` to
+anything else — a domain you actually control — also requires setting
+`suffix_is_mine = true`: it exists so that pointing your machine's resolver at
+a real domain is a deliberate act, not a typo left over from testing. The
+three ports each need to be distinct and above 1023 — the same floor a
+`listen` address is held to elsewhere in this file, though `[names]` is the
+one place that floor is checked while the config file is being read, rather
+than later when something tries to bind.
+

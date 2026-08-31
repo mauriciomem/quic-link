@@ -30,6 +30,7 @@ supply it as --pin (client) or --authorized-client (agent).
 Running keygen again without --force is idempotent: the existing key is
 read and its pin is printed without modifying any file. Use --force to
 rotate the key; all remote ends must re-pair with the new pin.`,
+		Args: wrapArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return keygenRun(out, force)
 		},
