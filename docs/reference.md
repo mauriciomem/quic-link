@@ -27,10 +27,10 @@ a running agent, and the one that sets up name resolution on this machine.
 - **`--key PATH` defaults to `~/.config/quic-link/key.pem`.** This is the
   same default `keygen` uses, but under a different flag name: `agent` reads
   the key with `--key`, while `keygen` writes it with `--out`. Passing `--key`
-  to `keygen` or `--out` to `agent` is rejected outright as an unknown flag —
-  cobra exits 2 with a usage error rather than accepting either name on the
-  wrong verb. Worth remembering before assuming an unrelated cause is behind
-  that error.
+  to `keygen` or `--out` to `agent` is rejected outright as an unknown flag,
+  exiting 2 with a usage error rather than accepting either name on the wrong
+  verb. Worth remembering before assuming an unrelated cause is behind that
+  error.
 
 ### `daemon`
 

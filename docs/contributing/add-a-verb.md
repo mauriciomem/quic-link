@@ -41,7 +41,8 @@ function, and only one of those paths is wired to produce exit 2 by default.
 argument to your new verb exits 1 — silently wrong, and easy to miss because the
 verb otherwise works.
 
-15 of the 17 commands registered today already set a validator this way:
+15 of the 17 commands registered today — 16 top-level plus the nested
+`vhosts rm` — already set a validator this way:
 
 | Command | File:line | Validator |
 |---|---|---|
