@@ -97,7 +97,7 @@ says. It includes names the agent's operator configured and names published
 while it was running; where each came from is reported, because only the second
 kind could later be taken back.
 
-SERVER may be omitted when exactly one server is enabled.
+SERVER may be omitted when exactly one server is known.
 
 --json prints the frozen machine-readable shape to stdout (CONTRACT):
   {"schema":1,"server":"...","vhosts":[{"host":"...","address":"...",
@@ -135,7 +135,7 @@ to. When that happens both the pattern and that address are reported, because a
 withdrawal that leaves a name answered is not what "withdrawn" sounds like, and
 knowing it still answers is only half of what a reader needs.
 
-SERVER may be omitted when exactly one server is enabled.
+SERVER may be omitted when exactly one server is known.
 
 --json prints the frozen machine-readable shape to stdout (CONTRACT):
   {"schema":1,"server":"...","host":"...","shadowed_by":"*...",

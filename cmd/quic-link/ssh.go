@@ -70,7 +70,7 @@ spawns, nothing more.
 strips the username before expanding %n, so quic-link only needs to split on
 '@' for its own config lookup and for -o HostKeyAlias=<server>.
 
-With no SERVER and no --server/--pin, the sole enabled server in the config
+With no SERVER and no --server/--pin, the sole known server in the config
 is used automatically (error 2 if the config has more than one). With
 --server ADDR --pin PIN, no config file or running daemon is required, but
 SERVER becomes a required label (there is no config to default it from):

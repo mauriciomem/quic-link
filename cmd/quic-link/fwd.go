@@ -57,7 +57,7 @@ fwd requires a running daemon (quic-link daemon); unlike stdio and ssh, it
 has no direct-QUIC fallback, since a fresh QUIC/TLS/pin handshake for every
 accepted local connection would defeat session pooling entirely.
 
-With no SERVER, the sole enabled server in the config is used automatically
+With no SERVER, the sole known server in the config is used automatically
 (error 2 if the config has more than one).`,
 		// No Args validator: runFwd parses args itself, matching ssh.go's
 		// splitSSHArgs precedent — the shape (one optional leading token, one
