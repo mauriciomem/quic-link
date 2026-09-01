@@ -116,7 +116,12 @@ registry, no init-time side effects. If the verb is plumbing rather than
 something a user is meant to type (`stdio` is the current example — see
 `docs/cli.md`'s "A note on hidden verbs"), set `Hidden: true` on the command
 instead of omitting it from the list; a hidden verb is still registered and
-still runs, it just does not appear in `--help`.
+still runs, it just does not appear in `--help`. For a non-hidden verb, also
+consider whether it fits one of the three categories `main.go`'s own doc
+comment favors — quic-link's two roles, the identity a role needs, or a
+handful of everyday client verbs — and add it there too if so; most won't,
+and that's fine, since the verb still gets its unconditional row in
+`docs/cli.md`'s table regardless (step 7).
 
 ## 5. If the verb has a machine-readable `--json` output, freeze it in `--help`
 
