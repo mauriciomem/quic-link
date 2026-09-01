@@ -23,13 +23,13 @@ external contributions.
 
 The only package that imports `cobra` and owns CLI concerns: argument parsing,
 flag definitions, `--help` text, exit codes, and the local IPC calls that talk to
-a running daemon. Its own doc comment (`main.go`) lists 10 verbs (one, `stdio`,
-marked hidden) and mentions two more in prose as deprecated aliases (`serve`
-for `agent`, `connect` for `daemon --server NAME`). `root.go`'s `AddCommand`
-call registers 16 top-level commands. It is deliberately thin — the
-accept-loop and protocol logic it wraps live in `internal/`, not here, so a
-verb's `.go` file is mostly wiring. See [`add-a-verb.md`](add-a-verb.md) for
-the shape a new verb takes.
+a running daemon. Its own doc comment (`main.go`) names a curated subset of
+the verbs `root.go` registers, plus two prose-only deprecated aliases
+(`serve` for `agent`, `connect` for `daemon --server NAME`); `docs/cli.md`'s
+verb table covers the documented, non-hidden surface, which `main.go`'s own
+comment points at. It is deliberately thin — the accept-loop and protocol logic it
+wraps live in `internal/`, not here, so a verb's `.go` file is mostly
+wiring. See [`add-a-verb.md`](add-a-verb.md) for the shape a new verb takes.
 
 ## `internal/backoff`
 

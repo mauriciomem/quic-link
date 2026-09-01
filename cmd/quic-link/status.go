@@ -46,9 +46,9 @@ switched off, and one whose identity was permanently rejected all omit it.
 --routes additionally asks a named SERVER's agent, live, for its current
 route table. This is a real network round trip through the daemon to the
 agent, so it is never performed by plain "status" or "status --json" alone —
-those two never take SERVER and never leave the daemon's own local
-snapshot. SERVER may be omitted with --routes when exactly one server is
-enabled in config, the same auto-selection "ssh"/"docker-env"/"connect" use.
+those two never take SERVER and never leave the daemon's own local snapshot.
+SERVER may be omitted with --routes when exactly one server is known in config,
+the same auto-selection "ssh"/"docker-env" use.
 
 Route names and addresses come from the agent, not from this machine: they
 are sanitized before being printed or included in --routes --json, since an
@@ -101,7 +101,7 @@ func runStatusPlain(cmd *cobra.Command, a *app, jsonFlag bool) error {
 }
 
 // runStatusRoutes implements "status --routes [SERVER]": resolve SERVER the
-// same way connect/ssh/docker-env do, reject a name absent from config
+// same way ssh/docker-env do, reject a name absent from config
 // before ever reaching the daemon, issue the "routes" IPC method (not
 // "status"), and render the result through the sanitizing presentation
 // layer in routes_sanitize.go. Every failure mode the daemon's own

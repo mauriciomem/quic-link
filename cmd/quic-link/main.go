@@ -12,6 +12,10 @@
 //	quic-link version     -- print the CLI build version and wire protocol version
 //	quic-link stdio       -- (hidden) single-stream stdio bridge
 //
+// This list favors quic-link's two roles, the identity a role needs, and a
+// handful of everyday client verbs -- not the complete set of subcommands
+// quic-link registers. See docs/cli.md's verb table for the rest.
+//
 // "serve" is accepted as a deprecated alias for "agent".
 // "connect" is accepted as a deprecated alias for "daemon --server NAME".
 //

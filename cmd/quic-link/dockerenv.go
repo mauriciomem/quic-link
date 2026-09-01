@@ -44,7 +44,7 @@ to stdout, a human message goes to stderr, and the exit code is 3. This
 keeps "eval $(quic-link docker-env)" a safe no-op instead of setting
 DOCKER_HOST to a port nothing is listening on.
 
-With no SERVER, the sole enabled server in the config is used automatically
+With no SERVER, the sole known server in the config is used automatically
 (error 2 if the config has more than one).`,
 		Args: wrapArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
