@@ -101,7 +101,7 @@ func runStatusPlain(cmd *cobra.Command, a *app, jsonFlag bool) error {
 }
 
 // runStatusRoutes implements "status --routes [SERVER]": resolve SERVER the
-// same way connect/ssh/docker-env do, reject a name absent from config
+// same way ssh/docker-env do, reject a name absent from config
 // before ever reaching the daemon, issue the "routes" IPC method (not
 // "status"), and render the result through the sanitizing presentation
 // layer in routes_sanitize.go. Every failure mode the daemon's own

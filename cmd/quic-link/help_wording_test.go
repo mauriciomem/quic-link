@@ -25,6 +25,7 @@ package main
 //     here asserts on that wording.
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -133,6 +134,11 @@ func TestStatusRoutesHelp_SaysKnown_NotEnabled(t *testing.T) {
 	}
 }
 
+// connectWordBoundary matches a standalone "connect" token, not
+// "connected"/"connecting"/"reconnect", so the guard below survives a
+// rewording that drops the quotes around the verb name.
+var connectWordBoundary = regexp.MustCompile(`\bconnect\b`)
+
 // TestStatusRoutesHelp_DoesNotNameConnect pins the second, larger defect in
 // the same sentence: it lists connect alongside ssh and docker-env as
 // sharing the auto-selection mechanism it is describing. ssh and docker-env
@@ -142,7 +148,7 @@ func TestStatusRoutesHelp_SaysKnown_NotEnabled(t *testing.T) {
 // which adjective is used, so the fix removes it rather than rewording it.
 func TestStatusRoutesHelp_DoesNotNameConnect(t *testing.T) {
 	help := verbLongHelp(t, "status")
-	if strings.Contains(help, `"connect"`) {
+	if connectWordBoundary.MatchString(help) {
 		t.Error(`status help still names "connect" among the verbs sharing its ` +
 			"auto-selection mechanism; connect resolves through enabledServers, not " +
 			"autoSelectServer, so it does not share that mechanism")

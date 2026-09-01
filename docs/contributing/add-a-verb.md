@@ -78,20 +78,20 @@ line to `quic-link daemon` exists only in that process's memory, so a second
 command has no file to read it from and must ask the daemon instead.
 
 Six verbs call it today: `dockerenv`, `expose`, `fwd`, `ssh`, `status`, and
-`vhosts` (both the listing and its nested `rm`). `ping` and `stdio` are the
-two exceptions, each for its own reason.
+`vhosts` (both the listing and its nested `rm`). `ping`, `stdio`, and
+`connect` are the three exceptions, each for its own reason.
 
 `ping` is a deliberate exception, not a precedent to copy without reason.
-Each `ping` probe opens its own fresh QUIC connection (`ping.go:29-31`), so it
-needs a real address and pin up front, something the daemon's status socket
-does not expose. `ping.go:47` indexes `a.cfg.Servers` directly on its happy
-path, and only reaches `knownServers` inside `pingUnknownServerError` to word
-a failure message, never to resolve. If your new verb has the same
+Each `ping` probe opens its own fresh QUIC connection (`ping.go:224-226`), so
+it needs a real address and pin up front, something the daemon's status
+socket does not expose. `ping.go:47` indexes `a.cfg.Servers` directly on its
+happy path, and only reaches `knownServers` inside `pingUnknownServerError`
+to word a failure message, never to resolve. If your new verb has the same
 structural reason (it opens its own connection rather than asking the daemon
 to act on its behalf), following `ping`'s shape is correct. Otherwise, use
 `requireKnownServer`.
 
-`stdio` (`stdio.go:67`) is the other exception, for a different reason: it
+`stdio` (`stdio.go:67`) is another exception, for a different reason: it
 calls `knownServers` directly instead of `requireKnownServer`. `stdio` has a
 third resolution path: `--server`/`--pin` flags that bypass config entirely
 for a config-free direct dial. Its unknown-server check only runs when
@@ -108,6 +108,12 @@ no way to append "(and --server/--pin were not given)" to itself. So `stdio`
 writes its own switch over `knownServers`'s result rather than delegating to
 it.
 
+`connect` is the third exception: it takes `[SERVER]` (`connect.go:23`) and
+resolves it through `enabledServers` (`connect.go:74`), the same
+`Enabled`-filtering function its own `--help` describes — never
+`requireKnownServer` or `knownServers`. It is a deprecated alias for
+`daemon --server NAME` and not a pattern to extend.
+
 ## 4. Register the command in `root.go`
 
 Add your constructor call to the `root.AddCommand(...)` list in
@@ -116,22 +122,25 @@ registry, no init-time side effects. If the verb is plumbing rather than
 something a user is meant to type (`stdio` is the current example — see
 `docs/cli.md`'s "A note on hidden verbs"), set `Hidden: true` on the command
 instead of omitting it from the list; a hidden verb is still registered and
-still runs, it just does not appear in `--help`. For a non-hidden verb, also
-consider whether it fits one of the three categories `main.go`'s own doc
-comment favors — quic-link's two roles, the identity a role needs, or a
-handful of everyday client verbs — and add it there too if so; most won't,
-and that's fine, since the verb still gets its unconditional row in
-`docs/cli.md`'s table regardless (step 7).
+still runs, it just does not appear in `--help`.
+
+Either way, `main.go`'s own doc comment is a maintainer-curated shortlist,
+not a table you should assume you're adding to: leave it alone unless your
+verb replaces or renames one of the entries already there, in which case
+update that line. A non-hidden verb also gets a row in `docs/cli.md`'s
+table, in the same commit (step 7); a hidden one does not, by that page's
+own "A note on hidden verbs" convention.
 
 ## 5. If the verb has a machine-readable `--json` output, freeze it in `--help`
 
 `version` and `vhosts`/`vhosts rm` mark their `--json` shape as `CONTRACT`
-directly in the command's own `Long` help text (see `version.go:29-32` and
-`vhosts.go:104-105`). That is the convention: the canonical shape for a frozen
-output lives in exactly one place, the verb's own `--help`, and `docs/cli.md`
-points at `--help` rather than reproducing the shape a second time. Two copies of
-a schema is two places for them to drift apart; one copy with everything else
-pointing at it cannot drift from itself.
+directly in the command's own `Long` help text (see `version.go:29-32`,
+`vhosts.go:102-104`, and `vhosts.go:140-142` for `vhosts rm`). That is the
+convention: the canonical shape for a frozen output lives in exactly one
+place, the verb's own `--help`, and `docs/cli.md` points at `--help` rather
+than reproducing the shape a second time. Two copies of a schema is two
+places for them to drift apart; one copy with everything else pointing at
+it cannot drift from itself.
 
 ## 6. Add a test file
 
@@ -146,9 +155,10 @@ only shows up when cobra's own validator path is actually exercised.
 
 ## 7. Update `docs/cli.md` and `scripts/expected-counts.txt` in the same commit
 
-A new verb belongs in `docs/cli.md`'s verb table — one row, in the same commit
-that adds the verb. And adding a test changes how many results
-`scripts/test.sh` expects to see reported; forgetting to update
+A non-hidden verb belongs in `docs/cli.md`'s verb table — one row, in the
+same commit that adds the verb. A hidden verb is deliberately left out; see
+`docs/cli.md`'s "A note on hidden verbs". And adding a test changes how many
+results `scripts/test.sh` expects to see reported; forgetting to update
 `scripts/expected-counts.txt` in that same commit is the single most common way
 to make the suite fail for a reason that looks unrelated to your change. See
 [`testing-conventions.md`](testing-conventions.md) for the full mechanics of that
