@@ -437,10 +437,14 @@ func TestTLSResumption(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AgentDialTLS: %v", err)
 		}
-		// TEST-ONLY: this field must never appear on pinningTLS output; it
-		// exists here only to prove this harness can detect resumption
-		// before the sibling subtest asserts it does not happen in
-		// production config.
+		// TEST-ONLY: neither of these must ever appear on pinningTLS output.
+		// pinningTLS now sets SessionTicketsDisabled unconditionally, so
+		// both sides must clear it here to simulate the world this guard
+		// closes off — otherwise the server never issues a ticket and the
+		// client never stores one, and this subtest could no longer prove
+		// the harness can observe resumption at all.
+		listenConf.SessionTicketsDisabled = false
+		dialConf.SessionTicketsDisabled = false
 		dialConf.ClientSessionCache = tls.NewLRUClientSessionCache(1)
 
 		serverUDP := resumptionLoopbackUDP(t)
