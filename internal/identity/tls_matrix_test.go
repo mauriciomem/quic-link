@@ -100,6 +100,9 @@ func TestTLSMatrix_AllFourRows(t *testing.T) {
 			if cfg.MinVersion != tls.VersionTLS13 {
 				t.Errorf("MinVersion = %v, want TLS 1.3", cfg.MinVersion)
 			}
+			if !cfg.SessionTicketsDisabled {
+				t.Error("SessionTicketsDisabled = false, want true: a resumed handshake skips VerifyPeerCertificate, the only peer check here")
+			}
 		})
 	}
 }
@@ -279,13 +282,19 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 //   - Two sequential handshakes against unmodified AgentListenTLS +
 //     AgentDialTLS output: the second does not resume, and the listener's
 //     VerifyPeerCertificate callback is invoked again on it.
-//   - The same two-handshake sequence, with ClientSessionCache added to a
-//     test-only copy of the dial config only (never to pinningTLS's
-//     output), resumes on the second handshake — proving the harness can
-//     detect resumption when it actually occurs.
+//   - The same two-handshake sequence, with SessionTicketsDisabled cleared
+//     on test-only copies of both configs and ClientSessionCache added to
+//     the dial copy (neither ever on pinningTLS's output), resumes on the
+//     second handshake — proving the harness can detect resumption when it
+//     actually occurs. Both copies need clearing because Go gates on the
+//     field independently on each side: the listen copy controls whether
+//     the server issues a ticket, the dial copy controls whether the
+//     client can store one.
 //
-// Edge cases: none beyond the two sequences above — this guards a config
-// property, not input validation, so there is no third case to add.
+// This suite asserts the behavior (no resumption over a real handshake); it
+// cannot catch removal of SessionTicketsDisabled alone, because without a
+// ClientSessionCache resumption cannot occur either way. That field's value
+// is asserted directly in TestTLSMatrix_AllFourRows instead.
 
 // resumptionLoopbackUDP opens a UDP socket on loopback only, for one side of
 // a handshake pair below. Binding "127.0.0.1" specifically, rather than a
@@ -322,14 +331,23 @@ func resumptionDial(t *testing.T, tr *quic.Transport, addr net.Addr, cliConf *tl
 // resumptionAccept accepts exactly one server-side connection. It is called
 // once per handshake below rather than run as a long-lived accept loop, so
 // each accept is paired with the one dial that produced it.
+//
+// The accepting goroutine is joined via t.Cleanup before the test returns,
+// so any t.Errorf it reports always runs while the test is still in flight
+// rather than racing a sibling t.Fatalf that ends the subtest first.
 func resumptionAccept(t *testing.T, ln *quic.Listener) <-chan *quic.Conn {
 	t.Helper()
 	ch := make(chan *quic.Conn, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() { <-done })
 	go func() {
+		defer close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		conn, err := ln.Accept(ctx)
 		if err != nil {
+			// On failure the channel is closed rather than sent to, so
+			// callers must use the two-value receive.
 			t.Errorf("accept: %v", err)
 			close(ch)
 			return
@@ -347,11 +365,11 @@ func resumptionAccept(t *testing.T, ln *quic.Listener) <-chan *quic.Conn {
 // handshake already verified instead of re-invoking the callback. That
 // callback is the only thing that authenticates a peer here, since chain
 // verification is deliberately skipped, so a handshake that resumed would
-// authenticate nobody on that connection. Nothing in this package makes that
-// happen today — none of the four constructors sets ClientSessionCache, and
-// a dial side with nowhere to store a session ticket cannot resume — but
-// nothing stops a future edit (most plausibly someone reaching for
-// ClientSessionCache for a latency win) from changing that.
+// authenticate nobody on that connection. pinningTLS sets
+// SessionTicketsDisabled unconditionally, so no ticket is ever issued or
+// stored regardless of what a caller configures on top; that guard, not the
+// absence of a ClientSessionCache, is what keeps resumption from happening
+// today. A failure here means the guard was removed or bypassed.
 //
 // A single assertion that resumption does not occur cannot tell "the
 // property holds" apart from "this harness cannot observe resumption at
@@ -411,10 +429,9 @@ func TestTLSResumption(t *testing.T) {
 		}
 
 		if cs2.DidResume {
-			t.Fatal("second handshake resumed (DidResume=true): the shipped " +
-				"config has never set ClientSessionCache, so nothing should " +
-				"be available to resume from — something changed what the " +
-				"dial side stores")
+			t.Fatal("second handshake resumed (DidResume=true): pinningTLS " +
+				"sets SessionTicketsDisabled to prevent exactly this — " +
+				"something changed or bypassed that guard")
 		}
 		if got := verifyCalls.Load(); got != 2 {
 			t.Fatalf("verifyCalls after second handshake = %d, want 2: "+
