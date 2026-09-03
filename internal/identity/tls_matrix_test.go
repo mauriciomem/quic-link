@@ -365,11 +365,12 @@ func resumptionAccept(t *testing.T, ln *quic.Listener) <-chan *quic.Conn {
 // handshake already verified instead of re-invoking the callback. That
 // callback is the only thing that authenticates a peer here, since chain
 // verification is deliberately skipped, so a handshake that resumed would
-// authenticate nobody on that connection. pinningTLS sets
-// SessionTicketsDisabled unconditionally, so no ticket is ever issued or
-// stored regardless of what a caller configures on top; that guard, not the
-// absence of a ClientSessionCache, is what keeps resumption from happening
-// today. A failure here means the guard was removed or bypassed.
+// authenticate nobody on that connection. Two independent conditions keep
+// resumption from happening today: no ClientSessionCache is set anywhere in
+// the tree, and pinningTLS sets SessionTicketsDisabled. Either alone is
+// sufficient, which is why removing one does not make resumption occur. The
+// guard is what holds if a caller ever adds a cache. A failure here means
+// the guard was removed or bypassed.
 //
 // A single assertion that resumption does not occur cannot tell "the
 // property holds" apart from "this harness cannot observe resumption at
