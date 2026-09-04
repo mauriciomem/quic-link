@@ -102,6 +102,11 @@ func pinningTLS(key ed25519.PrivateKey, mode transportMode, allowed []string) (*
 		MinVersion:            tls.VersionTLS13,
 		NextProtos:            []string{transport.ALPN},
 	}
+	// Resumed handshakes skip VerifyPeerCertificate, so a session ticket
+	// would bypass the only check that authenticates a peer here. Set
+	// unconditionally, not per mode: both modes need the same value, unlike
+	// ClientAuth/InsecureSkipVerify below, which genuinely differ by mode.
+	conf.SessionTicketsDisabled = true
 	switch mode {
 	case modeListen:
 		// Request a peer certificate but skip chain verification; the pin check
