@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/fxamacker/cbor/v2 v2.9.3
 	github.com/pelletier/go-toml/v2 v2.4.3
-	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/quic-go v0.62.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/goleak v1.3.0
 	golang.org/x/net v0.58.0
