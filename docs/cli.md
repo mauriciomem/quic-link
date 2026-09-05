@@ -57,8 +57,14 @@ what running without it costs you.
 | `1` | something else went wrong; the message on stderr says what |
 | `2` | bad usage (bad flags, missing or extra arguments, invalid values), or the daemon's socket path is occupied by something that does not answer like a daemon |
 | `3` | could not reach the agent, or the daemon is not running |
-| `4` | the pin did not match (authentication failure, either direction) |
+| `4` | the pin did not match (authentication failure, either direction), or the agent authenticated you but denied the destination |
 | `5` | the agent understood the request and refused it |
+
+`ssh` and `attach` exit with the child ssh process's own status once it actually runs; this
+table's codes apply only when quic-link's own logic (dial, auth, refusal) is what failed.
+
+A daemon or agent that misses its shutdown grace period, or gets a second termination signal, is
+force-exited with code `1`.
 
 ## A note on hidden verbs
 
