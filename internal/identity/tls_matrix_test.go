@@ -357,6 +357,23 @@ func resumptionAccept(t *testing.T, ln *quic.Listener) <-chan *quic.Conn {
 	return ch
 }
 
+// resumptionPutSignalCache wraps a ClientSessionCache and signals putc after
+// each Put. The ticket a server sends is delivered post-handshake and stored
+// by a different goroutine than the one Dial returns on, so a caller that
+// dials again immediately cannot assume the store has happened yet.
+type resumptionPutSignalCache struct {
+	tls.ClientSessionCache
+	putc chan struct{}
+}
+
+func (c *resumptionPutSignalCache) Put(sessionKey string, cs *tls.ClientSessionState) {
+	c.ClientSessionCache.Put(sessionKey, cs)
+	select {
+	case c.putc <- struct{}{}:
+	default:
+	}
+}
+
 // TestTLSResumption pairs the property this package actually needs with a
 // control that proves the property is checkable at all.
 //
@@ -463,7 +480,11 @@ func TestTLSResumption(t *testing.T) {
 		// the harness can observe resumption at all.
 		listenConf.SessionTicketsDisabled = false
 		dialConf.SessionTicketsDisabled = false
-		dialConf.ClientSessionCache = tls.NewLRUClientSessionCache(1)
+		putc := make(chan struct{}, 1)
+		dialConf.ClientSessionCache = &resumptionPutSignalCache{
+			ClientSessionCache: tls.NewLRUClientSessionCache(1),
+			putc:               putc,
+		}
 
 		serverUDP := resumptionLoopbackUDP(t)
 		serverTr := &quic.Transport{Conn: serverUDP}
@@ -482,6 +503,13 @@ func TestTLSResumption(t *testing.T) {
 		resumptionDial(t, dialTr, ln.Addr(), dialConf)
 		if srv1, ok := <-accepted1; ok {
 			t.Cleanup(func() { srv1.CloseWithError(0, "") })
+		}
+
+		select {
+		case <-putc:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no session ticket arrived within 5s: ClientSessionCache.Put " +
+				"was never called, so this harness cannot demonstrate resumption at all")
 		}
 
 		accepted2 := resumptionAccept(t, ln)
