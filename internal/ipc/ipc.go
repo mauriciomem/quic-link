@@ -175,8 +175,7 @@ func writeRequest(w io.Writer, req Request) error {
 }
 
 // readRequest decodes a Request from the next frame.
-// Unknown CBOR fields cause a decode error (strict mode), matching the
-// project-wide strict-decode discipline for IPC frames.
+// Unknown CBOR fields cause a decode error (strict mode).
 func readRequest(r io.Reader) (Request, error) {
 	payload, err := readFrame(r)
 	if err != nil {
