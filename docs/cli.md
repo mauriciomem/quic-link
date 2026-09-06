@@ -69,7 +69,9 @@ first Ctrl-C, which cancels the context and makes `exec.CommandContext` kill the
 reports the child's `ExitCode()` as `-1` rather than a signal-derived number, and quic-link
 passes that value through unchanged. The OS reports `os.Exit(-1)` as exit status `255`, so a
 signal-killed `ssh`/`attach` child surfaces as `255`, distinct from the normal-exit status
-passthrough described above.
+passthrough described above. Note that `ssh` itself also exits `255` on its own errors
+(connection failure, host-key rejection), so `255` does not by itself distinguish a
+signal-killed child from an ssh that failed to connect.
 
 Any quic-link process that misses its shutdown grace period (30s), or gets a second termination
 signal, is force-exited with code `1` — including `ssh` and `attach`, where this overrides the
