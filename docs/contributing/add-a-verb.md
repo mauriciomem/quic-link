@@ -127,11 +127,12 @@ still runs, it just does not appear in `--help`.
 Either way, `main.go`'s own doc comment is a maintainer-curated shortlist,
 not a table you should assume you're adding to: leave it alone unless your
 verb replaces, renames, or removes one of the entries already there, in
-which case update or delete that line. A non-hidden verb also gets a row
-in `docs/cli.md`'s table, in the same commit (step 7); a hidden one does
-not, by that page's own "A note on hidden verbs" convention.
-`cmd/quic-link/main_doc_verb_list_test.go` fails the build if a stale line
-slips through.
+which case update or delete that line —
+`cmd/quic-link/main_doc_verb_list_test.go` fails the test suite if a verb
+named there no longer exists. (`docs/cli.md`'s table is not covered by
+that test.) A non-hidden verb also gets a row in `docs/cli.md`'s table,
+in the same commit (step 7); a hidden one does not, by that page's own
+"A note on hidden verbs" convention.
 
 ## 5. If the verb has a machine-readable `--json` output, freeze it in `--help`
 
