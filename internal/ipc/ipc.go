@@ -202,9 +202,18 @@ func writeResponse(w io.Writer, resp Response) error {
 }
 
 // readResponse decodes a Response from the next frame. Unknown CBOR fields
-// are ignored: the response comes from the daemon this process already
-// connected to and peer-uid-verified, so lax decoding here only buys forward
-// compatibility, not risk.
+// are ignored. This is NOT a peer-uid-verified channel: dial() in client.go
+// is a bare net.Dial with no client-side peer-credential check. The actual
+// trust basis is the 0600 socket permission inside a 0700 directory (see
+// daemon.go, set immediately after binding) plus the single-instance
+// squatter probe (see probeSocket in daemoncmd.go), which refuses to reclaim
+// a socket that answers with a non-conforming reply instead of silently
+// trusting it. As with the server's own peer-cred check (see the comment on
+// handleConn in server.go), this is defense-in-depth on top of filesystem
+// permissions — it does NOT raise the security ceiling against a same-uid
+// adversary; that is the accepted single-operator boundary. Lax decoding
+// here only buys forward compatibility within that boundary, not protection
+// against an untrusted peer.
 func readResponse(r io.Reader) (Response, error) {
 	payload, err := readFrame(r)
 	if err != nil {
