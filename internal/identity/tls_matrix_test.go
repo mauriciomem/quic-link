@@ -435,10 +435,21 @@ func TestTLSResumption(t *testing.T) {
 		// dial. SessionTicketsDisabled is deliberately left exactly as
 		// pinningTLS set it — unlike the control subtest below, which
 		// clears it on both sides to force resumption as a sanity check
-		// that this harness can detect it at all. Leaving it alone here is
-		// what makes this subtest fail if the guard is ever removed: with
-		// the guard intact the server never issues a ticket, so putc never
-		// fires regardless of this cache being present.
+		// that this harness can detect it at all. What putc actually
+		// observes is the CLIENT's own guard: with dialConf's
+		// SessionTicketsDisabled left true, Go's TLS client never
+		// processes or stores an incoming session ticket regardless of
+		// whether the server sent one — this cannot distinguish "the
+		// server withheld a ticket" from "the server sent one but the
+		// client discarded it unprocessed." Today that distinction
+		// doesn't matter because pinningTLS sets SessionTicketsDisabled
+		// for both listen and dial from one shared, unconditional
+		// statement, so removing it drops the guard on both sides at
+		// once and this assertion still catches that. It would NOT, by
+		// itself, catch a future per-mode refactor that dropped the flag
+		// from only one side while leaving it set on the other: with
+		// either side still guarded, putc stays silent, so that removal
+		// would go undetected here.
 		putc := make(chan struct{}, 1)
 		dialConf.ClientSessionCache = &resumptionPutSignalCache{
 			ClientSessionCache: tls.NewLRUClientSessionCache(1),
@@ -470,22 +481,24 @@ func TestTLSResumption(t *testing.T) {
 		select {
 		case <-putc:
 			t.Fatal("ClientSessionCache.Put was called after the first " +
-				"handshake: the server sent a session ticket despite " +
-				"pinningTLS setting SessionTicketsDisabled, so the guard " +
-				"this subtest is named for is not in effect")
+				"handshake: the client processed and stored a session " +
+				"ticket despite pinningTLS setting SessionTicketsDisabled " +
+				"on both sides, so the guard this subtest is named for " +
+				"is not in effect")
 		case <-time.After(2 * time.Second):
-			// Expected path: SessionTicketsDisabled on the production
-			// config means the server never sends a post-handshake
-			// ticket, so "the guard held" can only be shown as an
-			// absence — nothing ever lands on putc. A channel that will
-			// never fire looks identical to one that just hasn't fired
-			// yet, so this needs a bounded, deterministic wait rather
-			// than an unbounded read. 2s is well over what a loopback
-			// QUIC handshake plus an (if it happened) immediate
-			// post-handshake ticket message needs — the control subtest
-			// below observes a real ticket arrive well inside its own 5s
-			// bound — while keeping this fixed cost, paid on every green
-			// run, small.
+			// Expected path: with dialConf's own SessionTicketsDisabled
+			// left true, the client never processes or stores a session
+			// ticket — regardless of whether the server actually sent
+			// one — so "the guard held" can only be shown as an absence
+			// on putc, not as proof the server withheld anything. A
+			// channel that will never fire looks identical to one that
+			// just hasn't fired yet, so this needs a bounded,
+			// deterministic wait rather than an unbounded read. 2s is
+			// well over what a loopback QUIC handshake plus an (if it
+			// happened) immediate post-handshake ticket message needs —
+			// the control subtest below observes a real ticket arrive
+			// well inside its own 5s bound — while keeping this fixed
+			// cost, paid on every green run, small.
 		}
 
 		accepted2 := resumptionAccept(t, ln)
