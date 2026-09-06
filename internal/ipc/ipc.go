@@ -98,6 +98,16 @@ var ErrOwnerRunning = errors.New("daemon owner already running")
 // exceeds maxFrameSize. The buffer is never allocated.
 var ErrFrameTooLarge = errors.New("ipc: frame too large")
 
+// ErrPeerUIDMismatch is returned by Client.dial when the socket peer's uid
+// (via peerUID) does not match the client's expected uid. This is distinct
+// from ErrDaemonAbsent (nothing answered) and ErrSchemaMismatch (a
+// conforming daemon speaking the wrong schema): here a live, schema-
+// conforming peer answered, but it is not the peer this client trusts. Like
+// the server-side check in handleConn, this does not raise the ceiling
+// against a same-uid adversary — it only catches a peer running as a
+// different uid than expected.
+var ErrPeerUIDMismatch = errors.New("ipc: peer uid mismatch")
+
 // ---- Frame types -------------------------------------------------------------
 
 // Request is the opening frame sent by the CLI on each socket connection.

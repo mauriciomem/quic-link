@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"os"
 	"strconv"
 	"syscall"
 	"time"
@@ -14,15 +15,42 @@ import (
 // fresh connection; the socket is connection-per-request (short-lived RPCs).
 type Client struct {
 	path string
+	uid  int // expected peer uid; checked at dial
 }
 
-// NewClient returns a Client that dials the unix socket at path.
+// ClientOpts carries optional tuning for the Client, mirroring ServerOpts on
+// the server side.
+type ClientOpts struct {
+	// UID is the expected peer uid for the peer-cred check performed in
+	// dial. 0 means "use the current process's effective uid", which is the
+	// correct default for the single-operator path. Tests can override this
+	// to simulate a peer running under a different uid.
+	UID int
+}
+
+// NewClient returns a Client that dials the unix socket at path, using the
+// default ClientOpts (peer uid expected to match the current process's).
 func NewClient(path string) *Client {
-	return &Client{path: path}
+	return NewClientWithOpts(path, ClientOpts{})
 }
 
-// dial opens a connection to the daemon socket. On ECONNREFUSED or a missing
-// socket file it returns ErrDaemonAbsent so the caller can print a remedy.
+// NewClientWithOpts returns a Client with custom tuning. Zero fields in opts
+// use defaults.
+func NewClientWithOpts(path string, opts ClientOpts) *Client {
+	uid := opts.UID
+	if uid == 0 {
+		uid = os.Getuid()
+	}
+	return &Client{path: path, uid: uid}
+}
+
+// dial opens a connection to the daemon socket and verifies the peer's uid
+// before returning it. On ECONNREFUSED or a missing socket file it returns
+// ErrDaemonAbsent so the caller can print a remedy. On a peer-cred check
+// failure or a uid mismatch it closes the freshly dialed conn and returns
+// ErrPeerUIDMismatch — this happens before any request is written, so a
+// wrong-uid peer's response is never trusted by any Client method, all of
+// which funnel through this single chokepoint.
 func (c *Client) dial() (net.Conn, error) {
 	conn, err := net.Dial("unix", c.path)
 	if err != nil {
@@ -31,6 +59,17 @@ func (c *Client) dial() (net.Conn, error) {
 		}
 		return nil, fmt.Errorf("ipc: dial %s: %w", c.path, err)
 	}
+
+	puid, err := peerUID(conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ipc: peer-cred check failed: %w", err)
+	}
+	if int(puid) != c.uid {
+		conn.Close()
+		return nil, fmt.Errorf("%w: peer uid %d, expected %d", ErrPeerUIDMismatch, puid, c.uid)
+	}
+
 	return conn, nil
 }
 
