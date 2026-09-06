@@ -64,6 +64,13 @@ what running without it costs you.
 table's codes apply only when quic-link's own logic (dial, auth, refusal) is what failed — see
 below for the one case that overrides even the child's status.
 
+If that child is killed by a signal instead of exiting normally — the ordinary result of a
+first Ctrl-C, which cancels the context and makes `exec.CommandContext` kill the child — Go
+reports the child's `ExitCode()` as `-1` rather than a signal-derived number, and quic-link
+passes that value through unchanged. The OS reports `os.Exit(-1)` as exit status `255`, so a
+signal-killed `ssh`/`attach` child surfaces as `255`, distinct from the normal-exit status
+passthrough described above.
+
 Any quic-link process that misses its shutdown grace period (30s), or gets a second termination
 signal, is force-exited with code `1` — including `ssh` and `attach`, where this overrides the
 child's status described above.
