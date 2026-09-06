@@ -175,7 +175,7 @@ func writeRequest(w io.Writer, req Request) error {
 }
 
 // readRequest decodes a Request from the next frame.
-// Unknown CBOR fields cause a decode error (strict mode).
+// Decode mode rejects unknown fields only (other cbor library defaults apply).
 func readRequest(r io.Reader) (Request, error) {
 	payload, err := readFrame(r)
 	if err != nil {
@@ -201,7 +201,10 @@ func writeResponse(w io.Writer, resp Response) error {
 	return writeFrame(w, payload)
 }
 
-// readResponse decodes a Response from the next frame.
+// readResponse decodes a Response from the next frame. Unknown CBOR fields
+// are ignored: the response comes from the daemon this process already
+// connected to and peer-uid-verified, so lax decoding here only buys forward
+// compatibility, not risk.
 func readResponse(r io.Reader) (Response, error) {
 	payload, err := readFrame(r)
 	if err != nil {
