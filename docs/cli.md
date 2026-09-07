@@ -56,15 +56,27 @@ what running without it costs you.
 | `0` | ok |
 | `1` | something else went wrong; the message on stderr says what |
 | `2` | bad usage (bad flags, missing or extra arguments, invalid values), or the daemon's socket path is occupied by something that does not answer like a daemon |
-| `3` | could not reach the agent, or the daemon is not running |
+| `3` | the agent could not be reached, or the daemon is not usable (not running, stale schema, another owner already holds the socket, or the requested docker endpoint is not ready) |
 | `4` | the pin did not match (authentication failure, either direction), or the agent authenticated you but denied the destination |
 | `5` | the agent understood the request and refused it |
 
 `ssh` and `attach` exit with the child ssh process's own status once it actually runs; this
-table's codes apply only when quic-link's own logic (dial, auth, refusal) is what failed.
+table's codes apply only when quic-link's own logic (dial, auth, refusal) is what failed — see
+below for the one case that overrides even the child's status.
 
-A daemon or agent that misses its shutdown grace period, or gets a second termination signal, is
-force-exited with code `1`.
+If that child is killed by a signal instead of exiting normally — the ordinary result of a
+first Ctrl-C, which cancels the context and makes `exec.CommandContext` kill the child — Go
+reports the child's `ExitCode()` as `-1` rather than a signal-derived number, and quic-link
+passes that value through unchanged. The OS reports `os.Exit(-1)` as exit status `255`, so a
+signal-killed `ssh`/`attach` child surfaces as `255`, distinct from the normal-exit status
+passthrough described above. Note that `ssh` itself also exits `255` on its own errors
+(connection failure, host-key rejection), and the remote command run over `ssh` may also exit
+`255` on its own — so `255` does not by itself distinguish a signal-killed child, an ssh that
+failed to connect, and a remote command that happened to exit `255`.
+
+Any quic-link process that misses its shutdown grace period (30s), or gets a second termination
+signal, is force-exited with code `1` — including `ssh` and `attach`, where this overrides the
+child's status described above.
 
 ## A note on hidden verbs
 

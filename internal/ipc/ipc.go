@@ -175,7 +175,7 @@ func writeRequest(w io.Writer, req Request) error {
 }
 
 // readRequest decodes a Request from the next frame.
-// Unknown CBOR fields cause a decode error (strict mode).
+// Decode mode rejects unknown fields only (other cbor library defaults apply).
 func readRequest(r io.Reader) (Request, error) {
 	payload, err := readFrame(r)
 	if err != nil {
@@ -201,7 +201,19 @@ func writeResponse(w io.Writer, resp Response) error {
 	return writeFrame(w, payload)
 }
 
-// readResponse decodes a Response from the next frame.
+// readResponse decodes a Response from the next frame. Unknown CBOR fields
+// are ignored. This is NOT a peer-uid-verified channel: dial() in client.go
+// is a bare net.Dial with no client-side peer-credential check, and there is
+// no per-connection probe on this path either. The actual trust basis is
+// filesystem-level: verifyOwnedDir (cmd/quic-link/socketpath.go) rejects a
+// symlinked or non-owned socket parent directory before the socket is ever
+// created, and the socket file itself is chmod'd to 0600 immediately after
+// binding (daemon.go:173). It does NOT raise the security ceiling against a
+// same-uid adversary — that is the accepted single-operator boundary, the
+// same framing as the server's own peer-cred check (see the comment on
+// handleConn in server.go). Lax decoding here only buys forward
+// compatibility within that boundary, not protection against an untrusted
+// peer.
 func readResponse(r io.Reader) (Response, error) {
 	payload, err := readFrame(r)
 	if err != nil {

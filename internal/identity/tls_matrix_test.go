@@ -281,7 +281,13 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 // Behaviors covered:
 //   - Two sequential handshakes against unmodified AgentListenTLS +
 //     AgentDialTLS output: the second does not resume, and the listener's
-//     VerifyPeerCertificate callback is invoked again on it.
+//     VerifyPeerCertificate callback is invoked again on it. A
+//     ClientSessionCache is attached to a test-only copy of the dial config
+//     (never on pinningTLS's own output) purely as an instrument: it turns
+//     "no ticket was ever stored" into a directly observable signal instead
+//     of an inference from DidResume alone, which makes this subtest
+//     sensitive to SessionTicketsDisabled being removed from pinningTLS.
+//     SessionTicketsDisabled itself is left exactly as pinningTLS set it.
 //   - The same two-handshake sequence, with SessionTicketsDisabled cleared
 //     on test-only copies of both configs and ClientSessionCache added to
 //     the dial copy (neither ever on pinningTLS's output), resumes on the
@@ -291,10 +297,9 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 //     the server issues a ticket, the dial copy controls whether the
 //     client can store one.
 //
-// This suite asserts the behavior (no resumption over a real handshake); it
-// cannot catch removal of SessionTicketsDisabled alone, because without a
-// ClientSessionCache resumption cannot occur either way. That field's value
-// is asserted directly in TestTLSMatrix_AllFourRows instead.
+// This suite asserts the behavior (no resumption over a real handshake).
+// SessionTicketsDisabled's value is also asserted directly, and
+// independently, in TestTLSMatrix_AllFourRows.
 
 // resumptionLoopbackUDP opens a UDP socket on loopback only, for one side of
 // a handshake pair below. Binding "127.0.0.1" specifically, rather than a
@@ -384,10 +389,17 @@ func (c *resumptionPutSignalCache) Put(sessionKey string, cs *tls.ClientSessionS
 // verification is deliberately skipped, so a handshake that resumed would
 // authenticate nobody on that connection. Two independent conditions keep
 // resumption from happening today: no ClientSessionCache is set anywhere in
-// the tree, and pinningTLS sets SessionTicketsDisabled. Either alone is
-// sufficient, which is why removing one does not make resumption occur. The
-// guard is what holds if a caller ever adds a cache. A failure here means
-// the guard was removed or bypassed.
+// pinningTLS's own output, and pinningTLS sets SessionTicketsDisabled.
+// Either alone is sufficient, which is why removing one does not make
+// resumption occur in production. The first condition is a structural fact
+// about the code (no production path ever assigns a ClientSessionCache)
+// that a test cannot meaningfully mutate, so the first subtest below
+// attaches its own
+// test-only ClientSessionCache to the dial config to make the second
+// condition — the one a code change actually can remove — independently
+// observable: guard held means the cache never receives a ticket; guard
+// gone means it does. A failure here means the guard was removed or
+// bypassed.
 //
 // A single assertion that resumption does not occur cannot tell "the
 // property holds" apart from "this harness cannot observe resumption at
@@ -417,6 +429,32 @@ func TestTLSResumption(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AgentDialTLS: %v", err)
 		}
+		// TEST-ONLY instrument, not a change to what pinningTLS produces:
+		// this cache exists so a stored ticket is directly observable via
+		// putc, rather than inferred solely from DidResume on a later
+		// dial. SessionTicketsDisabled is deliberately left exactly as
+		// pinningTLS set it — unlike the control subtest below, which
+		// clears it on both sides to force resumption as a sanity check
+		// that this harness can detect it at all. What putc actually
+		// observes is the CLIENT's own guard: with dialConf's
+		// SessionTicketsDisabled left true, Go's TLS client never
+		// processes or stores an incoming session ticket regardless of
+		// whether the server sent one — this cannot distinguish "the
+		// server withheld a ticket" from "the server sent one but the
+		// client discarded it unprocessed." Today that distinction
+		// doesn't matter because pinningTLS sets SessionTicketsDisabled
+		// for both listen and dial from one shared, unconditional
+		// statement, so removing it drops the guard on both sides at
+		// once and this assertion still catches that. It would NOT, by
+		// itself, catch a future per-mode refactor that dropped the flag
+		// from only one side while leaving it set on the other: with
+		// either side still guarded, putc stays silent, so that removal
+		// would go undetected here.
+		putc := make(chan struct{}, 1)
+		dialConf.ClientSessionCache = &resumptionPutSignalCache{
+			ClientSessionCache: tls.NewLRUClientSessionCache(1),
+			putc:               putc,
+		}
 
 		serverUDP := resumptionLoopbackUDP(t)
 		serverTr := &quic.Transport{Conn: serverUDP}
@@ -438,6 +476,29 @@ func TestTLSResumption(t *testing.T) {
 		}
 		if got := verifyCalls.Load(); got != 1 {
 			t.Fatalf("verifyCalls after first handshake = %d, want 1", got)
+		}
+
+		select {
+		case <-putc:
+			t.Fatal("ClientSessionCache.Put was called after the first " +
+				"handshake: the client processed and stored a session " +
+				"ticket despite pinningTLS setting SessionTicketsDisabled " +
+				"on both sides, so the guard this subtest is named for " +
+				"is not in effect")
+		case <-time.After(2 * time.Second):
+			// Expected path: with dialConf's own SessionTicketsDisabled
+			// left true, the client never processes or stores a session
+			// ticket — regardless of whether the server actually sent
+			// one — so "the guard held" can only be shown as an absence
+			// on putc, not as proof the server withheld anything. A
+			// channel that will never fire looks identical to one that
+			// just hasn't fired yet, so this needs a bounded,
+			// deterministic wait rather than an unbounded read. 2s is
+			// well over what a loopback QUIC handshake plus an (if it
+			// happened) immediate post-handshake ticket message needs —
+			// the control subtest below observes a real ticket arrive
+			// well inside its own 5s bound — while keeping this fixed
+			// cost, paid on every green run, small.
 		}
 
 		accepted2 := resumptionAccept(t, ln)

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,15 @@ func TestPingAllProbesFailed_WritesNothingToStdout(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("pingRun succeeded against an address nothing answers; want every probe to fail")
+	}
+	// Pin the error to aggregateProbeError's specific output, not just any
+	// non-nil error. Without this, an early bail out of pingRun (e.g. a
+	// broken keyFile, ping.go:206-209) returns before the probe loop is ever
+	// entered, and this test would still pass while silently testing a
+	// different code path than the one its name and doc comment claim.
+	const wantSubstr = "all 1 probes failed"
+	if !strings.Contains(err.Error(), wantSubstr) {
+		t.Fatalf("err = %q, want it to contain %q (the successful == 0 aggregate-failure path)", err.Error(), wantSubstr)
 	}
 	if stdout != "" {
 		t.Errorf("stdout = %q, want empty on the all-probes-failed path", stdout)
