@@ -70,8 +70,9 @@ reports the child's `ExitCode()` as `-1` rather than a signal-derived number, an
 passes that value through unchanged. The OS reports `os.Exit(-1)` as exit status `255`, so a
 signal-killed `ssh`/`attach` child surfaces as `255`, distinct from the normal-exit status
 passthrough described above. Note that `ssh` itself also exits `255` on its own errors
-(connection failure, host-key rejection), so `255` does not by itself distinguish a
-signal-killed child from an ssh that failed to connect.
+(connection failure, host-key rejection), and the remote command run over `ssh` may also exit
+`255` on its own — so `255` does not by itself distinguish a signal-killed child, an ssh that
+failed to connect, and a remote command that happened to exit `255`.
 
 Any quic-link process that misses its shutdown grace period (30s), or gets a second termination
 signal, is force-exited with code `1` — including `ssh` and `attach`, where this overrides the
