@@ -398,11 +398,13 @@ func (c *resumptionPutSignalCache) Put(sessionKey string, cs *tls.ClientSessionS
 // SessionTicketsDisabled alone is sufficient to recreate the bypass, so any
 // future change to that field is a security change on its own. The first
 // subtest below attaches a test-only ClientSessionCache to the dial config
-// anyway, precisely to emulate what a hostile client supplies by default,
-// to make the guard's effect — no ticket is ever stored, because the server
-// never sends one — independently observable: guard held means the cache
-// never receives a ticket; guard gone means it does. A failure here means
-// the guard was removed or bypassed.
+// purely as an instrument that makes a stored ticket directly observable.
+// It leaves SessionTicketsDisabled set on both sides, so cache silence
+// alone cannot distinguish server-side withholding from client-side
+// discarding. Because pinningTLS sets the flag in one shared statement,
+// removing that statement enables both ticket issuance and storage, which
+// this subtest detects. It does not independently test an unguarded client
+// against a guarded listener.
 //
 // A single assertion that resumption does not occur cannot tell "the
 // property holds" apart from "this harness cannot observe resumption at
