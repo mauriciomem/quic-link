@@ -387,19 +387,24 @@ func (c *resumptionPutSignalCache) Put(sessionKey string, cs *tls.ClientSessionS
 // handshake already verified instead of re-invoking the callback. That
 // callback is the only thing that authenticates a peer here, since chain
 // verification is deliberately skipped, so a handshake that resumed would
-// authenticate nobody on that connection. Two independent conditions keep
-// resumption from happening today: no ClientSessionCache is set anywhere in
-// pinningTLS's own output, and pinningTLS sets SessionTicketsDisabled.
-// Either alone is sufficient, which is why removing one does not make
-// resumption occur in production. The first condition is a structural fact
-// about the code (no production path ever assigns a ClientSessionCache)
-// that a test cannot meaningfully mutate, so the first subtest below
-// attaches its own
-// test-only ClientSessionCache to the dial config to make the second
-// condition — the one a code change actually can remove — independently
-// observable: guard held means the cache never receives a ticket; guard
-// gone means it does. A failure here means the guard was removed or
-// bypassed.
+// authenticate nobody on that connection. pinningTLS's
+// SessionTicketsDisabled is what actually prevents that: crypto/tls gates
+// ticket issuance on the server's own SessionTicketsDisabled alone, with no
+// dependency on anything the client presents, so it is load-bearing on its
+// own, not one of two interchangeable conditions. The absence of a
+// ClientSessionCache anywhere in pinningTLS's own output is a fact about our
+// own dial code only — it says nothing about a hostile peer, who authors
+// their own client and supplies their own cache. Removing
+// SessionTicketsDisabled alone is sufficient to recreate the bypass, so any
+// future change to that field is a security change on its own. The first
+// subtest below attaches a test-only ClientSessionCache to the dial config
+// purely as an instrument that makes a stored ticket directly observable.
+// It leaves SessionTicketsDisabled set on both sides, so cache silence
+// alone cannot distinguish server-side withholding from client-side
+// discarding. Because pinningTLS sets the flag in one shared statement,
+// removing that statement enables both ticket issuance and storage, which
+// this subtest detects. It does not independently test an unguarded client
+// against a guarded listener.
 //
 // A single assertion that resumption does not occur cannot tell "the
 // property holds" apart from "this harness cannot observe resumption at
