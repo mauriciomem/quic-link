@@ -39,6 +39,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,7 +56,12 @@ type connRecord struct {
 // connection, counts the bytes the client writes until the client closes its
 // end. It never replies. It lets a test observe, from the far end, both
 // whether a request frame was written and whether the client closed the conn.
-func startRecorderServer(t *testing.T) (sock string, records <-chan connRecord) {
+//
+// dropConns closes every connection the server has accepted so far. A client
+// blocked reading a reply that will never come is unblocked by it, so a test
+// that gives up on a hung call can still let that call's goroutine finish.
+// It is also run at cleanup.
+func startRecorderServer(t *testing.T) (sock string, records <-chan connRecord, dropConns func()) {
 	t.Helper()
 	sock = shortSocketPath(t)
 	ln, err := net.Listen("unix", sock)
@@ -63,12 +69,26 @@ func startRecorderServer(t *testing.T) (sock string, records <-chan connRecord) 
 		t.Fatalf("listen %s: %v", sock, err)
 	}
 	ch := make(chan connRecord, 4)
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	dropConns = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			c.Close()
+		}
+	}
 	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
 			go func(c net.Conn) {
 				defer c.Close()
 				n, rerr := io.Copy(io.Discard, c)
@@ -76,8 +96,35 @@ func startRecorderServer(t *testing.T) (sock string, records <-chan connRecord) 
 			}(conn)
 		}
 	}()
-	t.Cleanup(func() { ln.Close() })
-	return sock, ch
+	t.Cleanup(func() {
+		ln.Close()
+		dropConns()
+	})
+	return sock, ch, dropConns
+}
+
+// callBounded runs call and returns its error. The recorder never replies, so
+// a client that wrongly proceeds past dial() (accepting a peer it should have
+// refused) would block forever reading a response and only surface as a
+// package-wide go test timeout. Bounding the call turns that regression into a
+// prompt, clearly attributed failure. On timeout it drops the server-side
+// conns so the stuck call returns and its goroutine does not leak.
+func callBounded(t *testing.T, call func() error, dropConns func()) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(3 * time.Second):
+		dropConns()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("dial did not fail closed: client is blocked reading from a peer it should have refused")
+		return nil
+	}
 }
 
 // waitRecord returns the next connection record or fails the test if the far
@@ -109,7 +156,7 @@ var clientCalls = []struct {
 func TestClientDial_UnreadablePeerCredFailsClosed(t *testing.T) {
 	for _, tc := range clientCalls {
 		t.Run(tc.name, func(t *testing.T) {
-			sock, records := startRecorderServer(t)
+			sock, records, dropConns := startRecorderServer(t)
 
 			errInjected := errors.New("injected peer-cred read failure")
 			var dialed net.Conn
@@ -118,7 +165,8 @@ func TestClientDial_UnreadablePeerCredFailsClosed(t *testing.T) {
 				return 0, errInjected
 			})
 
-			err := tc.call(ipc.NewClient(sock))
+			c := ipc.NewClient(sock)
+			err := callBounded(t, func() error { return tc.call(c) }, dropConns)
 
 			if err == nil {
 				t.Fatal("expected an error when the peer's uid cannot be read, got nil")
@@ -157,7 +205,7 @@ func TestClientDial_UnreadablePeerCredFailsClosed(t *testing.T) {
 // the error is not a peer-uid mismatch. Without this, "zero bytes received"
 // above could be an artifact of the harness rather than of the fix.
 func TestClientDial_ReadablePeerCredStillWritesRequest(t *testing.T) {
-	sock, records := startRecorderServer(t)
+	sock, records, _ := startRecorderServer(t)
 	ipc.SetClientPeerUIDForTest(t, ipc.RealPeerUID)
 
 	// The recorder never replies, so Probe ends on its own short deadline and
@@ -179,10 +227,10 @@ func TestClientDial_ReadablePeerCredStillWritesRequest(t *testing.T) {
 func TestClientDial_WrongPeerUIDWritesNoRequest(t *testing.T) {
 	for _, tc := range clientCalls {
 		t.Run(tc.name, func(t *testing.T) {
-			sock, records := startRecorderServer(t)
+			sock, records, dropConns := startRecorderServer(t)
 
 			c := ipc.NewClientWithOpts(sock, ipc.ClientOpts{UID: os.Getuid() + 99999})
-			err := tc.call(c)
+			err := callBounded(t, func() error { return tc.call(c) }, dropConns)
 
 			if !errors.Is(err, ipc.ErrPeerUIDMismatch) {
 				t.Errorf("a peer with the wrong uid must satisfy errors.Is(err, ErrPeerUIDMismatch), got: %v", err)
