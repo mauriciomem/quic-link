@@ -11,7 +11,13 @@ import (
 )
 
 // exitCodeForError maps a fatal error to a process exit code.
-// 2: usage/validation failure (missing required flag, bad value, etc.)
+// 2: usage/validation failure (missing required flag, bad value, etc.);
+//
+//	also the daemon start-up squatter case: the socket path is occupied by
+//	something that does not answer like a daemon, or whose owner runs as a
+//	different uid or whose uid could not be verified (errSquatterType, from
+//	probeSocketForRole)
+//
 // 3: peer unreachable (UDP blocked, server not listening, handshake timeout);
 //
 //	also daemon-interaction failures (absent, stale schema, owner already running)
