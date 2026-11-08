@@ -65,7 +65,7 @@ cannot be determined, `status`, `docker-env`, `expose`, `vhosts`, and `vhosts rm
 refuse to use it and exit `1` with a "peer uid mismatch" error. `ssh` and `attach` skip
 the daemon and connect to the agent directly where they can, `fwd` warns and keeps
 listening but its forwarded connections fail, and `doctor` reports the daemon as not
-answering.
+running (and suggests starting it, which then fails with exit `2`).
 
 `ssh` and `attach` exit with the child ssh process's own status once it actually runs; this
 table's codes apply only when quic-link's own logic (dial, auth, refusal) is what failed — see
