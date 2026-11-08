@@ -12,11 +12,11 @@
  *       garbled squatter      -> (false, *errSquatterType)      [exit 2]
  *   - The role is threaded into the returned error's text:
  *       probeSocketForRole(sock, "agent") error text contains "agent" and,
- *       for the owner case, does NOT contain "daemon" (the hardcoded label
- *       "daemon owner already running" must become role-derived).
- *   - The squatter message hardcodes no "daemon" label today, so for a
- *     non-daemon role E4 must ADD a role label (contains "agent"); the
- *     "daemon" / "" role text must stay byte-identical to today's.
+ *       for the owner case, does NOT contain "daemon" (the "daemon owner
+ *       already running" label is derived from the role).
+ *   - The squatter message carries no "daemon" label, so a non-daemon role
+ *     adds a role label (contains "agent"); the "daemon" / "" role text has
+ *     no label.
  *   - probeSocketForRole(sock, "daemon") returns the byte-identical error text
  *     that probeSocket(sock) returns for the same socket (wrapper equivalence).
  *   - Exit-code mapping (exitCodeForError) is role-independent: owner -> 3,
@@ -26,9 +26,8 @@
  *   - Existing tests that build &errOwnerRunningType{sock: x} /
  *     &errSquatterType{sock: x, reason: y} without a role must keep compiling
  *     and keep producing today's exact text (zero-value role == "daemon").
- *   - This file fails to COMPILE against current daemoncmd.go (undefined:
- *     probeSocketForRole); that compile failure IS the red state. Do NOT stub
- *     probeSocketForRole to ignore its role argument just to make this build.
+ *   - The role argument must be honored: a probeSocketForRole that ignores
+ *     it would fail the agent-label assertions.
  * @see ./daemoncmd.go (probeSocket, errOwnerRunningType, errSquatterType)
  * @see ./single_instance_test.go (startTestDaemon and the three probeSocket outcome tests)
  */

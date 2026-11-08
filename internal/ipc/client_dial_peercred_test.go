@@ -19,27 +19,18 @@
  *     test asserts errors.Is(err, ErrPeerUIDMismatch) and that errors.Is is
  *     false for both existing sentinels.
  * @edge-cases
- *   - Same-uid squatter (plan 06 Finding E9-F1 / Finding 1 B3/B4): a same-uid
- *     process listening on the socket path passes every directory-permission
- *     check and this uid check too — this fix does NOT raise the ceiling against
- *     that adversary (documented as an accepted boundary on the server side via
- *     peerUID's own doc comment). This test only proves the DIFFERENT-uid case
- *     is now rejected, which is what closes the "no verification of the far end
- *     at all" gap Finding 1 describes as a precondition for agent.sock.
- *   - This file intentionally fails to COMPILE against current
- *     internal/ipc/client.go, not merely fails at runtime: dial() has no hook
- *     today to be told "expect a uid other than the real one" (unlike the
- *     server side, which already has ServerOpts.UID). Introducing
- *     ClientOpts/NewClientWithOpts is itself part of the E2 fix, so
- *     TestClientDial_WrongPeerUIDRejected necessarily references API that does
- *     not exist until E2 lands. Do NOT stub ClientOpts as a no-op just to make
- *     this file build early — that would make the wrong-uid subtest pass
- *     vacuously instead of failing honestly. RED for this step IS the compiler
- *     error; GREEN is this file building and both subtests passing after E2.
+ *   - Same-uid squatter: a same-uid process listening on the socket path
+ *     passes every directory-permission check and this uid check too — the
+ *     check does NOT raise the ceiling against that adversary (an accepted
+ *     boundary, also documented on the server side in peerUID's doc comment).
+ *     This test only proves the DIFFERENT-uid case is rejected.
+ *   - The expected uid is injectable through ClientOpts/NewClientWithOpts
+ *     (mirroring the server side's ServerOpts.UID); that is how the wrong-uid
+ *     test simulates a peer running as another uid without forking one.
  * @see ./server_hardening_test.go (TestPeerCred_SameUidPasses / TestPeerCred_WrongUidRejected —
  *      the server-side precedent this file mirrors from the client's side of the dial)
  * @see ./server.go (ServerOpts/NewServerWithOpts — the pattern ClientOpts/NewClientWithOpts mirrors)
- * @see ./peercred_linux.go (peerUID — reused in the reverse direction by E2's fix)
+ * @see ./peercred_linux.go (peerUID — the client reuses it to read the far end's uid)
  */
 package ipc_test
 
@@ -53,10 +44,8 @@ import (
 
 // TestClientDial_SameUIDStillSucceeds is a regression guard for the default,
 // single-operator path: a client with no uid override dialing a server
-// running as the same uid must keep working exactly as it does today. This
-// must pass both before and after E2 — it is what proves the fix does not
-// regress the common case. It uses only API that already exists (NewClient,
-// startHardenedServer, ServerOpts{}) so it compiles and passes right now.
+// running as the same uid must keep working. It proves the peer-uid check
+// does not regress the common case.
 func TestClientDial_SameUIDStillSucceeds(t *testing.T) {
 	sock := startHardenedServer(t,
 		&stubStatus{data: []byte(`{"schema":1}`)},
@@ -70,8 +59,8 @@ func TestClientDial_SameUIDStillSucceeds(t *testing.T) {
 	}
 }
 
-// TestClientDial_WrongPeerUIDRejected proves Client.dial() does not currently
-// verify the peer's uid: it starts a real, conforming server — answering
+// TestClientDial_WrongPeerUIDRejected proves Client.dial() verifies the
+// peer's uid: it starts a real, conforming server — answering
 // correctly, running as the actual current test-process uid, a legitimate
 // listener rather than a squatter — and dials it with a client configured to
 // expect a deliberately wrong uid. This mirrors
@@ -79,11 +68,8 @@ func TestClientDial_SameUIDStillSucceeds(t *testing.T) {
 // that cannot legitimately be the peer) rather than forking a real
 // different-uid process.
 //
-// This subtest references the not-yet-existing ipc.NewClientWithOpts /
-// ipc.ClientOpts, so the whole file fails to compile against current
-// internal/ipc/client.go. That compile failure IS this step's RED state —
-// see the @spec-handoff block above and e1-client-peercred-failing-test.md's
-// Notes section for why a signature-introducing addition takes this shape.
+// The wrong expectation is injected through ipc.ClientOpts (see the
+// @spec-handoff block above).
 func TestClientDial_WrongPeerUIDRejected(t *testing.T) {
 	myUID := os.Getuid()
 	wrongUID := myUID + 99999

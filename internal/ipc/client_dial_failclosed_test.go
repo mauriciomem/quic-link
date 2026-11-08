@@ -7,7 +7,7 @@
  *   // The server's handleConn keeps calling peerUID directly; the seam is
  *   // client-only so a test can fail the client's read without breaking the
  *   // in-process server's own check.
- *   // internal/ipc/export_test.go (already provided with these tests):
+ *   // internal/ipc/export_test.go:
  *   //   var RealPeerUID = peerUID
  *   //   func SetClientPeerUIDForTest(t testing.TB, fn func(net.Conn) (uint32, error))
  *   //   — swaps clientPeerUID, restores it in t.Cleanup.
