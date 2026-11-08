@@ -35,12 +35,13 @@ package main
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 )
 
 // roleTestSockPath returns a short, unique unix socket path (macOS sun_path
@@ -56,6 +57,74 @@ func roleTestSockPath(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return filepath.Join(dir, "s.sock")
+}
+
+// startGarbledSquatter makes sock look like it is held by a process that is not
+// a quic-link daemon: it accepts connections, immediately writes a line of
+// non-protocol bytes, then keeps reading (and discarding) until the client
+// hangs up or the test ends.
+//
+// The connection must stay open on purpose. If the squatter wrote and closed at
+// once, the outcome of a probe would depend on scheduling: the client's request
+// write could hit the already-closed peer ("probe write: broken pipe") or land
+// in the socket buffer and be followed by a read of the garbage ("probe read:
+// unexpected frame version 0x4e"). Two consecutive probes of the same socket
+// could then report different error texts. Holding the connection open makes
+// the write always succeed, so every probe fails on the read side with the same
+// frame-version error.
+//
+// The listener, every accepted connection and all handler goroutines are torn
+// down by t.Cleanup. Listening happens before this returns, so the kernel
+// queues connects made right away; no startup sleep is needed.
+func startGarbledSquatter(t *testing.T, sock string) {
+	t.Helper()
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("squatter listen: %v", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		conns  []net.Conn
+		closed bool
+		wg     sync.WaitGroup
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			if closed {
+				mu.Unlock()
+				conn.Close()
+				return
+			}
+			conns = append(conns, conn)
+			wg.Add(1)
+			mu.Unlock()
+			go func(c net.Conn) {
+				defer wg.Done()
+				defer c.Close()
+				_, _ = c.Write([]byte("NOT A QUIC-LINK DAEMON\n"))
+				_, _ = io.Copy(io.Discard, c) // returns on client close or cleanup
+			}(conn)
+		}
+	}()
+
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		closed = true
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
 }
 
 // TestProbeSocketForRole_ThreadsRoleThroughClassification proves the role
@@ -126,24 +195,7 @@ func TestProbeSocketForRole_ThreadsRoleThroughClassification(t *testing.T) {
 	t.Run("squatter: agent role labels the error, daemon role matches probeSocket", func(t *testing.T) {
 		sock := roleTestSockPath(t)
 
-		ln, err := net.Listen("unix", sock)
-		if err != nil {
-			t.Fatalf("squatter listen: %v", err)
-		}
-		t.Cleanup(func() { ln.Close() })
-		go func() {
-			for {
-				conn, err := ln.Accept()
-				if err != nil {
-					return
-				}
-				go func(c net.Conn) {
-					defer c.Close()
-					c.Write([]byte("NOT A QUIC-LINK DAEMON\n"))
-				}(conn)
-			}
-		}()
-		time.Sleep(20 * time.Millisecond) // let the squatter start accepting
+		startGarbledSquatter(t, sock)
 
 		canReclaim, agentErr := probeSocketForRole(sock, "agent")
 		if canReclaim {

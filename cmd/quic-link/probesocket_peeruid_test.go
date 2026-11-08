@@ -37,7 +37,6 @@ package main
 
 import (
 	"errors"
-	"net"
 	"os"
 	"strings"
 	"testing"
@@ -127,24 +126,7 @@ func TestProbeSocket_CrossUIDOwnerIsSquatterAndNotReclaimed(t *testing.T) {
 func TestProbeSocketForRole_GarbledSquatterReasonUnchanged(t *testing.T) {
 	sock := roleTestSockPath(t)
 
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("squatter listen: %v", err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				c.Write([]byte("NOT A QUIC-LINK DAEMON\n"))
-			}(conn)
-		}
-	}()
-	time.Sleep(20 * time.Millisecond) // let the squatter start accepting
+	startGarbledSquatter(t, sock)
 
 	for _, role := range []string{"", "daemon", "agent"} {
 		canReclaim, perr := probeSocketForRole(sock, role)
