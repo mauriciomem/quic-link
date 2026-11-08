@@ -80,7 +80,8 @@ var newProbeClient = func(sock string) *ipc.Client { return ipc.NewClient(sock) 
 //  1. Conforming response from a live owner → ErrOwnerRunning (→ exit 3).
 //  2. Clean ECONNREFUSED / ENOENT (no listener, stale file) → canReclaim=true.
 //  3. Socket responds but with garbage / non-conforming data, or its owner
-//     runs as a different uid → ErrSquatter (→ exit 2).
+//     runs as a different uid or its uid could not be verified →
+//     ErrSquatter (→ exit 2).
 //
 // The probe is self-bounding: ipc.Client.Probe sets singleInstanceProbeTimeout
 // as a connection deadline, so this function always returns within that bound
@@ -117,7 +118,7 @@ func probeSocketForRole(sock, role string) (canReclaim bool, err error) {
 		return false, &errSquatterType{
 			sock:   sock,
 			role:   role,
-			reason: fmt.Sprintf("owner runs as a different uid: %v", probeErr),
+			reason: fmt.Sprintf("owner runs as a different uid or its uid could not be verified: %v", probeErr),
 		}
 	}
 	// Any other error (deadline exceeded, garbled bytes, unexpected close) is
