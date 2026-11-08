@@ -55,10 +55,17 @@ what running without it costs you.
 |---|---|
 | `0` | ok |
 | `1` | something else went wrong; the message on stderr says what |
-| `2` | bad usage (bad flags, missing or extra arguments, invalid values), or the daemon's socket path is occupied by something that does not answer like a daemon |
+| `2` | bad usage (bad flags, missing or extra arguments, invalid values), or the daemon's socket path is occupied by something that does not answer like a daemon, or whose owner runs as a different user (or whose user could not be verified); `daemon` reports both socket cases at start-up |
 | `3` | the agent could not be reached, or the daemon is not usable (not running, stale schema, another owner already holds the socket, or the requested docker endpoint is not ready) |
 | `4` | the pin did not match (authentication failure, either direction), or the agent authenticated you but denied the destination |
 | `5` | the agent understood the request and refused it |
+
+If the process listening on the daemon socket runs as a different user, or its user
+cannot be determined, `status`, `docker-env`, `expose`, `vhosts`, and `vhosts rm`
+refuse to use it and exit `1` with a "peer uid mismatch" error. `ssh` and `attach` skip
+the daemon and connect to the agent directly where they can, `fwd` warns and keeps
+listening but its forwarded connections fail, and `doctor` reports the daemon as not
+answering.
 
 `ssh` and `attach` exit with the child ssh process's own status once it actually runs; this
 table's codes apply only when quic-link's own logic (dial, auth, refusal) is what failed — see

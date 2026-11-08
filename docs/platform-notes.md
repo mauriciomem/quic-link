@@ -70,3 +70,17 @@ timeout: no recent network activity
 If you want to confirm this is actually the cause before digging further, running
 the same command under `sudo` bypasses the check; if that suddenly works, this is
 the reason.
+
+## Local daemon socket: peer user check
+
+The daemon's control socket is protected by directory and file permissions, plus a
+check of which user runs the process on the other end of the connection. The daemon
+refuses connections from a different user, and the CLI does the same in the other
+direction: it checks the daemon's user before sending anything to it. Both sides read
+the user with `SO_PEERCRED` on Linux and `LOCAL_PEERCRED` on macOS and FreeBSD.
+
+On any other platform neither side can read the peer's user, so the daemon refuses
+every connection and the CLI refuses to use the socket as well.
+
+This is defence in depth on top of the socket permissions. It does not separate
+processes that run as the same user.
