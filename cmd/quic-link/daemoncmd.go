@@ -71,11 +71,16 @@ func (e *errSquatterType) Error() string {
 		label, e.sock, e.reason)
 }
 
+// newProbeClient builds the client probeSocketForRole uses. It is a variable
+// so tests can substitute a client that expects a different peer uid.
+var newProbeClient = func(sock string) *ipc.Client { return ipc.NewClient(sock) }
+
 // probeSocket implements the three-outcome single-instance check:
 //
 //  1. Conforming response from a live owner → ErrOwnerRunning (→ exit 3).
 //  2. Clean ECONNREFUSED / ENOENT (no listener, stale file) → canReclaim=true.
-//  3. Socket responds but with garbage / non-conforming data → ErrSquatter (→ exit 2).
+//  3. Socket responds but with garbage / non-conforming data, or its owner
+//     runs as a different uid → ErrSquatter (→ exit 2).
 //
 // The probe is self-bounding: ipc.Client.Probe sets singleInstanceProbeTimeout
 // as a connection deadline, so this function always returns within that bound
@@ -89,7 +94,7 @@ func probeSocket(sock string) (canReclaim bool, err error) {
 // role only labels the returned errors; classification and exit codes (owner →
 // 3, squatter → 2) do not depend on it.
 func probeSocketForRole(sock, role string) (canReclaim bool, err error) {
-	c := ipc.NewClient(sock)
+	c := newProbeClient(sock)
 	probeErr := c.Probe(singleInstanceProbeTimeout)
 
 	if probeErr == nil {
@@ -105,6 +110,15 @@ func probeSocketForRole(sock, role string) (canReclaim bool, err error) {
 		// ECONNREFUSED (no listener) or ENOENT (socket file absent):
 		// the socket is stale. Reclaim allowed.
 		return true, nil
+	}
+	if errors.Is(probeErr, ipc.ErrPeerUIDMismatch) {
+		// Something is listening, but its uid differs from ours or could not
+		// be read. Not ours to reclaim, and not a conforming same-uid owner.
+		return false, &errSquatterType{
+			sock:   sock,
+			role:   role,
+			reason: fmt.Sprintf("owner runs as a different uid: %v", probeErr),
+		}
 	}
 	// Any other error (deadline exceeded, garbled bytes, unexpected close) is
 	// treated as an occupied socket that we should not reclaim.
