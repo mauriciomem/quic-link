@@ -99,13 +99,14 @@ var ErrOwnerRunning = errors.New("daemon owner already running")
 var ErrFrameTooLarge = errors.New("ipc: frame too large")
 
 // ErrPeerUIDMismatch is returned by Client.dial when the socket peer's uid
-// (via peerUID) does not match the client's expected uid. This is distinct
-// from ErrDaemonAbsent (nothing answered) and ErrSchemaMismatch (a
-// conforming daemon speaking the wrong schema): here a live, schema-
-// conforming peer answered, but it is not the peer this client trusts. Like
-// the server-side check in handleConn, this does not raise the ceiling
-// against a same-uid adversary — it only catches a peer running as a
-// different uid than expected.
+// (via peerUID) does not match the client's expected uid, and also when the
+// peer's uid cannot be read (the read error is wrapped alongside it). The
+// client then trusts neither the peer nor anything it might send. This is
+// distinct from ErrDaemonAbsent (nothing answered) and ErrSchemaMismatch (a
+// conforming daemon speaking the wrong schema). Like the server-side check in
+// handleConn, this does not raise the ceiling against a same-uid adversary —
+// it only catches a peer running as a different uid than expected, or one
+// whose uid cannot be verified.
 var ErrPeerUIDMismatch = errors.New("ipc: peer uid mismatch")
 
 // ---- Frame types -------------------------------------------------------------
@@ -212,16 +213,14 @@ func writeResponse(w io.Writer, resp Response) error {
 }
 
 // readResponse decodes a Response from the next frame. Unknown CBOR fields
-// are ignored. This is NOT a peer-uid-verified channel: dial() in client.go
-// is a bare net.Dial with no client-side peer-credential check, and there is
-// no per-connection probe on this path either. The actual trust basis is
-// filesystem-level: verifyOwnedDir (cmd/quic-link/socketpath.go) rejects a
-// symlinked or non-owned socket parent directory before the socket is ever
-// created, and the socket file itself is chmod'd to 0600 immediately after
-// binding (daemon.go:173). It does NOT raise the security ceiling against a
-// same-uid adversary — that is the accepted single-operator boundary, the
-// same framing as the server's own peer-cred check (see the comment on
-// handleConn in server.go). Lax decoding here only buys forward
+// are ignored. Client methods obtain their conn from dial() in client.go,
+// which reads the listening peer's uid via peerUID before any frame is
+// written or read, and rejects a peer whose uid differs from the expected one,
+// or whose uid cannot be read, with ErrPeerUIDMismatch. That check does not
+// distinguish a same-uid peer, so it does NOT raise the security ceiling
+// against a same-uid adversary — that is the accepted single-operator
+// boundary, the same framing as the server's own peer-cred check (see the
+// comment on handleConn in server.go). Lax decoding here only buys forward
 // compatibility within that boundary, not protection against an untrusted
 // peer.
 func readResponse(r io.Reader) (Response, error) {

@@ -28,6 +28,11 @@ type ClientOpts struct {
 	UID int
 }
 
+// clientPeerUID reads the uid of the process at the far end of a dialed conn.
+// It is a variable so tests can make the read fail; only Client.dial uses it,
+// the server's own check calls peerUID directly.
+var clientPeerUID = peerUID
+
 // NewClient returns a Client that dials the unix socket at path, using the
 // default ClientOpts (peer uid expected to match the current process's).
 func NewClient(path string) *Client {
@@ -46,11 +51,12 @@ func NewClientWithOpts(path string, opts ClientOpts) *Client {
 
 // dial opens a connection to the daemon socket and verifies the peer's uid
 // before returning it. On ECONNREFUSED or a missing socket file it returns
-// ErrDaemonAbsent so the caller can print a remedy. On a peer-cred check
-// failure or a uid mismatch it closes the freshly dialed conn and returns
-// ErrPeerUIDMismatch — this happens before any request is written, so a
-// wrong-uid peer's response is never trusted by any Client method, all of
-// which funnel through this single chokepoint.
+// ErrDaemonAbsent so the caller can print a remedy. A peer whose uid differs
+// from the expected one, and a peer whose uid cannot be read, both yield an
+// error satisfying errors.Is(err, ErrPeerUIDMismatch); in either case dial
+// closes the freshly dialed conn and writes nothing to it, so no Client
+// method (all of which funnel through this chokepoint) sends a request to, or
+// trusts a response from, a peer it could not verify.
 func (c *Client) dial() (net.Conn, error) {
 	conn, err := net.Dial("unix", c.path)
 	if err != nil {
@@ -60,10 +66,10 @@ func (c *Client) dial() (net.Conn, error) {
 		return nil, fmt.Errorf("ipc: dial %s: %w", c.path, err)
 	}
 
-	puid, err := peerUID(conn)
+	puid, err := clientPeerUID(conn)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("ipc: peer-cred check failed: %w", err)
+		return nil, fmt.Errorf("%w: peer-cred check failed: %w", ErrPeerUIDMismatch, err)
 	}
 	if int(puid) != c.uid {
 		conn.Close()
