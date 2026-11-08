@@ -15,9 +15,9 @@
  *   - That error must be distinguishable from ErrDaemonAbsent and
  *     ErrSchemaMismatch (a live, conforming daemon speaking the right schema is
  *     neither "absent" nor "schema-mismatched" — it is a wrong peer). Whether
- *     this is a new sentinel or a typed error is left to E2 (the fix step); this
- *     test only asserts the negative (errors.Is is false for both existing
- *     sentinels), not the new error's identity.
+ *     this is a new sentinel or a typed error is an implementation choice; this
+ *     test asserts errors.Is(err, ErrPeerUIDMismatch) and that errors.Is is
+ *     false for both existing sentinels.
  * @edge-cases
  *   - Same-uid squatter (plan 06 Finding E9-F1 / Finding 1 B3/B4): a same-uid
  *     process listening on the socket path passes every directory-permission
@@ -101,6 +101,9 @@ func TestClientDial_WrongPeerUIDRejected(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected an error when the peer's uid does not match the client's expected uid, got nil")
+	}
+	if !errors.Is(err, ipc.ErrPeerUIDMismatch) {
+		t.Errorf("peer-uid mismatch must satisfy errors.Is(err, ErrPeerUIDMismatch), got: %v", err)
 	}
 	if errors.Is(err, ipc.ErrDaemonAbsent) {
 		t.Errorf("peer-uid mismatch against a live daemon must not be reported as ErrDaemonAbsent, got: %v", err)
