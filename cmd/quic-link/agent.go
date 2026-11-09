@@ -324,7 +324,7 @@ func agentRun(ctx context.Context, ag config.Agent, keyFile string, authorized p
 	}
 	defer udpConn.Close()
 
-	t, err := transport.NewQUICTransport(udpConn, tlsConf, nil)
+	t, err := agentListenTransport(udpConn, tlsConf)
 	if err != nil {
 		return fmt.Errorf("transport: %w", err)
 	}
@@ -363,6 +363,23 @@ func agentServeOpts(ag config.Agent, idCfg config.Identity, ownPin string, start
 	}
 }
 
+// agentListenTransport builds the QUIC transport for the agent's forward-mode
+// listening socket.
+//
+// It is split out of agentRun so that the transport the agent actually listens
+// with can be dialled and inspected by a test without going through the cobra,
+// configuration and key-loading path, for the same reason as agentServeOpts.
+// This is the socket that accepts connections from anywhere, so it validates
+// source addresses on purpose: a peer is sent a QUIC Retry and must echo it back
+// from the address it claims before the listener allocates any per-connection
+// state for it. That costs a legitimate peer one extra round trip on every new
+// connection (no client in this binary keeps a QUIC token store, so none can
+// skip the Retry), and in exchange a flood of forged source addresses cannot
+// make the agent hold handshake state for each one.
+func agentListenTransport(conn net.PacketConn, tlsConf *tls.Config) (*transport.QUICTransport, error) {
+	return transport.NewQUICListenTransport(conn, tlsConf, nil)
+}
+
 // agentDialOut runs the agent against a client that waits rather than connects.
 // The route table and everything below it are unchanged; what is different is
 // that this side opens the connection, and so is the side responsible for
@@ -392,6 +409,9 @@ func agentDialOut(
 	}
 	defer udpConn.Close()
 
+	// Source-address validation does not apply here: this transport only dials
+	// and never calls Listen, and that setting only takes effect on a listening
+	// transport.
 	t, err := transport.NewQUICTransport(udpConn, tlsConf, nil)
 	if err != nil {
 		return fmt.Errorf("transport: %w", err)
