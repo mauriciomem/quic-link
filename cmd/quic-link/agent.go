@@ -369,10 +369,14 @@ func agentServeOpts(ag config.Agent, idCfg config.Identity, ownPin string, start
 // It is split out of agentRun so that the transport the agent actually listens
 // with can be dialled and inspected by a test without going through the cobra,
 // configuration and key-loading path, for the same reason as agentServeOpts.
-// This is the socket that accepts connections from anywhere, so it is where
-// QUIC source-address validation matters.
+// This is the socket that accepts connections from anywhere, so it validates
+// source addresses on purpose: a peer is sent a QUIC Retry and must echo it back
+// from the address it claims before the listener allocates any per-connection
+// state for it. That costs a legitimate peer one extra round trip on its first
+// connect, and in exchange a flood of forged source addresses cannot make the
+// agent hold handshake state for each one.
 func agentListenTransport(conn net.PacketConn, tlsConf *tls.Config) (*transport.QUICTransport, error) {
-	return transport.NewQUICTransport(conn, tlsConf, nil)
+	return transport.NewQUICListenTransport(conn, tlsConf, nil)
 }
 
 // agentDialOut runs the agent against a client that waits rather than connects.
