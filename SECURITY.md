@@ -84,7 +84,8 @@ but the behaviours themselves are recorded and deliberate.
 
 - Anything requiring an attacker to already run code as the operator's own user.
   A same-uid process can read the identity key directly; the socket permissions
-  and peer-credential check are defence in depth against a misconfiguration, not
+  and peer-credential check (the CLI also verifies the daemon's uid before sending
+  anything) are defence in depth against a misconfiguration, not
   a boundary against that.
 - Denial of service against a peer you are authenticated to.
 - Vulnerabilities in dependencies with no reachable call path from this code.

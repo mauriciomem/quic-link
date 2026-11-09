@@ -27,16 +27,25 @@ import (
 // treat the socket as a squatter (outcome 3 — refuse, exit 2), not as absent.
 const singleInstanceProbeTimeout = 2 * time.Second
 
+// defaultProbeRole is the role probeSocket probes for: the daemon's own socket.
+const defaultProbeRole = "daemon"
+
 // errOwnerRunningType is returned when a conforming owner is already answering
 // the socket. It maps to exit 3.
 type errOwnerRunningType struct {
 	sock string
+	// role names the socket's owner in the message; "" means defaultProbeRole.
+	role string
 }
 
 func (e *errOwnerRunningType) Error() string {
-	return fmt.Sprintf("daemon owner already running (socket: %s); "+
+	role := e.role
+	if role == "" {
+		role = defaultProbeRole
+	}
+	return fmt.Sprintf("%s owner already running (socket: %s); "+
 		"use 'quic-link status' to check the fleet, or stop the running owner first",
-		e.sock)
+		role, e.sock)
 }
 
 // errSquatterType is returned when something is connected to the socket but
@@ -47,45 +56,76 @@ func (e *errOwnerRunningType) Error() string {
 type errSquatterType struct {
 	sock   string
 	reason string
+	// role names the socket's expected owner; "" means defaultProbeRole. The
+	// default role adds no label so its message stays as it has always been.
+	role string
 }
 
 func (e *errSquatterType) Error() string {
-	return fmt.Sprintf("socket %s is occupied by an unrecognized process (%s); "+
+	label := ""
+	if e.role != "" && e.role != defaultProbeRole {
+		label = e.role + " "
+	}
+	return fmt.Sprintf("%ssocket %s is occupied by an unrecognized process (%s); "+
 		"will not reclaim — investigate or remove it manually",
-		e.sock, e.reason)
+		label, e.sock, e.reason)
 }
+
+// newProbeClient builds the client probeSocketForRole uses. It is a variable
+// so tests can substitute a client that expects a different peer uid.
+var newProbeClient = func(sock string) *ipc.Client { return ipc.NewClient(sock) }
 
 // probeSocket implements the three-outcome single-instance check:
 //
 //  1. Conforming response from a live owner → ErrOwnerRunning (→ exit 3).
 //  2. Clean ECONNREFUSED / ENOENT (no listener, stale file) → canReclaim=true.
-//  3. Socket responds but with garbage / non-conforming data → ErrSquatter (→ exit 2).
+//  3. Socket responds but with garbage / non-conforming data, or its owner
+//     runs as a different uid or its uid could not be verified →
+//     ErrSquatter (→ exit 2).
 //
 // The probe is self-bounding: ipc.Client.Probe sets singleInstanceProbeTimeout
 // as a connection deadline, so this function always returns within that bound
 // with no background goroutine left behind.
 func probeSocket(sock string) (canReclaim bool, err error) {
-	c := ipc.NewClient(sock)
+	return probeSocketForRole(sock, defaultProbeRole)
+}
+
+// probeSocketForRole is probeSocket parameterized by the role that owns the
+// socket, so other sockets can reuse the same three-outcome discipline. The
+// role only labels the returned errors; classification and exit codes (owner →
+// 3, squatter → 2) do not depend on it.
+func probeSocketForRole(sock, role string) (canReclaim bool, err error) {
+	c := newProbeClient(sock)
 	probeErr := c.Probe(singleInstanceProbeTimeout)
 
 	if probeErr == nil {
 		// A conforming owner answered — live owner, outcome 1.
-		return false, &errOwnerRunningType{sock: sock}
+		return false, &errOwnerRunningType{sock: sock, role: role}
 	}
 	if errors.Is(probeErr, ipc.ErrSchemaMismatch) {
 		// An owner is running but with a different socket schema. Still a
 		// live owner from our perspective — do not reclaim.
-		return false, &errOwnerRunningType{sock: sock}
+		return false, &errOwnerRunningType{sock: sock, role: role}
 	}
 	if errors.Is(probeErr, ipc.ErrDaemonAbsent) {
 		// ECONNREFUSED (no listener) or ENOENT (socket file absent):
 		// the socket is stale. Reclaim allowed.
 		return true, nil
 	}
+	if errors.Is(probeErr, ipc.ErrPeerUIDMismatch) {
+		// Something is listening, but its uid differs from ours or could not
+		// be read. Not ours to reclaim, and not a conforming same-uid owner.
+		return false, &errSquatterType{
+			sock:   sock,
+			role:   role,
+			reason: fmt.Sprintf("owner runs as a different uid or its uid could not be verified: %v", probeErr),
+		}
+	}
 	// Any other error (deadline exceeded, garbled bytes, unexpected close) is
 	// treated as an occupied socket that we should not reclaim.
 	return false, &errSquatterType{
 		sock:   sock,
+		role:   role,
 		reason: fmt.Sprintf("probe failed with unexpected error: %v", probeErr),
 	}
 }

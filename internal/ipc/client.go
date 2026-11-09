@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"os"
 	"strconv"
 	"syscall"
 	"time"
@@ -14,15 +15,48 @@ import (
 // fresh connection; the socket is connection-per-request (short-lived RPCs).
 type Client struct {
 	path string
+	uid  int // expected peer uid; checked at dial
 }
 
-// NewClient returns a Client that dials the unix socket at path.
+// ClientOpts carries optional tuning for the Client, mirroring ServerOpts on
+// the server side.
+type ClientOpts struct {
+	// UID is the expected peer uid for the peer-cred check performed in
+	// dial. 0 means "use the current process's effective uid", which is the
+	// correct default for the single-operator path. Tests can override this
+	// to simulate a peer running under a different uid.
+	UID int
+}
+
+// clientPeerUID reads the uid of the process at the far end of a dialed conn.
+// It is a variable so tests can make the read fail; only Client.dial uses it,
+// the server's own check calls peerUID directly.
+var clientPeerUID = peerUID
+
+// NewClient returns a Client that dials the unix socket at path, using the
+// default ClientOpts (peer uid expected to match the current process's).
 func NewClient(path string) *Client {
-	return &Client{path: path}
+	return NewClientWithOpts(path, ClientOpts{})
 }
 
-// dial opens a connection to the daemon socket. On ECONNREFUSED or a missing
-// socket file it returns ErrDaemonAbsent so the caller can print a remedy.
+// NewClientWithOpts returns a Client with custom tuning. Zero fields in opts
+// use defaults.
+func NewClientWithOpts(path string, opts ClientOpts) *Client {
+	uid := opts.UID
+	if uid == 0 {
+		uid = os.Getuid()
+	}
+	return &Client{path: path, uid: uid}
+}
+
+// dial opens a connection to the daemon socket and verifies the peer's uid
+// before returning it. On ECONNREFUSED or a missing socket file it returns
+// ErrDaemonAbsent so the caller can print a remedy. A peer whose uid differs
+// from the expected one, and a peer whose uid cannot be read, both yield an
+// error satisfying errors.Is(err, ErrPeerUIDMismatch); in either case dial
+// closes the freshly dialed conn and writes nothing to it, so no Client
+// method (all of which funnel through this chokepoint) sends a request to, or
+// trusts a response from, a peer it could not verify.
 func (c *Client) dial() (net.Conn, error) {
 	conn, err := net.Dial("unix", c.path)
 	if err != nil {
@@ -31,6 +65,17 @@ func (c *Client) dial() (net.Conn, error) {
 		}
 		return nil, fmt.Errorf("ipc: dial %s: %w", c.path, err)
 	}
+
+	puid, err := clientPeerUID(conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("%w: peer-cred check failed: %w", ErrPeerUIDMismatch, err)
+	}
+	if int(puid) != c.uid {
+		conn.Close()
+		return nil, fmt.Errorf("%w: peer uid %d, expected %d", ErrPeerUIDMismatch, puid, c.uid)
+	}
+
 	return conn, nil
 }
 
