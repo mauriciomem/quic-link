@@ -372,9 +372,10 @@ func agentServeOpts(ag config.Agent, idCfg config.Identity, ownPin string, start
 // This is the socket that accepts connections from anywhere, so it validates
 // source addresses on purpose: a peer is sent a QUIC Retry and must echo it back
 // from the address it claims before the listener allocates any per-connection
-// state for it. That costs a legitimate peer one extra round trip on its first
-// connect, and in exchange a flood of forged source addresses cannot make the
-// agent hold handshake state for each one.
+// state for it. That costs a legitimate peer one extra round trip on every new
+// connection (no client in this binary keeps a QUIC token store, so none can
+// skip the Retry), and in exchange a flood of forged source addresses cannot
+// make the agent hold handshake state for each one.
 func agentListenTransport(conn net.PacketConn, tlsConf *tls.Config) (*transport.QUICTransport, error) {
 	return transport.NewQUICListenTransport(conn, tlsConf, nil)
 }
