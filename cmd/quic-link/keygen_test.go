@@ -75,6 +75,8 @@ func parsePinLine(t *testing.T, out string) string {
 }
 
 func TestKeygenIdempotentAndForce(t *testing.T) {
+	t.Run("help_golden", keygenHelpGolden)
+
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "key.pem")
 
