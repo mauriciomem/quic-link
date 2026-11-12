@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 #
-# @spec-handoff
-# @interface scripts/release.sh VERSION [--check]  (exit 0 on success, non-zero on refusal)
-# @behavior
-#   - Clean checkout: `release.sh v0.0.0-test --check` exits 0, builds every
-#     target, and reports the build reproducible; stderr has no "unbound variable".
-#   - Modified tracked file: exits non-zero before building, stderr contains
-#     "FAIL: tracked files are modified" and no "unbound variable".
-# @edge-cases
-#   - Untracked non-Go files only: not refused (not exercised here).
-#   - Runs against a local clone of the committed HEAD in a mktemp dir: no
-#     network, nothing written outside the temp dir (GOCACHE is shared, by design
-#     of the Go toolchain, but is a cache, not repo state).
-# @see ./release.sh
+# Tests scripts/release.sh against a local clone of the committed HEAD.
+#
+# On a clean checkout, `release.sh v0.0.0-test --check` must exit 0, build every
+# target and report the build reproducible. With a tracked file modified it must
+# refuse before building, saying "FAIL: tracked files are modified". In both
+# cases stderr must not mention an "unbound variable".
+#
+# Everything happens in a temporary directory: no network, nothing written to
+# the repository. The Go build cache is shared, but it is a cache, not state.
 #
 # Usage:
 #   scripts/release_test.sh

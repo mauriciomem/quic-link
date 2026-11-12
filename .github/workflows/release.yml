@@ -34,6 +34,9 @@ jobs:
       - name: Run the suite in the shipping configuration
         run: ./scripts/test.sh --tags grpcnotrace
 
+      - name: Test the release script
+        run: bash scripts/release_test.sh
+
       - name: Build the release artifacts
         run: ./scripts/release.sh "${GITHUB_REF_NAME}" --check
 

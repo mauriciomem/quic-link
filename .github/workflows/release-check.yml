@@ -1,0 +1,43 @@
+# Test the release script whenever it, its test, or this workflow changes.
+#
+# release.sh only runs for real when a version tag is pushed, so a regression in
+# it would otherwise surface at release time. Path-filtered so it costs nothing
+# on unrelated changes; it is not a required check.
+
+name: release-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/release.sh'
+      - 'scripts/release_test.sh'
+      - '.github/workflows/release-check.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/release.sh'
+      - 'scripts/release_test.sh'
+      - '.github/workflows/release-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  release-script:
+    name: release script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.11'
+          cache-dependency-path: go.sum
+
+      - name: Test the release script
+        run: bash scripts/release_test.sh
