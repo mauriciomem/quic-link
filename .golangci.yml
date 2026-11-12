@@ -23,7 +23,7 @@ linters:
   exclusions:
     generated: lax
     rules:
-      # Use of a deprecated symbol, tolerated in test files only. Six findings
+      # Use of a deprecated symbol, tolerated in test files only. Seven findings
       # remain, all on go/parser.ParseDir or go/ast.Package in the tests that
       # scan this tree's own source; neither has a non-deprecated equivalent
       # short of rewriting them onto golang.org/x/tools/go/packages.

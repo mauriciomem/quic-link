@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 
 if ! command -v buf >/dev/null; then
 	echo "buf is not on PATH. Install it with:" >&2
-	echo "  go install github.com/bufbuild/buf/cmd/buf@v1.72.0" >&2
+	echo "  go install github.com/bufbuild/buf/cmd/buf@v1.75.0" >&2
 	exit 1
 fi
 

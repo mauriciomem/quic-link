@@ -17,7 +17,7 @@
 # more and put the two outputs through benchstat, which reports whether a
 # difference is statistically distinguishable from noise:
 #
-#   go install golang.org/x/perf/cmd/benchstat@latest
+#   go install golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e
 #   git stash && scripts/bench.sh > /tmp/base.txt && git stash pop
 #   scripts/bench.sh > /tmp/new.txt
 #   benchstat /tmp/base.txt /tmp/new.txt

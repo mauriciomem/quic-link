@@ -64,7 +64,7 @@ an unrelated push into a red build on code nobody touched:
 
 ```bash
 curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-  | sh -s -- -b "$(go env GOPATH)/bin" v2.13.1
+  | sh -s -- -b "$(go env GOPATH)/bin" v2.15.0
 ```
 
 Pass no flags to it. Which linters run, and how much of the report is shown, are
