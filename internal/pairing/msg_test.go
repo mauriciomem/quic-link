@@ -8,6 +8,9 @@
  *     empty method, proof len != 32, label > 64 bytes or byte outside 0x20..0x7e or '#' -> ErrBadHeader (status 4)
  *   - Non-empty unknown method -> ErrUnsupportedMethod (status 5), checked before proof length
  *   - ExitCodeForPairing: 0->0; 1,2,3,6->6; 4,5->1
+ *   - Explicit label "" is accepted and normalized to "no label" (RFC §5a option B); re-encodes without the key
+ *   - Fuzz invariant is semantic: accepted input -> Marshal is deterministic, equals CoreDetEncOptions encoding,
+ *     and re-parses to an equal message; byte equality with the original input is NOT required
  * @edge-cases
  *   - ParsePairResponse with unknown status (7) -> error
  * @see RFC 001 pairing-wire-protocol.md §5, OD-26; plan 18 D3a
@@ -200,6 +203,12 @@ func TestParsePairRequest_Rules(t *testing.T) {
 			t.Errorf("label = %q, want %q", r.Label, l)
 		}
 	}
+	explicitEmpty := h(t, "a3"+"656c6162656c"+"60"+body)
+	if r, err := pairing.ParsePairRequest(explicitEmpty); err != nil {
+		t.Errorf("explicit empty label refused: %v", err)
+	} else if r.Method != valid.Method || r.Label != "" || !bytes.Equal(r.Proof, valid.Proof) {
+		t.Errorf("explicit empty label parsed as %+v, want %+v", r, valid)
+	}
 	if pairing.MaxLabelLen != 64 {
 		t.Errorf("MaxLabelLen = %d, want 64", pairing.MaxLabelLen)
 	}
@@ -356,8 +365,24 @@ func FuzzParsePairRequest(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(b, data) {
-			t.Fatalf("accepted non-canonical encoding %x (canonical %x)", data, b)
+		again, err := r.Marshal()
+		if err != nil || !bytes.Equal(again, b) {
+			t.Fatalf("Marshal not deterministic: %x vs %x (%v)", b, again, err)
+		}
+		em, err := cbor.CoreDetEncOptions().EncMode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		core, err := em.Marshal(r)
+		if err != nil || !bytes.Equal(b, core) {
+			t.Fatalf("Marshal %x != CoreDetEncOptions encoding %x (%v)", b, core, err)
+		}
+		back, err := pairing.ParsePairRequest(b)
+		if err != nil {
+			t.Fatalf("re-encoding %x refused: %v", b, err)
+		}
+		if back.Method != r.Method || back.Label != r.Label || !bytes.Equal(back.Proof, r.Proof) {
+			t.Fatalf("round trip %+v != %+v", back, r)
 		}
 	})
 }
