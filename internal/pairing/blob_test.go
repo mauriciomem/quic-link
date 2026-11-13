@@ -8,7 +8,10 @@
  * @edge-cases
  *   - Order: prefix -> decode -> length != 49 -> version != 0x01 -> re-encode != input
  *   - Errors (errors.Is-distinct): ErrBlobPrefix, ErrBlobDecode, ErrBlobLength, ErrBlobVersion, ErrBlobNonCanonical
- *   - 15 non-canonical spellings of the last char refused; no trimming; secret never in error text
+ *   - 15 non-canonical spellings of the last char refused; ErrBlobNonCanonical text says the "last character" looks mistyped
+ *   - No trimming; every ParseBlob error is exactly one sentinel (no blob material in error text)
+ *   - Redaction: fmt (%v %+v %#v %s), slog (Text/JSON via LogValue) and json.Marshal of a Blob show a "redacted"
+ *     marker and never the secret (raw/hex/base64) nor the encoded blob body
  * @see ../identity/pin.go (ParsePinStrict)
  */
 
@@ -18,7 +21,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -132,6 +139,64 @@ func TestParseBlob_RefusesNonCanonicalTrailingBits(t *testing.T) {
 	if refused != 15 {
 		t.Fatalf("refused %d spellings, want 15", refused)
 	}
+	if !strings.Contains(pairing.ErrBlobNonCanonical.Error(), "last character") {
+		t.Errorf("ErrBlobNonCanonical = %q, want it to say the last character looks mistyped", pairing.ErrBlobNonCanonical)
+	}
+}
+
+func TestBlob_RedactedWhenFormatted(t *testing.T) {
+	b := fixedBlob()
+	enc := b.Encode()
+	leaks := map[string]string{
+		"encoded blob":     enc[len(pairing.BlobPrefix):],
+		"secret hex":       hex.EncodeToString(b.Secret[:]),
+		"secret HEX":       strings.ToUpper(hex.EncodeToString(b.Secret[:])),
+		"secret std b64":   base64.RawStdEncoding.EncodeToString(b.Secret[:]),
+		"secret url b64":   base64.RawURLEncoding.EncodeToString(b.Secret[:]),
+		"secret raw":       string(b.Secret[:]),
+		"secret decimal":   strings.Trim(fmt.Sprint(b.Secret[:]), "[]"),
+		"secret json":      strings.Trim(strings.ReplaceAll(fmt.Sprint(b.Secret[:]), " ", ","), "[]"),
+		"secret go syntax": strings.TrimSuffix(strings.TrimPrefix(fmt.Sprintf("%#v", b.Secret[:]), "[]byte{"), "}"),
+	}
+	check := func(t *testing.T, out string) {
+		t.Helper()
+		for name, leak := range leaks {
+			if strings.Contains(out, leak) {
+				t.Errorf("output leaks %s: %q", name, out)
+			}
+		}
+		if !strings.Contains(strings.ToLower(out), "redacted") {
+			t.Errorf("output has no redacted marker: %q", out)
+		}
+	}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+		t.Run("fmt "+verb, func(t *testing.T) {
+			check(t, fmt.Sprintf(verb, b))
+			check(t, fmt.Sprintf(verb, &b))
+		})
+	}
+	for name, mk := range map[string]func(*bytes.Buffer) slog.Handler{
+		"slog text": func(w *bytes.Buffer) slog.Handler { return slog.NewTextHandler(w, nil) },
+		"slog json": func(w *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(w, nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			slog.New(mk(&buf)).Info("pairing", "blob", b, "ptr", &b)
+			check(t, buf.String())
+		})
+	}
+	t.Run("json.Marshal", func(t *testing.T) {
+		for _, v := range []any{b, &b, struct{ B pairing.Blob }{b}} {
+			out, err := json.Marshal(v)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			check(t, string(out))
+		}
+	})
+	if got, err := pairing.ParseBlob(enc); err != nil || got != b || got.Encode() != enc {
+		t.Fatalf("redaction changed the blob itself: %v", err)
+	}
 }
 
 func TestNewBlob_RejectsBadPin(t *testing.T) {
@@ -192,12 +257,45 @@ func TestNewBlob_SecretIsFresh(t *testing.T) {
 }
 
 func FuzzParseBlob(f *testing.F) {
-	f.Add(fixedBlob().Encode())
-	f.Add("QLJ1-")
-	f.Add("")
+	good := fixedBlob().Encode()
+	body := good[len(pairing.BlobPrefix):]
+	raw, _ := base64.RawURLEncoding.DecodeString(body)
+	f.Add(good)
+	for _, seed := range []string{
+		"", "QLJ1-", body, "qlj1-" + body, " " + good, "QLJ2-" + body,
+		"QLJ1-+" + body[1:], "QLJ1-/" + body[1:], good + "==", good + "=", good + "\n", good + "\r\n", good + " ",
+		"QLJ1-" + body[:20] + "\n" + body[20:],
+		"QLJ1-" + base64.RawURLEncoding.EncodeToString(raw[:48]),
+		"QLJ1-" + base64.RawURLEncoding.EncodeToString(append(append([]byte{}, raw...), 0)),
+		"QLJ1-" + base64.RawURLEncoding.EncodeToString(append([]byte{0x00}, raw[1:]...)),
+		"QLJ1-" + base64.RawURLEncoding.EncodeToString(append([]byte{0x02}, raw[1:]...)),
+		"QLJ1-" + base64.RawURLEncoding.EncodeToString(append([]byte{0xff}, raw[1:]...)),
+	} {
+		f.Add(seed)
+	}
+	last := strings.IndexByte(b64url, good[len(good)-1]) &^ 0x0f
+	for low := range 16 {
+		f.Add(good[:len(good)-1] + string(b64url[last|low]))
+	}
+	sentinels := []error{pairing.ErrBlobPrefix, pairing.ErrBlobDecode, pairing.ErrBlobLength, pairing.ErrBlobVersion, pairing.ErrBlobNonCanonical}
 	f.Fuzz(func(t *testing.T, s string) {
 		b, err := pairing.ParseBlob(s)
 		if err != nil {
+			matched := 0
+			for _, e := range sentinels {
+				if errors.Is(err, e) {
+					matched++
+					if err.Error() != e.Error() {
+						t.Fatalf("error text %q adds material beyond the sentinel %q", err, e)
+					}
+				}
+			}
+			if matched != 1 {
+				t.Fatalf("error %v matches %d blob sentinels, want exactly 1", err, matched)
+			}
+			if rest, ok := strings.CutPrefix(s, pairing.BlobPrefix); ok && len(rest) >= 8 && strings.Contains(err.Error(), rest) {
+				t.Fatalf("error text contains the blob body: %v", err)
+			}
 			return
 		}
 		if b.Encode() != s {

@@ -8,7 +8,7 @@
  * @edge-cases
  *   - proto frame read by pairing.ReadFrame -> ErrFrameVersion; pairing frame read by proto.ReadFrame -> proto.ErrUnsupportedVersion
  *   - Truncated header or payload -> io error, never a payload
- * @see RFC 001 pairing-wire-protocol.md §1 (OD-8); plan 18 D3, K22
+ * @see ../proto (steady-state framing this mirrors)
  */
 
 package pairing_test

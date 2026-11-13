@@ -11,7 +11,9 @@
  *   - pairingOpen is evaluated only when pair1 is offered; routeFor reads NegotiatedProtocol only
  * @edge-cases
  *   - allowEmptyAtStart=true + empty set builds but rejects every peer with ErrPinMismatch; "" element still refused; exported constructors unchanged
- *   - build rejects nil args and a pairing config with NextProtos != {pair1}, no RequireAnyClientCert, no VerifyPeerCertificate, != 1 cert, or GetConfigForClient set
+ *   - build rejects nil args and a pairing config with NextProtos != {pair1}, no RequireAnyClientCert, no VerifyPeerCertificate, != 1 cert, GetConfigForClient or GetCertificate set, or MinVersion < TLS 1.3
+ *   - steady config with GetCertificate set -> errSeamBadSteady; the steady config is cloned before it is validated
+ *   - no aliasing: in-place edits of the caller's NextProtos/Certificates (pairing or steady) never reach a returned config; returned NextProtos are not shared between calls
  * @see ./tls.go
  */
 package identity
@@ -77,7 +79,7 @@ var (
 	pairingALPN = []string{"quic-link/pair1"}
 )
 
-// TestPairingDispatcher_PairingBranchAdvertisesOnlyPair1 - invariant i.
+// TestPairingDispatcher_PairingBranchAdvertisesOnlyPair1 - the pairing branch offers pair1 only.
 func TestPairingDispatcher_PairingBranchAdvertisesOnlyPair1(t *testing.T) {
 	if alpnPair1 != "quic-link/pair1" {
 		t.Fatalf("alpnPair1 = %q, want quic-link/pair1", alpnPair1)
@@ -131,9 +133,90 @@ func TestPairingDispatcher_PairingBranchAdvertisesOnlyPair1(t *testing.T) {
 			t.Errorf("caller mutation leaked into the seam: NextProtos = %q", cfg.NextProtos)
 		}
 	})
+
+	t.Run("in-place edits of the caller's slices do not reach the seam", func(t *testing.T) {
+		other, err := SelfSignedCarrier(matrixKey(t))
+		if err != nil {
+			t.Fatalf("SelfSignedCarrier: %v", err)
+		}
+		p := f.pairing.Clone()
+		p.NextProtos = []string{alpnPair1}
+		p.Certificates = []tls.Certificate{f.pairing.Certificates[0]}
+		wantLeaf := f.pairing.Certificates[0].Certificate[0]
+
+		st := f.steady.Clone()
+		st.NextProtos = []string{transport.ALPN}
+		st.Certificates = []tls.Certificate{f.steady.Certificates[0]}
+		src := func() (*tls.Config, error) { return st, nil }
+
+		outer, err := ListenTLSWithPairingConfig(src, p, always(true))
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		pc, err := callSeam(t, outer.GetConfigForClient, hello(alpnPair1))
+		if err != nil || pc == nil {
+			t.Fatalf("pairing cfg=%v err=%v", pc, err)
+		}
+		sc, err := callSeam(t, outer.GetConfigForClient, hello(transport.ALPN))
+		if err != nil || sc == nil {
+			t.Fatalf("steady cfg=%v err=%v", sc, err)
+		}
+
+		p.NextProtos[0] = transport.ALPN
+		p.Certificates[0] = other
+		st.NextProtos[0] = alpnPair1
+		st.Certificates[0] = other
+
+		if !slices.Equal(pc.NextProtos, pairingALPN) {
+			t.Errorf("pairing config returned before the edit: NextProtos = %q", pc.NextProtos)
+		}
+		if !slices.Equal(sc.NextProtos, steadyALPN) {
+			t.Errorf("steady config returned before the edit: NextProtos = %q", sc.NextProtos)
+		}
+		for name, c := range map[string]*tls.Config{"pairing": pc, "steady": sc} {
+			if len(c.Certificates) != 1 || len(c.Certificates[0].Certificate) == 0 ||
+				string(c.Certificates[0].Certificate[0]) != string(wantLeaf) {
+				t.Errorf("%s config returned before the edit: certificate changed", name)
+			}
+		}
+		pc2, err := callSeam(t, outer.GetConfigForClient, hello(alpnPair1))
+		if err != nil || pc2 == nil {
+			t.Fatalf("pairing after edit: cfg=%v err=%v", pc2, err)
+		}
+		if !slices.Equal(pc2.NextProtos, pairingALPN) ||
+			string(pc2.Certificates[0].Certificate[0]) != string(wantLeaf) {
+			t.Errorf("caller edit reached a later pairing config: NextProtos = %q", pc2.NextProtos)
+		}
+	})
+
+	t.Run("returned NextProtos are not shared between calls", func(t *testing.T) {
+		cb := pairingDispatcher(f.source(), f.pairing, always(true))
+		for name, h := range map[string]*tls.ClientHelloInfo{"pairing": hello(alpnPair1), "steady": hello(transport.ALPN)} {
+			a, err := callSeam(t, cb, h)
+			if err != nil || a == nil {
+				t.Fatalf("%s: cfg=%v err=%v", name, a, err)
+			}
+			want := slices.Clone(a.NextProtos)
+			a.NextProtos[0] = "h3"
+			a.Certificates[0] = tls.Certificate{}
+			b, err := callSeam(t, cb, h)
+			if err != nil || b == nil {
+				t.Fatalf("%s: cfg=%v err=%v", name, b, err)
+			}
+			if !slices.Equal(b.NextProtos, want) {
+				t.Errorf("%s: edit of one returned config reached the next: NextProtos = %q", name, b.NextProtos)
+			}
+			if len(b.Certificates) != 1 || len(b.Certificates[0].Certificate) == 0 {
+				t.Errorf("%s: edit of one returned config's certificate reached the next", name)
+			}
+		}
+		if !slices.Equal(f.steady.NextProtos, steadyALPN) || !slices.Equal(f.pairing.NextProtos, pairingALPN) {
+			t.Fatalf("edit of a returned config reached the caller's config: steady %q pairing %q", f.steady.NextProtos, f.pairing.NextProtos)
+		}
+	})
 }
 
-// TestPinningConfigs_NeverAdvertisePair1 - invariant ii.
+// TestPinningConfigs_NeverAdvertisePair1 - no steady config offers pair1.
 func TestPinningConfigs_NeverAdvertisePair1(t *testing.T) {
 	key := matrixKey(t)
 	pin := matrixPin(t, matrixKey(t))
@@ -195,8 +278,15 @@ func TestPinningConfigs_NeverAdvertisePair1(t *testing.T) {
 	})
 }
 
-// TestPairingDispatcher_IsTotal - invariant iii: never (nil,nil), never a
+// TestPairingDispatcher_IsTotal - never (nil,nil), never a
 // non-pinning config, every reject a non-nil error.
+//
+// The steady config must be cloned before it is validated, so a source that
+// hands out a shared pointer cannot change a config between its check and its
+// use. That ordering is not observable from a deterministic test: the window
+// lies inside one dispatcher call with no hook, and a concurrent mutator would
+// be a data race whichever order is used. The post-condition is pinned here
+// instead: every returned config is itself re-checked below.
 func TestPairingDispatcher_IsTotal(t *testing.T) {
 	f := newSeamFixture(t)
 	errSource := errors.New("steady source failed")
@@ -224,7 +314,7 @@ func TestPairingDispatcher_IsTotal(t *testing.T) {
 		{"steady ALPN", f.source(), always(true), hello(transport.ALPN), wantSteady, nil},
 		{"pair1, window closed", f.source(), always(false), hello(alpnPair1), wantSteady, nil},
 		{"pair1, window open", f.source(), always(true), hello(alpnPair1), wantPairing, nil},
-		{"both offered, open (D6)", f.source(), always(true), hello(transport.ALPN, alpnPair1), wantPairing, nil},
+		{"both offered, open", f.source(), always(true), hello(transport.ALPN, alpnPair1), wantPairing, nil},
 		{"both offered, closed", f.source(), always(false), hello(transport.ALPN, alpnPair1), wantSteady, nil},
 		{"steady returns (nil,nil)", func() (*tls.Config, error) { return nil, nil }, always(false), hello(transport.ALPN), "", errSeamNilConfig},
 		{"steady returns error", func() (*tls.Config, error) { return nil, errSource }, always(false), hello(transport.ALPN), "", errSource},
@@ -237,6 +327,9 @@ func TestPairingDispatcher_IsTotal(t *testing.T) {
 		}), always(false), hello(transport.ALPN), "", errSeamBadSteady},
 		{"steady has no certificate", mutated(func(c *tls.Config) { c.Certificates = nil }), always(false), hello(transport.ALPN), "", errSeamBadSteady},
 		{"steady below TLS 1.3", mutated(func(c *tls.Config) { c.MinVersion = tls.VersionTLS12 }), always(false), hello(transport.ALPN), "", errSeamBadSteady},
+		{"steady has GetCertificate", mutated(func(c *tls.Config) {
+			c.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &c.Certificates[0], nil }
+		}), always(false), hello(transport.ALPN), "", errSeamBadSteady},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,7 +383,7 @@ func TestPairingDispatcher_IsTotal(t *testing.T) {
 	})
 }
 
-// TestPairingDispatcher_EveryReturnedConfigDisablesTickets - invariant iv.
+// TestPairingDispatcher_EveryReturnedConfigDisablesTickets - no branch can resume a session.
 func TestPairingDispatcher_EveryReturnedConfigDisablesTickets(t *testing.T) {
 	f := newSeamFixture(t)
 	steady := f.steady.Clone()
@@ -356,7 +449,7 @@ func TestPairingDispatcher_EveryReturnedConfigDisablesTickets(t *testing.T) {
 	})
 }
 
-// TestListenRoute_UsesNegotiatedProtocolOnly - invariant v.
+// TestListenRoute_UsesNegotiatedProtocolOnly - routing reads the negotiated ALPN only.
 func TestListenRoute_UsesNegotiatedProtocolOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -380,7 +473,8 @@ func TestListenRoute_UsesNegotiatedProtocolOnly(t *testing.T) {
 	}
 }
 
-// TestPinningTLS_AllowEmptyAtStart - OD-5.
+// TestPinningTLS_AllowEmptyAtStart - an empty pin set may be built on request
+// but authorizes nobody.
 func TestPinningTLS_AllowEmptyAtStart(t *testing.T) {
 	f := newSeamFixture(t)
 	key := matrixKey(t)
@@ -433,6 +527,11 @@ func TestListenTLSWithPairingConfig_RejectsInvalidInputs(t *testing.T) {
 		"pairing with GetConfigForClient": {f.source(), mut(func(c *tls.Config) {
 			c.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) { return c, nil }
 		}), always(false)},
+		"pairing with GetCertificate": {f.source(), mut(func(c *tls.Config) {
+			c.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &c.Certificates[0], nil }
+		}), always(false)},
+		"pairing below TLS 1.3":         {f.source(), mut(func(c *tls.Config) { c.MinVersion = tls.VersionTLS12 }), always(false)},
+		"pairing with MinVersion unset": {f.source(), mut(func(c *tls.Config) { c.MinVersion = 0 }), always(false)},
 	} {
 		if cfg, err := ListenTLSWithPairingConfig(tc.steady, tc.pairing, tc.open); err == nil || cfg != nil {
 			t.Errorf("%s: cfg=%v err=%v, want nil config and an error", name, cfg, err)

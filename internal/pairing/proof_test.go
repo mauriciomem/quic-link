@@ -8,8 +8,10 @@
  *   - ExporterContext(label) = []byte(label); "" -> non-nil, len 0
  * @edge-cases
  *   - Wrong secret / wrong ekm / short / long / nil proof -> false
+ *   - Secret shorter than SecretLen (16), including empty/nil -> VerifyProof false even for the matching proof;
+ *     Proof keeps its signature (no error return) and is still plain HMAC for any key
  *   - TLS 1.3 exporter: absent context == empty context (RFC 8446/9846 §7.5)
- * @see RFC 001 pairing-wire-protocol.md §4
+ * @see ./blob.go (SecretLen)
  */
 
 package pairing_test
@@ -78,6 +80,15 @@ func TestVerifyProof(t *testing.T) {
 		if ok {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	for _, n := range []int{0, 1, pairing.SecretLen - 1} {
+		short := bytes.Repeat([]byte{0x11}, n)
+		if pairing.VerifyProof(short, ekm, pairing.Proof(short, ekm)) {
+			t.Errorf("%d-byte secret: matching proof accepted, want false", n)
+		}
+	}
+	if pairing.VerifyProof(nil, ekm, pairing.Proof(nil, ekm)) {
+		t.Error("nil secret: matching proof accepted, want false")
 	}
 }
 

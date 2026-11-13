@@ -7,7 +7,9 @@
  *   - no branch ever issues a session ticket; a second dial never resumes (control: a tickets-enabled listener DOES issue one)
  *   - pair1 with the window closed fails like a version mismatch (TransportError 0x178)
  *   - a failing steady source fails closed as an auth failure (transport.IsAuthFailed)
- *   - guard: AgentListenTLS / ClientListenTLS listeners advertise only quic-link/1; no non-test file in cmd/ or internal/daemon references ListenTLSWithPairingConfig or "quic-link/pair1"
+ *   - guard: AgentListenTLS / ClientListenTLS listeners advertise only quic-link/1
+ *   - guard: no non-test .go file in the module outside internal/identity and internal/pairing references
+ *     ListenTLSWithPairingConfig, imports internal/pairing, or spells "quic-link/pair1" (also as a constant concatenation)
  * @edge-cases
  *   - ticket storage is post-handshake and async: positive checks wait on a Put signal, negative checks wait a bounded window
  * @see ../../internal/identity/tls.go
@@ -24,7 +26,9 @@ import (
 	"go/token"
 	"io/fs"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -175,8 +179,8 @@ func wantTransportCode(t *testing.T, err error, code quic.TransportErrorCode) {
 	}
 }
 
-// TestAgentListenTransport_PairingSeamHandshake - invariants iv and v over a
-// real handshake through the agent's listening transport helper.
+// TestAgentListenTransport_PairingSeamHandshake - ticket suppression and
+// ALPN routing over a real handshake through the agent's listening transport helper.
 func TestAgentListenTransport_PairingSeamHandshake(t *testing.T) {
 	srvKey, cliKey, srvPin, cliPin := newSeamKeys(t)
 	steady, err := identity.AgentListenTLS(srvKey, []string{cliPin})
@@ -277,50 +281,139 @@ func TestAgentAndDaemon_AdvertiseOnlyQuicLink1(t *testing.T) {
 	}
 
 	t.Run("no production reference to the seam", func(t *testing.T) {
+		root := seamModuleRoot(t)
+		modPath := seamModulePath(t, root)
+		pairingImport := modPath + "/internal/pairing"
+		skip := map[string]bool{
+			filepath.Join(root, "internal", "identity"): true,
+			filepath.Join(root, "internal", "pairing"):  true,
+		}
 		sawAnchor := false
-		for _, root := range []string{".", filepath.Join("..", "..", "internal", "daemon")} {
-			err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if d.IsDir() {
-					if d.Name() == "testdata" {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-					return nil
-				}
-				fset := token.NewFileSet()
-				f, err := parser.ParseFile(fset, path, nil, 0)
-				if err != nil {
-					return err
-				}
-				ast.Inspect(f, func(n ast.Node) bool {
-					switch x := n.(type) {
-					case *ast.Ident:
-						if x.Name == "ListenTLSWithPairingConfig" {
-							t.Errorf("%s: production code references ListenTLSWithPairingConfig", fset.Position(x.Pos()))
-						}
-						if x.Name == "AgentListenTLS" {
-							sawAnchor = true
-						}
-					case *ast.BasicLit:
-						if x.Kind == token.STRING && strings.Contains(x.Value, seamPair1) {
-							t.Errorf("%s: production code contains %s", fset.Position(x.Pos()), x.Value)
-						}
-					}
-					return true
-				})
-				return nil
-			})
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
-				t.Fatalf("scan %s: %v", root, err)
+				return err
 			}
+			if d.IsDir() {
+				name := d.Name()
+				if path != root && (name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || skip[path]) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			for _, imp := range f.Imports {
+				if p, _ := strconv.Unquote(imp.Path.Value); p == pairingImport || strings.HasPrefix(p, pairingImport+"/") {
+					t.Errorf("%s: production code imports %s", fset.Position(imp.Pos()), p)
+				}
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.Ident:
+					if x.Name == "ListenTLSWithPairingConfig" {
+						t.Errorf("%s: production code references ListenTLSWithPairingConfig", fset.Position(x.Pos()))
+					}
+					if x.Name == "AgentListenTLS" {
+						sawAnchor = true
+					}
+				case *ast.BinaryExpr:
+					if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) {
+						t.Errorf("%s: production code builds %q", fset.Position(x.Pos()), v)
+						return false
+					}
+				case *ast.BasicLit:
+					if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) {
+						t.Errorf("%s: production code contains %q", fset.Position(x.Pos()), v)
+					}
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scan %s: %v", root, err)
 		}
 		if !sawAnchor {
-			t.Fatal("scan never saw AgentListenTLS in agent.go: the scanner is blind")
+			t.Fatal("scan never saw AgentListenTLS: the scanner is blind")
 		}
 	})
+
+	t.Run("scanner folds string concatenation", func(t *testing.T) {
+		for _, src := range []string{`"quic-link/" + "pair1"`, `("quic-" + "link/") + ("pa" + "ir1")`, "`quic-link/pair1`"} {
+			e, err := parser.ParseExpr(src)
+			if err != nil {
+				t.Fatalf("parse %s: %v", src, err)
+			}
+			if v, ok := seamConstString(e); !ok || v != seamPair1 {
+				t.Errorf("%s folded to %q, %v", src, v, ok)
+			}
+		}
+	})
+}
+
+// seamConstString folds a string-literal expression (literals joined by +,
+// possibly parenthesized) to its value.
+func seamConstString(e ast.Expr) (string, bool) {
+	switch x := e.(type) {
+	case *ast.BasicLit:
+		if x.Kind != token.STRING {
+			return "", false
+		}
+		v, err := strconv.Unquote(x.Value)
+		return v, err == nil
+	case *ast.ParenExpr:
+		return seamConstString(x.X)
+	case *ast.BinaryExpr:
+		if x.Op != token.ADD {
+			return "", false
+		}
+		l, ok := seamConstString(x.X)
+		if !ok {
+			return "", false
+		}
+		r, ok := seamConstString(x.Y)
+		return l + r, ok
+	}
+	return "", false
+}
+
+// seamModuleRoot finds the directory holding go.mod, walking up from the
+// package directory.
+func seamModuleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("no go.mod above the package directory")
+		}
+		dir = parent
+	}
+}
+
+func seamModulePath(t *testing.T, root string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module "); ok {
+			return strings.Trim(strings.TrimSpace(rest), `"`)
+		}
+	}
+	t.Fatal("go.mod has no module line")
+	return ""
 }

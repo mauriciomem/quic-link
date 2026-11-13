@@ -7,13 +7,16 @@
  *   - ParsePairRequest strict: CBOR error/unknown key/dup key/indef length/tag/trailing bytes/wrong type,
  *     empty method, proof len != 32, label > 64 bytes or byte outside 0x20..0x7e or '#' -> ErrBadHeader (status 4)
  *   - Non-empty unknown method -> ErrUnsupportedMethod (status 5), checked before proof length
- *   - ExitCodeForPairing: 0->0; 1,2,3,6->6; 4,5->1
- *   - Explicit label "" is accepted and normalized to "no label" (RFC §5a option B); re-encodes without the key
+ *   - Map keys match exactly (case-sensitive): "METHOD", "Proof", "LABEL" etc. are unknown keys -> ErrBadHeader
+ *   - Decoder limits: nesting depth 4, 16 map pairs; deeper / more pairs -> ErrBadHeader
+ *   - ExitCodeForPairing: 0->0; 1,2,3,6->6; 4,5->1; any unknown status -> 1 (protocol error)
+ *   - StatusForParseError(nil) -> StatusOK
+ *   - Explicit label "" is accepted and normalized to "no label"; re-encodes without the key
  *   - Fuzz invariant is semantic: accepted input -> Marshal is deterministic, equals CoreDetEncOptions encoding,
  *     and re-parses to an equal message; byte equality with the original input is NOT required
  * @edge-cases
  *   - ParsePairResponse with unknown status (7) -> error
- * @see RFC 001 pairing-wire-protocol.md §5, OD-26; plan 18 D3a
+ * @see ./msg.go
  */
 
 package pairing_test
@@ -22,6 +25,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -30,7 +34,7 @@ import (
 	"github.com/mauriciomem/quic-link/internal/pairing"
 )
 
-// Byte vectors below are regenerated at wire freeze (OD-26).
+// Byte vectors below are regenerated at wire freeze.
 
 func h(t testing.TB, s string) []byte {
 	t.Helper()
@@ -171,6 +175,15 @@ func TestParsePairRequest_Rules(t *testing.T) {
 		{"unknown_method", enc(map[string]any{"method": "token-hmac-v2", "proof": proof32}), pairing.ErrUnsupportedMethod},
 		{"unknown_method_bad_proof", enc(map[string]any{"method": "token-hmac-v2", "proof": proof32[:3]}), pairing.ErrUnsupportedMethod},
 		{"unknown_method_unknown_key", enc(map[string]any{"method": "token-hmac-v2", "proof": proof32, "x": 1}), pairing.ErrBadHeader},
+		{"key_METHOD", enc(map[string]any{"METHOD": pairing.MethodTokenHMACv1, "proof": proof32}), pairing.ErrBadHeader},
+		{"key_Method", enc(map[string]any{"Method": pairing.MethodTokenHMACv1, "proof": proof32}), pairing.ErrBadHeader},
+		{"key_Proof", enc(map[string]any{"method": pairing.MethodTokenHMACv1, "Proof": proof32}), pairing.ErrBadHeader},
+		{"key_PROOF", enc(map[string]any{"method": pairing.MethodTokenHMACv1, "PROOF": proof32}), pairing.ErrBadHeader},
+		{"key_LABEL", enc(map[string]any{"method": pairing.MethodTokenHMACv1, "proof": proof32, "LABEL": "laptop"}), pairing.ErrBadHeader},
+		{"key_Label", enc(map[string]any{"method": pairing.MethodTokenHMACv1, "proof": proof32, "Label": "laptop"}), pairing.ErrBadHeader},
+		{"key_case_variant_and_canonical_method", enc(map[string]any{"method": pairing.MethodTokenHMACv1, "Method": pairing.MethodTokenHMACv1, "proof": proof32}), pairing.ErrBadHeader},
+		{"key_case_variant_and_canonical_proof", enc(map[string]any{"method": pairing.MethodTokenHMACv1, "proof": proof32, "PROOF": proof32}), pairing.ErrBadHeader},
+		{"key_case_variant_unknown_method", enc(map[string]any{"METHOD": "token-hmac-v2", "proof": proof32}), pairing.ErrBadHeader},
 	}
 	for _, c := range bad {
 		t.Run(c.name, func(t *testing.T) {
@@ -212,6 +225,50 @@ func TestParsePairRequest_Rules(t *testing.T) {
 	if pairing.MaxLabelLen != 64 {
 		t.Errorf("MaxLabelLen = %d, want 64", pairing.MaxLabelLen)
 	}
+
+	// Decoder limits. Every case below is a malformed request either way, so
+	// the cbor library's own limit error text tells the limit apart from the
+	// later unknown-key or wrong-type refusal.
+	t.Run("decoder_limits", func(t *testing.T) {
+		nested := func(depth int) []byte {
+			// a map holding "label" whose value nests arrays; depth counts the map
+			x := "00"
+			for range depth - 1 {
+				x = "81" + x
+			}
+			return h(t, "a3"+hexKeyLabel+x+hexKeyProof+hexProof32+hexKeyMethod+hexMethodV1)
+		}
+		pairs := func(n int) []byte {
+			m := map[string]any{"method": pairing.MethodTokenHMACv1, "proof": proof32}
+			for i := 0; len(m) < n; i++ {
+				m[fmt.Sprintf("x%02d", i)] = 1
+			}
+			return enc(m)
+		}
+		for _, c := range []struct {
+			name    string
+			payload []byte
+			limit   bool
+		}{
+			{"depth_4", nested(4), false},
+			{"depth_5", nested(5), true},
+			{"depth_16", nested(16), true},
+			{"pairs_16", pairs(16), false},
+			{"pairs_17", pairs(17), true},
+		} {
+			_, err := pairing.ParsePairRequest(c.payload)
+			if !errors.Is(err, pairing.ErrBadHeader) {
+				t.Errorf("%s: err = %v, want ErrBadHeader", c.name, err)
+				continue
+			}
+			if s := pairing.StatusForParseError(err); s != pairing.StatusBadHeader {
+				t.Errorf("%s: status = %v, want bad_header", c.name, s)
+			}
+			if got := strings.Contains(err.Error(), "exceeded max"); got != c.limit {
+				t.Errorf("%s: limit error = %v, want %v (err %v)", c.name, got, c.limit, err)
+			}
+		}
+	})
 }
 
 func TestParsePairResponse(t *testing.T) {
@@ -254,6 +311,14 @@ func TestExitCodeForPairing(t *testing.T) {
 		if got := pairing.ExitCodeForPairing(s); got != code {
 			t.Errorf("ExitCodeForPairing(%v) = %d, want %d", s, got, code)
 		}
+	}
+	for _, s := range []pairing.Status{pairing.StatusConflict + 1, 99, ^pairing.Status(0)} {
+		if got := pairing.ExitCodeForPairing(s); got != 1 {
+			t.Errorf("ExitCodeForPairing(unknown %d) = %d, want 1", uint(s), got)
+		}
+	}
+	if s := pairing.StatusForParseError(nil); s != pairing.StatusOK {
+		t.Errorf("StatusForParseError(nil) = %v, want ok", s)
 	}
 }
 
@@ -345,6 +410,41 @@ func FuzzParsePairRequest(f *testing.F) {
 	}
 	f.Add([]byte{})
 	f.Add([]byte{0xbf, 0xff})
+	body := hexKeyProof + hexProof32 + hexKeyMethod + hexMethodV1
+	for _, seed := range []string{
+		"a3" + hexKeyLabel + "60" + body,                                                          // explicit empty label
+		"a3" + hexKeyLabel + "7841" + strings.Repeat("61", 65) + body,                             // 65-byte label
+		"a3" + hexKeyLabel + "7840" + strings.Repeat("61", 64) + body,                             // 64-byte label
+		"a3" + hexKeyProof + hexProof32 + hexKeyMethod + hexMethodV1 + hexKeyMethod + hexMethodV1, // duplicate key
+		"a2" + "664d4554484f44" + hexMethodV1 + hexKeyProof + hexProof32,                          // "METHOD"
+		"a2" + hexKeyMethod + hexMethodV1 + "6550726f6f66" + hexProof32,                           // "Proof"
+		"a3" + "654c4142454c" + "666c6170746f70" + body,                                           // "LABEL"
+		"a3" + "664d6574686f64" + hexMethodV1 + body,                                              // "Method" + canonical
+		"a3" + "6178" + "01" + body,                                                               // unknown key
+		"bf" + body + "ff",                                                                        // indefinite map
+		"a2" + hexKeyProof + "5f5810" + strings.Repeat("11", 16) + "5810" + strings.Repeat("11", 16) + "ff" + hexKeyMethod + hexMethodV1,
+		"d9d9f7a2" + body, // tagged map
+		"a2" + hexKeyProof + "d818" + hexProof32 + hexKeyMethod + hexMethodV1, // tagged proof
+		"a3" + hexKeyLabel + "81818100" + body,                                // nesting depth 4
+		"a3" + hexKeyLabel + "8181818100" + body,                              // nesting depth 5
+	} {
+		b, err := hex.DecodeString(seed)
+		if err != nil {
+			f.Fatalf("bad seed hex: %v", err)
+		}
+		f.Add(b)
+	}
+	for _, n := range []int{16, 17} {
+		m := map[string]any{"method": pairing.MethodTokenHMACv1, "proof": proof32}
+		for i := 0; len(m) < n; i++ {
+			m[fmt.Sprintf("x%02d", i)] = 1
+		}
+		b, err := cbor.Marshal(m)
+		if err != nil {
+			f.Fatal(err)
+		}
+		f.Add(b)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r, err := pairing.ParsePairRequest(data)
 		if err != nil {
