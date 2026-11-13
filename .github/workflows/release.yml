@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache-dependency-path: go.sum
 
       - name: Record the toolchain
@@ -33,6 +33,9 @@ jobs:
 
       - name: Run the suite in the shipping configuration
         run: ./scripts/test.sh --tags grpcnotrace
+
+      - name: Test the release script
+        run: bash scripts/release_test.sh
 
       - name: Build the release artifacts
         run: ./scripts/release.sh "${GITHUB_REF_NAME}" --check

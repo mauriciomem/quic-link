@@ -52,7 +52,8 @@ check="${2:-}"
 #
 # Modified tracked files are refused outright: they are in the build and not in
 # the commit, so a stamped version would name something that does not exist
-# anywhere. This replaces the vcs.modified flag that -buildvcs=false removes
+# anywhere. This replaces the vcs.modified flag that -buildvcs=false removes.
+modified=$(git status --porcelain --untracked-files=no)
 if [ -n "$modified" ]; then
 	echo "FAIL: tracked files are modified, so a version stamped into these binaries" >&2
 	echo "      would not identify what is in them:" >&2

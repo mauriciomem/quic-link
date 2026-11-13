@@ -1,0 +1,23 @@
+Generate an Ed25519 identity key (PKCS#8 PEM, mode 0600) and write a
+creation-time sidecar at <key>.meta. The last line printed is always:
+
+    pin: <base64>
+
+This is the CONTRACT output: exchange that line with the remote end and
+supply it as --pin (client) or --authorized-client (agent).
+
+Running keygen again without --force is idempotent: the existing key is
+read and its pin is printed without modifying any file. Use --force to
+rotate the key; all remote ends must re-pair with the new pin.
+
+Usage:
+  quic-link keygen [flags]
+
+Flags:
+      --force[=true|false]   rotate: overwrite an existing key (peers must re-pair)
+  -h, --help[=true|false]    help for keygen
+      --out string           path to the Ed25519 identity key (PKCS#8 PEM) (default "/home/golden/.config/quic-link/key.pem")
+
+Global Flags:
+      --config string      path to config file (optional)
+      --log-level string   log verbosity: debug, info, warn, or error (default "info")
