@@ -12,8 +12,6 @@ const (
 	MethodTokenHMACv1 = "token-hmac-v1"
 	// MaxLabelLen is the maximum length of a pairing label in bytes.
 	MaxLabelLen = 64
-	// proofLen is the size of a token-hmac-v1 proof (HMAC-SHA256).
-	proofLen = 32
 )
 
 // Sentinel errors returned by ParsePairRequest.
@@ -64,7 +62,8 @@ type PairResponse struct {
 var (
 	encMode = mustEncMode()
 	// decMode is strict, following the internal/ipc precedent: unknown keys,
-	// duplicate keys, indefinite lengths and tags are all refused.
+	// duplicate keys, indefinite lengths and tags are all refused, and keys
+	// match field names case-sensitively (the library default does not).
 	decMode = mustDecMode()
 )
 
@@ -79,6 +78,7 @@ func mustEncMode() cbor.EncMode {
 func mustDecMode() cbor.DecMode {
 	dm, err := cbor.DecOptions{
 		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField,
+		FieldNameMatching: cbor.FieldNameMatchingCaseSensitive,
 		DupMapKey:         cbor.DupMapKeyEnforcedAPF,
 		IndefLength:       cbor.IndefLengthForbidden,
 		TagsMd:            cbor.TagsForbidden,
@@ -111,7 +111,7 @@ func ParsePairRequest(data []byte) (PairRequest, error) {
 	if r.Method != MethodTokenHMACv1 {
 		return PairRequest{}, ErrUnsupportedMethod
 	}
-	if len(r.Proof) != proofLen {
+	if len(r.Proof) != ProofLength {
 		return PairRequest{}, fmt.Errorf("%w: proof length %d", ErrBadHeader, len(r.Proof))
 	}
 	if err := validateLabel(r.Label); err != nil {
@@ -148,8 +148,11 @@ func ParsePairResponse(data []byte) (PairResponse, error) {
 }
 
 // StatusForParseError maps a ParsePairRequest error to the response status
-// the server sends back.
+// the server sends back; a nil error maps to StatusOK.
 func StatusForParseError(err error) Status {
+	if err == nil {
+		return StatusOK
+	}
 	if errors.Is(err, ErrUnsupportedMethod) {
 		return StatusUnsupportedMethod
 	}
@@ -157,14 +160,15 @@ func StatusForParseError(err error) Status {
 }
 
 // ExitCodeForPairing maps a response status to the client's process exit
-// code: 0 on success, 6 for a refused pairing, 1 for a protocol error.
+// code: 0 on success, 6 for a refused pairing, 1 for a protocol error or a
+// status this version does not know.
 func ExitCodeForPairing(s Status) int {
 	switch s {
 	case StatusOK:
 		return 0
-	case StatusBadHeader, StatusUnsupportedMethod:
-		return 1
-	default:
+	case StatusBadProof, StatusWindowClosed, StatusRateLimited, StatusConflict:
 		return 6
+	default:
+		return 1
 	}
 }

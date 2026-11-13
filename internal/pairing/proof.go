@@ -17,7 +17,7 @@ const (
 
 // ExporterContext returns the exporter context for label, verbatim. It is
 // never nil, though under TLS 1.3 an absent and an empty context are the
-// same (RFC 8446 §7.5).
+// same (RFC 9846 §7.5).
 func ExporterContext(label string) []byte {
 	return append([]byte{}, label...)
 }
@@ -30,7 +30,12 @@ func Proof(secret, ekm []byte) []byte {
 }
 
 // VerifyProof reports whether got is the proof for secret and ekm, comparing
-// in constant time. A proof of the wrong length is rejected by hmac.Equal.
+// in constant time. A secret shorter than SecretLen is always rejected, even
+// with a matching proof; a proof of the wrong length is rejected by
+// hmac.Equal.
 func VerifyProof(secret, ekm, got []byte) bool {
+	if len(secret) < SecretLen {
+		return false
+	}
 	return hmac.Equal(Proof(secret, ekm), got)
 }

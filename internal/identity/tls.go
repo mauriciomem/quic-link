@@ -209,12 +209,14 @@ var (
 // window fails at ALPN like a version mismatch.
 //
 // It is total: every return is (config, nil) or (nil, error), never
-// (nil, nil), and panics become errSeamPanic. A callback error aborts the
-// handshake with an auth-range alert, so the dialer sees an auth failure.
-// Every returned config is a fresh clone with session tickets disabled,
-// because resumption would skip the pin check.
+// (nil, nil), and panics become errSeamPanic. A callback error makes the
+// stdlib abort the handshake with an internal_error alert, which the
+// transport classifier counts as an authentication failure (it treats every
+// TLS alert except no_application_protocol that way).
+// Every returned config is a fresh detached clone with session tickets
+// disabled, because resumption would skip the pin check.
 func pairingDispatcher(steady configSource, pairing *tls.Config, pairingOpen func() bool) func(*tls.ClientHelloInfo) (*tls.Config, error) {
-	snap := detachedClone(pairing)
+	snap := detachedClone(pairing, alpnPair1)
 	return func(hello *tls.ClientHelloInfo) (cfg *tls.Config, err error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -225,7 +227,7 @@ func pairingDispatcher(steady configSource, pairing *tls.Config, pairingOpen fun
 			return nil, errSeamNoHello
 		}
 		if slices.Contains(hello.SupportedProtos, alpnPair1) && pairingOpen() {
-			return detachedClone(snap), nil
+			return detachedClone(snap, alpnPair1), nil
 		}
 		c, err := steady()
 		if err != nil {
@@ -234,18 +236,34 @@ func pairingDispatcher(steady configSource, pairing *tls.Config, pairingOpen fun
 		if c == nil {
 			return nil, errSeamNilConfig
 		}
-		if err := checkSteady(c); err != nil {
+		// Clone first and validate the clone, so the source cannot change
+		// the config between the check and its use.
+		out := detachedClone(c, c.NextProtos...)
+		if err := checkSteady(out); err != nil {
 			return nil, err
 		}
-		return detachedClone(c), nil
+		return out, nil
 	}
 }
 
-// detachedClone copies c with tickets off and no nested selection callback.
-func detachedClone(c *tls.Config) *tls.Config {
+// detachedClone copies c with tickets off, the given ALPN list in a fresh slice, and a fresh certificate list whose DER
+// chains are copied too, so neither the caller's slices nor another returned
+// config share memory with the result. Private keys are shared: they are
+// immutable signers. Callbacks are kept so the clone can be validated; both
+// callers only return clones whose source passed checkAuthenticating.
+func detachedClone(c *tls.Config, protos ...string) *tls.Config {
 	out := c.Clone()
 	out.SessionTicketsDisabled = true
-	out.GetConfigForClient = nil
+	out.NextProtos = slices.Clone(protos)
+	out.Certificates = make([]tls.Certificate, len(c.Certificates))
+	for i, crt := range c.Certificates {
+		chain := make([][]byte, len(crt.Certificate))
+		for j, der := range crt.Certificate {
+			chain[j] = slices.Clone(der)
+		}
+		crt.Certificate = chain
+		out.Certificates[i] = crt
+	}
 	return out
 }
 
@@ -258,23 +276,25 @@ func checkSteady(c *tls.Config) error {
 	if err := checkAuthenticating(c); err != nil {
 		return fmt.Errorf("%w: %w", errSeamBadSteady, err)
 	}
-	if c.MinVersion < tls.VersionTLS13 {
-		return fmt.Errorf("%w: MinVersion below TLS 1.3", errSeamBadSteady)
-	}
 	return nil
 }
 
 // checkAuthenticating holds the shape shared by steady and pairing configs:
-// a peer certificate is required and pin-checked, one carrier is presented,
-// and no nested selection callback can swap the config out.
+// TLS 1.3 only, a peer certificate is required and pin-checked, exactly one
+// static carrier is presented, and no callback can swap the config or the
+// certificate out.
 func checkAuthenticating(c *tls.Config) error {
 	switch {
+	case c.MinVersion < tls.VersionTLS13:
+		return errors.New("MinVersion below TLS 1.3")
 	case c.ClientAuth != tls.RequireAnyClientCert:
 		return errors.New("peer certificate not required")
 	case c.VerifyPeerCertificate == nil:
 		return errors.New("no pin callback")
 	case len(c.Certificates) != 1:
 		return fmt.Errorf("%d certificates, want 1", len(c.Certificates))
+	case c.GetCertificate != nil:
+		return errors.New("GetCertificate set")
 	case c.GetConfigForClient != nil:
 		return errors.New("nested GetConfigForClient")
 	}
@@ -284,8 +304,9 @@ func checkAuthenticating(c *tls.Config) error {
 // ListenTLSWithPairingConfig builds a listener config that serves pairing
 // (quic-link/pair1) while pairingOpen reports true and the steady config
 // otherwise. It takes already-built configs and validates the pairing one at
-// build time; the pairing config is snapshotted, so later caller mutation has
-// no effect. The outer config carries no certificate, so it can never
+// build time. The pairing config is snapshotted as a detached copy (ALPN list
+// and certificate chains included), so later caller mutation has no effect;
+// the steady config is copied and checked on every handshake. The outer config carries no certificate, so it can never
 // authenticate a handshake itself.
 //
 // Not wired into any production listener; a source-scan test guards that.

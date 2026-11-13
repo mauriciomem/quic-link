@@ -4,8 +4,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/mauriciomem/quic-link/internal/identity"
@@ -25,14 +28,14 @@ const (
 	BlobLen = len(BlobPrefix) + (payloadLen*8+5)/6
 )
 
-// Sentinel errors returned by ParseBlob. Their text never includes blob
-// material, because the blob carries the join secret.
+// Sentinel errors returned by ParseBlob, always unwrapped. Their text never
+// includes blob material, because the blob carries the join secret.
 var (
 	ErrBlobPrefix       = errors.New("pairing: join blob lacks the QLJ1- prefix")
 	ErrBlobDecode       = errors.New("pairing: join blob is not unpadded base64url")
 	ErrBlobLength       = errors.New("pairing: join blob has the wrong length")
 	ErrBlobVersion      = errors.New("pairing: join blob has an unknown version")
-	ErrBlobNonCanonical = errors.New("pairing: join blob is not canonically encoded")
+	ErrBlobNonCanonical = errors.New("blob: last character looks mistyped (not canonically encoded)")
 )
 
 // Blob is the decoded join blob: a one-time secret and the listener's pin.
@@ -110,3 +113,22 @@ func ParseBlob(s string) (Blob, error) {
 func notBase64URL(r rune) bool {
 	return !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_')
 }
+
+// blobRedacted is what every formatting path prints instead of the blob.
+const blobRedacted = "pairing.Blob{redacted}"
+
+// String redacts the blob: it carries the join secret.
+func (b Blob) String() string { return blobRedacted }
+
+// GoString redacts the blob for %#v.
+func (b Blob) GoString() string { return blobRedacted }
+
+// Format redacts the blob for every fmt verb, including %+v and %x, which
+// would otherwise print the fields.
+func (b Blob) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, blobRedacted) }
+
+// LogValue redacts the blob in slog output.
+func (b Blob) LogValue() slog.Value { return slog.StringValue(blobRedacted) }
+
+// MarshalJSON redacts the blob in JSON output.
+func (b Blob) MarshalJSON() ([]byte, error) { return json.Marshal(blobRedacted) }
