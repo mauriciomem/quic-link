@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/mauriciomem/quic-link/internal/transport"
@@ -78,8 +79,12 @@ const (
 // pinningTLS is the single place the TLS knobs are set. Every constructor below
 // funnels through it so the two axes cannot drift apart: mode decides the
 // shape, allowed decides which identities are acceptable.
-func pinningTLS(key ed25519.PrivateKey, mode transportMode, allowed []string) (*tls.Config, error) {
-	if len(allowed) == 0 {
+//
+// allowEmptyAtStart lets a listener start with no authorized pin (every peer
+// is then rejected with ErrPinMismatch). It stays unexported: the exported
+// constructors always pass false, so no public path builds an empty set.
+func pinningTLS(key ed25519.PrivateKey, mode transportMode, allowed []string, allowEmptyAtStart bool) (*tls.Config, error) {
+	if len(allowed) == 0 && !allowEmptyAtStart {
 		return nil, errors.New("identity: at least one expected peer pin is required")
 	}
 	for _, p := range allowed {
@@ -125,7 +130,7 @@ func pinningTLS(key ed25519.PrivateKey, mode transportMode, allowed []string) (*
 // presents its own certificate and accepts the peer only if the peer's pin
 // equals the configured server pin.
 func ClientDialTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
-	return pinningTLS(key, modeDial, []string{expectedServerPin})
+	return pinningTLS(key, modeDial, []string{expectedServerPin}, false)
 }
 
 // ClientListenTLS builds the config for a client that waits for its agent to
@@ -133,7 +138,7 @@ func ClientDialTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Confi
 // expects; only the shape differs, because this endpoint accepts rather than
 // opens the connection and so must require a certificate from the peer.
 func ClientListenTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
-	return pinningTLS(key, modeListen, []string{expectedServerPin})
+	return pinningTLS(key, modeListen, []string{expectedServerPin}, false)
 }
 
 // AgentListenTLS builds the config for an agent that waits for clients to
@@ -141,7 +146,7 @@ func ClientListenTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Con
 // only pins in authorized, which must be non-empty because there is no
 // unauthenticated listener.
 func AgentListenTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
-	return pinningTLS(key, modeListen, authorized)
+	return pinningTLS(key, modeListen, authorized, false)
 }
 
 // AgentDialTLS builds the config for an agent that connects out to its client.
@@ -149,7 +154,7 @@ func AgentListenTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, e
 // listening: the direction of the connection changes the TLS shape, not which
 // identities the agent trusts.
 func AgentDialTLS(key ed25519.PrivateKey, authorized []string) (*tls.Config, error) {
-	return pinningTLS(key, modeDial, authorized)
+	return pinningTLS(key, modeDial, authorized, false)
 }
 
 // verifyPin returns a tls.Config.VerifyPeerCertificate callback that parses the
@@ -179,5 +184,167 @@ func verifyPin(allowed map[string]struct{}) func([][]byte, [][]*x509.Certificate
 			return fmt.Errorf("%w: peer pin %s…", ErrPinMismatch, prefix)
 		}
 		return nil
+	}
+}
+
+// alpnPair1 is the ALPN a pairing joiner offers. Unexported until the pairing
+// transport defines its own constant.
+const alpnPair1 = "quic-link/pair1"
+
+// configSource yields the steady-state listener config for one handshake. It
+// never sees the ClientHello: selection depends only on the offered ALPN list
+// and the pairing-window predicate.
+type configSource func() (*tls.Config, error)
+
+var (
+	errSeamNoHello   = errors.New("identity: no ClientHello")
+	errSeamNilConfig = errors.New("identity: config source returned no config")
+	errSeamBadSteady = errors.New("identity: steady config is not a pinning listener config")
+	errSeamPanic     = errors.New("identity: listener config selection panicked")
+)
+
+// pairingDispatcher returns a tls.Config.GetConfigForClient callback that
+// selects the pairing config only when the peer offers quic-link/pair1 and
+// the window is open; everything else gets the steady config, so a closed
+// window fails at ALPN like a version mismatch.
+//
+// It is total: every return is (config, nil) or (nil, error), never
+// (nil, nil), and panics become errSeamPanic. A callback error makes the
+// stdlib abort the handshake with an internal_error alert, which the
+// transport classifier counts as an authentication failure (it treats every
+// TLS alert except no_application_protocol that way).
+// Every returned config is a fresh detached clone with session tickets
+// disabled, because resumption would skip the pin check.
+func pairingDispatcher(steady configSource, pairing *tls.Config, pairingOpen func() bool) func(*tls.ClientHelloInfo) (*tls.Config, error) {
+	snap := detachedClone(pairing, alpnPair1)
+	return func(hello *tls.ClientHelloInfo) (cfg *tls.Config, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				cfg, err = nil, fmt.Errorf("%w: %v", errSeamPanic, r)
+			}
+		}()
+		if hello == nil {
+			return nil, errSeamNoHello
+		}
+		if slices.Contains(hello.SupportedProtos, alpnPair1) && pairingOpen() {
+			return detachedClone(snap, alpnPair1), nil
+		}
+		c, err := steady()
+		if err != nil {
+			return nil, fmt.Errorf("identity: steady listener config: %w", err)
+		}
+		if c == nil {
+			return nil, errSeamNilConfig
+		}
+		// Clone first and validate the clone, so the source cannot change
+		// the config between the check and its use.
+		out := detachedClone(c, c.NextProtos...)
+		if err := checkSteady(out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+}
+
+// detachedClone copies c with tickets off, the given ALPN list in a fresh slice, and a fresh certificate list whose DER
+// chains are copied too, so neither the caller's slices nor another returned
+// config share memory with the result. Private keys are shared: they are
+// immutable signers. Callbacks are kept so the clone can be validated; both
+// callers only return clones whose source passed checkAuthenticating.
+func detachedClone(c *tls.Config, protos ...string) *tls.Config {
+	out := c.Clone()
+	out.SessionTicketsDisabled = true
+	out.NextProtos = slices.Clone(protos)
+	out.Certificates = make([]tls.Certificate, len(c.Certificates))
+	for i, crt := range c.Certificates {
+		chain := make([][]byte, len(crt.Certificate))
+		for j, der := range crt.Certificate {
+			chain[j] = slices.Clone(der)
+		}
+		crt.Certificate = chain
+		out.Certificates[i] = crt
+	}
+	return out
+}
+
+// checkSteady requires an authenticating pinning listener advertising only
+// the steady ALPN.
+func checkSteady(c *tls.Config) error {
+	if !slices.Equal(c.NextProtos, []string{transport.ALPN}) {
+		return fmt.Errorf("%w: NextProtos %q", errSeamBadSteady, c.NextProtos)
+	}
+	if err := checkAuthenticating(c); err != nil {
+		return fmt.Errorf("%w: %w", errSeamBadSteady, err)
+	}
+	return nil
+}
+
+// checkAuthenticating holds the shape shared by steady and pairing configs:
+// TLS 1.3 only, a peer certificate is required and pin-checked, exactly one
+// static carrier is presented, and no callback can swap the config or the
+// certificate out.
+func checkAuthenticating(c *tls.Config) error {
+	switch {
+	case c.MinVersion < tls.VersionTLS13:
+		return errors.New("MinVersion below TLS 1.3")
+	case c.ClientAuth != tls.RequireAnyClientCert:
+		return errors.New("peer certificate not required")
+	case c.VerifyPeerCertificate == nil:
+		return errors.New("no pin callback")
+	case len(c.Certificates) != 1:
+		return fmt.Errorf("%d certificates, want 1", len(c.Certificates))
+	case c.GetCertificate != nil:
+		return errors.New("GetCertificate set")
+	case c.GetConfigForClient != nil:
+		return errors.New("nested GetConfigForClient")
+	}
+	return nil
+}
+
+// ListenTLSWithPairingConfig builds a listener config that serves pairing
+// (quic-link/pair1) while pairingOpen reports true and the steady config
+// otherwise. It takes already-built configs and validates the pairing one at
+// build time. The pairing config is snapshotted as a detached copy (ALPN list
+// and certificate chains included), so later caller mutation has no effect;
+// the steady config is copied and checked on every handshake. The outer config carries no certificate, so it can never
+// authenticate a handshake itself.
+//
+// Not wired into any production listener; a source-scan test guards that.
+func ListenTLSWithPairingConfig(steady func() (*tls.Config, error), pairing *tls.Config, pairingOpen func() bool) (*tls.Config, error) {
+	if steady == nil || pairing == nil || pairingOpen == nil {
+		return nil, errors.New("identity: pairing listener needs a steady source, a pairing config and a window predicate")
+	}
+	if !slices.Equal(pairing.NextProtos, []string{alpnPair1}) {
+		return nil, fmt.Errorf("identity: pairing config must advertise exactly %q, got %q", alpnPair1, pairing.NextProtos)
+	}
+	if err := checkAuthenticating(pairing); err != nil {
+		return nil, fmt.Errorf("identity: pairing config: %w", err)
+	}
+	return &tls.Config{
+		GetConfigForClient:     pairingDispatcher(steady, pairing, pairingOpen),
+		NextProtos:             []string{transport.ALPN},
+		MinVersion:             tls.VersionTLS13,
+		SessionTicketsDisabled: true,
+	}, nil
+}
+
+// listenRoute is the post-accept handling selected for a connection.
+type listenRoute int
+
+const (
+	routeReject listenRoute = iota
+	routeSteady
+	routePairing
+)
+
+// routeFor selects post-accept handling from the negotiated ALPN only.
+func routeFor(cs tls.ConnectionState) listenRoute {
+	switch cs.NegotiatedProtocol {
+	case transport.ALPN:
+		return routeSteady
+	case alpnPair1:
+		return routePairing
+	default:
+		return routeReject
 	}
 }

@@ -267,6 +267,24 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 			}
 		})
 	}
+
+	// The empty-set guard and the empty-element guard are distinct checks
+	// with distinct errors; the pairing seam relaxes only the first one, so
+	// they must stay separately identifiable.
+	t.Run("empty set and empty element are distinct errors", func(t *testing.T) {
+		_, setErr := AgentListenTLS(key, nil)
+		_, elemErr := AgentListenTLS(key, []string{""})
+		_, dialElemErr := AgentDialTLS(key, []string{""})
+		if setErr == nil || elemErr == nil || dialElemErr == nil {
+			t.Fatalf("want all errors: set=%v elem=%v dialElem=%v", setErr, elemErr, dialElemErr)
+		}
+		if setErr.Error() == elemErr.Error() {
+			t.Errorf("empty set and empty element report the same error: %v", setErr)
+		}
+		if elemErr.Error() != dialElemErr.Error() {
+			t.Errorf("empty element error differs by mode: %v vs %v", elemErr, dialElemErr)
+		}
+	})
 }
 
 // ---- resumption vs. the pin callback ----------------------------------------
