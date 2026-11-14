@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -160,11 +161,27 @@ func writeFileAtomicWith(ops fsOps, path string, data []byte, mode os.FileMode) 
 		ops.close(tmp)
 		return fmt.Errorf("write temp file: %w", err)
 	}
+	// On macOS, (*os.File).Sync already issues F_FULLFSYNC (Go's
+	// internal/poll/fd_fsync_darwin.go, falling back to fsync on ENOTSUP),
+	// so no darwin-specific code is needed here or for the directory sync.
+	if err := ops.syncFile(tmp); err != nil {
+		ops.close(tmp)
+		return fmt.Errorf("sync temp file: %w", err)
+	}
 	if err := ops.close(tmp); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
 	if err := ops.rename(tmpName, path); err != nil {
 		return fmt.Errorf("rename temp file to %s: %w", path, err)
+	}
+	// Persist the rename itself. Some filesystems (network, FUSE) cannot
+	// sync a directory and report EINVAL or ENOTSUP; the key is in place
+	// regardless, so treat that as "not supported here" rather than failing.
+	if err := ops.syncDir(dir); err != nil {
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+			return nil
+		}
+		return fmt.Errorf("sync dir %s: %w", dir, err)
 	}
 	return nil
 }
