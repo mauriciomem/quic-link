@@ -102,6 +102,46 @@ func ReadMeta(keyPath string) (created time.Time, present bool, err error) {
 // 0700. It writes to a temp file in the same directory, chmods it, then renames
 // — so readers never see a partial or default-mode file.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	return writeFileAtomicWith(defaultFSOps(), path, data, mode)
+}
+
+// fsOps is the set of file operations writeFileAtomicWith performs on the
+// temp file and its directory. It exists so tests can pass recording or
+// failing implementations without package-level mutable state.
+type fsOps struct {
+	write    func(f *os.File, b []byte) error
+	syncFile func(f *os.File) error
+	close    func(f *os.File) error
+	rename   func(oldpath, newpath string) error
+	syncDir  func(dir string) error
+}
+
+// defaultFSOps returns fsOps backed by the real os calls.
+func defaultFSOps() fsOps {
+	return fsOps{
+		write: func(f *os.File, b []byte) error {
+			_, err := f.Write(b)
+			return err
+		},
+		syncFile: (*os.File).Sync,
+		close:    (*os.File).Close,
+		rename:   os.Rename,
+		syncDir: func(dir string) error {
+			d, err := os.Open(dir)
+			if err != nil {
+				return err
+			}
+			if err := d.Sync(); err != nil {
+				d.Close()
+				return err
+			}
+			return d.Close()
+		},
+	}
+}
+
+// writeFileAtomicWith is writeFileAtomic with injectable file operations.
+func writeFileAtomicWith(ops fsOps, path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create dir %s: %w", dir, err)
@@ -113,17 +153,17 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once the rename succeeds
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		ops.close(tmp)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+	if err := ops.write(tmp, data); err != nil {
+		ops.close(tmp)
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
+	if err := ops.close(tmp); err != nil {
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := ops.rename(tmpName, path); err != nil {
 		return fmt.Errorf("rename temp file to %s: %w", path, err)
 	}
 	return nil
