@@ -1,6 +1,7 @@
 /**
  * @spec-handoff
  * @interface NewBlob(listenerPinB64 string) (Blob, error); (Blob) Encode() string; ParseBlob(s string) (Blob, error); (Blob) PinB64() string
+ *   (Blob) Secret() [SecretLen]byte; (Blob) ListenerPin() [sha256.Size]byte
  * @behavior
  *   - Encode = "QLJ1-" + base64.RawURLEncoding(0x01 || Secret[16] || ListenerPin[32]); always BlobLen (71) chars
  *   - ParseBlob(Encode(b)) == b; PinB64 is base64.StdEncoding of ListenerPin
@@ -17,7 +18,9 @@
  *     Blob's methods) prints an address, never the secret: %v, %+v and slog text of such a struct carry no secret
  *   - cbor.Marshal and gob of a Blob (value, pointer, or inside a struct) carry no secret bytes;
  *     gob refusing with "no exported fields" is acceptable
- *   - These tests reach the secret only through Encode/ParseBlob, never through Blob's fields
+ *   - Secret()/ListenerPin() return what NewBlob was given / ParseBlob decoded; Secret() returns a copy
+ *   - Zero Blob: Secret() is all-zero (no panic), Encode carries an all-zero secret (current behavior, under review)
+ *   - Tests reach the secret only through Encode/ParseBlob and the accessors, never through Blob's fields
  * @see ../identity/pin.go (ParsePinStrict)
  */
 
@@ -393,6 +396,69 @@ func TestBlob_NotSerializedByReflectionEncoders(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("gob of a plain secret array not detected: %x", buf.Bytes())
+		}
+	})
+}
+
+func TestBlob_AccessorsReturnCarriedValues(t *testing.T) {
+	t.Run("ParseBlob", func(t *testing.T) {
+		b := fixedBlob()
+		if b.Secret() != fixedSecret {
+			t.Errorf("Secret() = %x, want %x", b.Secret(), fixedSecret)
+		}
+		if b.ListenerPin() != fixedPin {
+			t.Errorf("ListenerPin() = %x, want %x", b.ListenerPin(), fixedPin)
+		}
+	})
+	t.Run("NewBlob and ParseBlob(Encode)", func(t *testing.T) {
+		pin := sha256.Sum256([]byte("accessor listener"))
+		b, err := pairing.NewBlob(base64.StdEncoding.EncodeToString(pin[:]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encSecret, encPin := payloadOf(t, b)
+		if b.ListenerPin() != pin || encPin != pin {
+			t.Errorf("ListenerPin() = %x, encoded %x, want %x", b.ListenerPin(), encPin, pin)
+		}
+		if b.Secret() != encSecret || b.Secret() == ([pairing.SecretLen]byte{}) {
+			t.Errorf("Secret() = %x, encoded %x, want the encoded non-zero secret", b.Secret(), encSecret)
+		}
+		got, err := pairing.ParseBlob(b.Encode())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Secret() != b.Secret() || got.ListenerPin() != pin {
+			t.Errorf("ParseBlob(Encode(b)) accessors = %x/%x, want %x/%x", got.Secret(), got.ListenerPin(), b.Secret(), pin)
+		}
+	})
+}
+
+func TestBlob_SecretAccessorReturnsACopy(t *testing.T) {
+	t.Run("mutating the result leaves the blob unchanged", func(t *testing.T) {
+		b := fixedBlob()
+		enc := b.Encode()
+		s := b.Secret()
+		for i := range s {
+			s[i] ^= 0xFF
+		}
+		if b.Secret() != fixedSecret {
+			t.Errorf("second Secret() = %x, want %x", b.Secret(), fixedSecret)
+		}
+		if b.Encode() != enc {
+			t.Errorf("Encode changed after mutating the Secret() result")
+		}
+	})
+	// Current behavior, under review: a zero Blob is not rejected.
+	t.Run("zero Blob has an all-zero secret", func(t *testing.T) {
+		var b pairing.Blob
+		if b.Secret() != ([pairing.SecretLen]byte{}) {
+			t.Errorf("zero Blob Secret() = %x, want all zero", b.Secret())
+		}
+		if b.ListenerPin() != ([sha256.Size]byte{}) {
+			t.Errorf("zero Blob ListenerPin() = %x, want all zero", b.ListenerPin())
+		}
+		if secret, _ := payloadOf(t, b); secret != ([pairing.SecretLen]byte{}) {
+			t.Errorf("zero Blob encodes secret %x, want all zero", secret)
 		}
 	})
 }
