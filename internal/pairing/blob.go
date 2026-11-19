@@ -39,10 +39,26 @@ var (
 )
 
 // Blob is the decoded join blob: a one-time secret and the listener's pin.
+//
+// The fields are unexported and the secret sits behind a pointer, so the
+// secret is not reachable where Blob's redacting methods are bypassed: fmt
+// printing a struct that holds a Blob in an unexported field shows only an
+// address, and reflection encoders (CBOR, gob) see no exported fields.
 type Blob struct {
-	Secret      [SecretLen]byte
-	ListenerPin [sha256.Size]byte
+	secret      *[SecretLen]byte
+	listenerPin [sha256.Size]byte
 }
+
+// Secret returns the join secret, or the zero value for a zero Blob.
+func (b Blob) Secret() [SecretLen]byte {
+	if b.secret == nil {
+		return [SecretLen]byte{}
+	}
+	return *b.secret
+}
+
+// ListenerPin returns the listener's pin as raw SHA-256 bytes.
+func (b Blob) ListenerPin() [sha256.Size]byte { return b.listenerPin }
 
 // NewBlob returns a blob for the listener whose canonical standard-base64 pin
 // is listenerPinB64, with a fresh secret from crypto/rand. The pin is held to
@@ -52,30 +68,32 @@ func NewBlob(listenerPinB64 string) (Blob, error) {
 	if err != nil {
 		return Blob{}, fmt.Errorf("pairing: listener pin: %w", err)
 	}
-	var b Blob
+	b := Blob{secret: new([SecretLen]byte)}
 	raw, err := base64.StdEncoding.DecodeString(pin)
 	if err != nil {
 		return Blob{}, fmt.Errorf("pairing: listener pin: %w", err)
 	}
-	copy(b.ListenerPin[:], raw)
-	if _, err := rand.Read(b.Secret[:]); err != nil {
+	copy(b.listenerPin[:], raw)
+	if _, err := rand.Read(b.secret[:]); err != nil {
 		return Blob{}, fmt.Errorf("pairing: generating join secret: %w", err)
 	}
 	return b, nil
 }
 
 // Encode returns "QLJ1-" + base64url(0x01 || Secret || ListenerPin), unpadded.
+// A zero Blob encodes an all-zero secret.
 func (b Blob) Encode() string {
 	var p [payloadLen]byte
 	p[0] = BlobVersion
-	copy(p[1:], b.Secret[:])
-	copy(p[1+SecretLen:], b.ListenerPin[:])
+	secret := b.Secret()
+	copy(p[1:], secret[:])
+	copy(p[1+SecretLen:], b.listenerPin[:])
 	return BlobPrefix + base64.RawURLEncoding.EncodeToString(p[:])
 }
 
 // PinB64 returns the listener pin in its standard-base64 form.
 func (b Blob) PinB64() string {
-	return base64.StdEncoding.EncodeToString(b.ListenerPin[:])
+	return base64.StdEncoding.EncodeToString(b.listenerPin[:])
 }
 
 // ParseBlob decodes s exactly as given. It never trims or normalizes: any
@@ -101,9 +119,9 @@ func ParseBlob(s string) (Blob, error) {
 	if raw[0] != BlobVersion {
 		return Blob{}, ErrBlobVersion
 	}
-	var b Blob
-	copy(b.Secret[:], raw[1:1+SecretLen])
-	copy(b.ListenerPin[:], raw[1+SecretLen:])
+	b := Blob{secret: new([SecretLen]byte)}
+	copy(b.secret[:], raw[1:1+SecretLen])
+	copy(b.listenerPin[:], raw[1+SecretLen:])
 	if b.Encode() != s {
 		return Blob{}, ErrBlobNonCanonical
 	}
