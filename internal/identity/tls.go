@@ -137,8 +137,13 @@ func ClientDialTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Confi
 // connect to it. The pin set is the same single server pin a dialing client
 // expects; only the shape differs, because this endpoint accepts rather than
 // opens the connection and so must require a certificate from the peer.
-func ClientListenTLS(key ed25519.PrivateKey, expectedServerPin string) (*tls.Config, error) {
-	return pinningTLS(key, modeListen, []string{expectedServerPin}, false)
+func ClientListenTLS(key ed25519.PrivateKey, expectedServerPins ...string) (*tls.Config, error) {
+	// Placeholder: only the first pin is used until the pin set is implemented.
+	pin := ""
+	if len(expectedServerPins) > 0 {
+		pin = expectedServerPins[0]
+	}
+	return pinningTLS(key, modeListen, []string{pin}, false)
 }
 
 // AgentListenTLS builds the config for an agent that waits for clients to
@@ -347,4 +352,42 @@ func routeFor(cs tls.ConnectionState) listenRoute {
 	default:
 		return routeReject
 	}
+}
+
+// errNotImplemented marks placeholder constructors that are not implemented yet.
+var errNotImplemented = errors.New("identity: not implemented")
+
+// errSeamBadPairing is returned by a dispatcher whose pairing config failed
+// validation. Placeholder: not returned yet.
+var errSeamBadPairing = errors.New("identity: pairing config is not an authenticating pairing config")
+
+// AllowedSource returns the set of authorized peer pins. It is called once per
+// handshake, from handshake goroutines, concurrently. The returned map is
+// treated as read-only and must not be mutated after return. A nil or empty
+// map rejects every peer; it never means "allow all".
+type AllowedSource func() map[string]struct{}
+
+// AgentListenTLSFrom is AgentListenTLS reading the authorized set from src on
+// every handshake. Placeholder: not implemented yet.
+func AgentListenTLSFrom(_ ed25519.PrivateKey, _ AllowedSource) (*tls.Config, error) {
+	return nil, errNotImplemented
+}
+
+// AgentDialTLSFrom is AgentDialTLS reading the authorized set from src on
+// every handshake. Placeholder: not implemented yet.
+func AgentDialTLSFrom(_ ed25519.PrivateKey, _ AllowedSource) (*tls.Config, error) {
+	return nil, errNotImplemented
+}
+
+// PairingTLS builds the config served to a joiner while a pairing window is
+// open. Placeholder: not implemented yet.
+func PairingTLS(_ ed25519.PrivateKey) (*tls.Config, error) {
+	return nil, errNotImplemented
+}
+
+// ListenTLSWithPairing builds the agent listener config that serves pairing
+// while pairingOpen reports true and the steady pinning listener otherwise.
+// Placeholder: not implemented yet.
+func ListenTLSWithPairing(_ ed25519.PrivateKey, _ AllowedSource, _ func() bool) (*tls.Config, error) {
+	return nil, errNotImplemented
 }
