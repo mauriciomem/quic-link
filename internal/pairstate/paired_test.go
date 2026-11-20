@@ -117,6 +117,7 @@ func TestUpsertPaired_RoundTripModesAndOverwrite(t *testing.T) {
 			"64-char name":       {strings.Repeat("a", 64), "a:1", pb},
 			"name with RLO":      {"a\u202eb", "a:1", pb},
 			"name with ZWSP":     {"a\u200bb", "a:1", pb},
+			"non-ASCII name":     {"caf\u00e9", "a:1", pb},
 			"addr with ESC":      {"new", "a\x1b:1", pb},
 			"addr with newline":  {"new", "a\nb:1", pb},
 			"addr with space":    {"new", "a b:1", pb},
@@ -236,6 +237,20 @@ func TestLoadPaired_RejectsInvalidEntries(t *testing.T) {
 		})
 	}
 
+	t.Run("non-ASCII name is refused with ASCII-only error text", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "paired.toml")
+		writeRaw(t, path, entry(`"caf\u00e9"`, "h:1", p))
+		got, err := LoadPaired(path)
+		if !errors.Is(err, ErrMalformed) {
+			t.Fatalf("err = %v, want ErrMalformed", err)
+		}
+		if !printableASCII(err.Error()) {
+			t.Errorf("error text %+q has bytes outside 0x20-0x7E", err.Error())
+		}
+		if len(got) != 0 {
+			t.Errorf("rejected file returned servers %+v", got)
+		}
+	})
 	t.Run("unknown keys are ignored", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "paired.toml")
 		writeRaw(t, path, "version_hint = 2\n"+entry("home", "h:1", p)+"label = \"laptop\"\n\n[future]\nx = 1\n")

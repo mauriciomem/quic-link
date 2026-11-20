@@ -19,6 +19,7 @@ package pairstate
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -322,6 +323,40 @@ func TestAuthorizedFiles_RefuseUnsafePaths(t *testing.T) {
 			t.Run(tc.name+"/"+op.name, func(t *testing.T) {
 				t.Parallel()
 				checkUnsafe(t, tc, op, file, seed)
+			})
+		}
+	}
+	// No .lock exists yet, so a writer that opened the lock before checking
+	// the directory would leave authorized_clients.lock behind.
+	for _, dm := range []struct {
+		name string
+		mode os.FileMode
+	}{{"dir 0770 without lock", 0o770}, {"dir 0707 without lock", 0o707}} {
+		for _, op := range ops {
+			if op.reader {
+				continue
+			}
+			t.Run(dm.name+"/"+op.name, func(t *testing.T) {
+				t.Parallel()
+				dir := seedState(t, t.TempDir(), file, seed, false)
+				mustDo(t, os.Chmod(dir, dm.mode))
+				path := filepath.Join(dir, file)
+				before := listDir(t, dir)
+
+				err := runGuarded(t, "", func() error { return op.run(path) })
+
+				if !errors.Is(err, ErrUnsafePath) {
+					t.Errorf("%s = %v, want ErrUnsafePath", op.name, err)
+				}
+				if _, lerr := os.Lstat(path + ".lock"); !errors.Is(lerr, fs.ErrNotExist) {
+					t.Errorf("%s created %s.lock (Lstat err %v): the directory must be checked before the lock is opened", op.name, file, lerr)
+				}
+				if after := listDir(t, dir); !reflect.DeepEqual(after, before) {
+					t.Errorf("directory listing changed from %q to %q", before, after)
+				}
+				if got, rerr := os.ReadFile(path); rerr != nil || string(got) != seed {
+					t.Errorf("seed file = (%q, %v), want it unchanged", got, rerr)
+				}
 			})
 		}
 	}
