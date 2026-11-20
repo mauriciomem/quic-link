@@ -40,11 +40,18 @@ func matrixPin(t *testing.T, key ed25519.PrivateKey) string {
 	return pin
 }
 
-// TestTLSMatrix_AllFourRows is the executable form of the design's matrix. A
+// TestTLSMatrix_AllSevenRows is the executable form of the design's matrix. A
 // constructor whose shape silently drifts from its row is caught here first.
-func TestTLSMatrix_AllFourRows(t *testing.T) {
+//
+// This is the mandatory registration point for TLS-config constructors: every
+// new constructor gets a row here, and the SessionTicketsDisabled assertion is
+// why. A resumed handshake skips VerifyPeerCertificate, so a constructor that
+// forgets to disable tickets authenticates nobody on resumed connections.
+// Keep the function name in step with the row count.
+func TestTLSMatrix_AllSevenRows(t *testing.T) {
 	key := matrixKey(t)
 	peer := matrixPin(t, matrixKey(t))
+	src := func() map[string]struct{} { return map[string]struct{}{peer: {}} }
 
 	tests := []struct {
 		name           string
@@ -65,7 +72,7 @@ func TestTLSMatrix_AllFourRows(t *testing.T) {
 			wantSkipVerify: false,
 		},
 		{
-			name:           "client role, listens: peer cert required, single expected pin",
+			name:           "client role, listens: peer cert required, expected pin set",
 			build:          func() (*tls.Config, error) { return ClientListenTLS(key, peer) },
 			wantClientAuth: tls.RequireAnyClientCert,
 			wantSkipVerify: false,
@@ -75,6 +82,24 @@ func TestTLSMatrix_AllFourRows(t *testing.T) {
 			build:          func() (*tls.Config, error) { return AgentDialTLS(key, []string{peer}) },
 			wantClientAuth: tls.NoClientCert,
 			wantSkipVerify: true,
+		},
+		{
+			name:           "agent role, listens, live authorized set (AgentListenTLSFrom): peer cert required",
+			build:          func() (*tls.Config, error) { return AgentListenTLSFrom(key, src) },
+			wantClientAuth: tls.RequireAnyClientCert,
+			wantSkipVerify: false,
+		},
+		{
+			name:           "agent role, dials, live authorized set (AgentDialTLSFrom): no peer cert requested",
+			build:          func() (*tls.Config, error) { return AgentDialTLSFrom(key, src) },
+			wantClientAuth: tls.NoClientCert,
+			wantSkipVerify: true,
+		},
+		{
+			name:           "pairing listener (PairingTLS): peer cert required",
+			build:          func() (*tls.Config, error) { return PairingTLS(key) },
+			wantClientAuth: tls.RequireAnyClientCert,
+			wantSkipVerify: false,
 		},
 	}
 
@@ -102,6 +127,9 @@ func TestTLSMatrix_AllFourRows(t *testing.T) {
 			}
 			if !cfg.SessionTicketsDisabled {
 				t.Error("SessionTicketsDisabled = false, want true: a resumed handshake skips VerifyPeerCertificate, the only peer check here")
+			}
+			if cfg.VerifyConnection == nil {
+				t.Error("VerifyConnection is nil: nothing refuses a resumed connection if tickets are ever re-enabled")
 			}
 		})
 	}
@@ -257,6 +285,7 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 	cases := map[string]func() (*tls.Config, error){
 		"client dials, empty pin":   func() (*tls.Config, error) { return ClientDialTLS(key, "") },
 		"client listens, empty pin": func() (*tls.Config, error) { return ClientListenTLS(key, "") },
+		"client listens, no pins":   func() (*tls.Config, error) { return ClientListenTLS(key) },
 		"agent listens, empty set":  func() (*tls.Config, error) { return AgentListenTLS(key, nil) },
 		"agent dials, empty set":    func() (*tls.Config, error) { return AgentDialTLS(key, nil) },
 	}
@@ -283,6 +312,19 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 		}
 		if elemErr.Error() != dialElemErr.Error() {
 			t.Errorf("empty element error differs by mode: %v vs %v", elemErr, dialElemErr)
+		}
+	})
+
+	// A zero-pin ClientListenTLS call is an empty set, not an empty element:
+	// it must fail with the set guard's error, like every other empty set.
+	t.Run("client listens with no pins reports the empty-set error", func(t *testing.T) {
+		_, setErr := AgentListenTLS(key, nil)
+		_, noPinsErr := ClientListenTLS(key)
+		if setErr == nil || noPinsErr == nil {
+			t.Fatalf("want both errors: set=%v noPins=%v", setErr, noPinsErr)
+		}
+		if noPinsErr.Error() != setErr.Error() {
+			t.Errorf("ClientListenTLS(key) err = %q, want the empty-set error %q", noPinsErr, setErr)
 		}
 	})
 }
@@ -317,7 +359,7 @@ func TestConstructors_RejectEmptyPinSets(t *testing.T) {
 //
 // This suite asserts the behavior (no resumption over a real handshake).
 // SessionTicketsDisabled's value is also asserted directly, and
-// independently, in TestTLSMatrix_AllFourRows.
+// independently, in TestTLSMatrix_AllSevenRows.
 
 // resumptionLoopbackUDP opens a UDP socket on loopback only, for one side of
 // a handshake pair below. Binding "127.0.0.1" specifically, rather than a
@@ -564,6 +606,12 @@ func TestTLSResumption(t *testing.T) {
 		// the harness can observe resumption at all.
 		listenConf.SessionTicketsDisabled = false
 		dialConf.SessionTicketsDisabled = false
+		// Both sides also refuse a resumed connection in VerifyConnection;
+		// that second guard is proven separately in
+		// TestPinningConfigs_RejectResumedConnection. Clear it here so this
+		// control still shows the harness can observe resumption at all.
+		listenConf.VerifyConnection = nil
+		dialConf.VerifyConnection = nil
 		putc := make(chan struct{}, 1)
 		dialConf.ClientSessionCache = &resumptionPutSignalCache{
 			ClientSessionCache: tls.NewLRUClientSessionCache(1),

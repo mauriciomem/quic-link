@@ -10,6 +10,7 @@
  *   - Wrong secret / wrong ekm / short / long / nil proof -> false
  *   - Secret shorter than SecretLen (16), including empty/nil -> VerifyProof false even for the matching proof;
  *     Proof keeps its signature (no error return) and is still plain HMAC for any key
+ *   - An all-zero secret of any length (what an unset Blob holds) -> VerifyProof false even for the matching proof
  *   - TLS 1.3 exporter: absent context == empty context (RFC 8446/9846 §7.5)
  * @see ./blob.go (SecretLen)
  */
@@ -89,6 +90,12 @@ func TestVerifyProof(t *testing.T) {
 	}
 	if pairing.VerifyProof(nil, ekm, pairing.Proof(nil, ekm)) {
 		t.Error("nil secret: matching proof accepted, want false")
+	}
+	for _, n := range []int{pairing.SecretLen, 2 * pairing.SecretLen} {
+		zero := make([]byte, n)
+		if pairing.VerifyProof(zero, ekm, pairing.Proof(zero, ekm)) {
+			t.Errorf("%d-byte all-zero secret: matching proof accepted, want false", n)
+		}
 	}
 }
 

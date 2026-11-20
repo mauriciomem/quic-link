@@ -8,10 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"syscall"
 	"time"
 
+	"github.com/mauriciomem/quic-link/internal/atomicfile"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -46,8 +45,8 @@ func LoadKey(path string) (ed25519.PrivateKey, error) {
 }
 
 // WriteKey writes key as a PKCS#8 PEM file at path with 0600 permissions,
-// creating the parent directory 0700. The write is atomic (temp file in the
-// same dir, chmod, rename) so a world-readable private key never exists even
+// creating the parent directory 0700. The write is atomic and durable (see
+// atomicfile.Write), so a world-readable private key never exists even
 // momentarily.
 func WriteKey(path string, key ed25519.PrivateKey) error {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
@@ -55,7 +54,7 @@ func WriteKey(path string, key ed25519.PrivateKey) error {
 		return fmt.Errorf("marshal PKCS#8: %w", err)
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
-	return writeFileAtomic(path, pemBytes, 0o600)
+	return atomicfile.Write(path, pemBytes, 0o600)
 }
 
 // WriteMeta writes the machine-owned sidecar "<keyPath>.meta" (TOML, 0600)
@@ -64,7 +63,7 @@ func WriteKey(path string, key ed25519.PrivateKey) error {
 // config.
 func WriteMeta(keyPath string, created time.Time) error {
 	content := fmt.Sprintf("created = %q\n", created.UTC().Format(time.RFC3339))
-	return writeFileAtomic(keyPath+".meta", []byte(content), 0o600)
+	return atomicfile.Write(keyPath+".meta", []byte(content), 0o600)
 }
 
 // ReadMeta parses the "<keyPath>.meta" sidecar written by WriteMeta and
@@ -97,91 +96,4 @@ func ReadMeta(keyPath string) (created time.Time, present bool, err error) {
 		return time.Time{}, false, fmt.Errorf("key metadata %s.meta: created is not RFC3339: %w", keyPath, err)
 	}
 	return t, true, nil
-}
-
-// writeFileAtomic writes data to path with mode, creating the parent directory
-// 0700. It writes to a temp file in the same directory, chmods it, then renames
-// — so readers never see a partial or default-mode file.
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	return writeFileAtomicWith(defaultFSOps(), path, data, mode)
-}
-
-// fsOps is the set of file operations writeFileAtomicWith performs on the
-// temp file and its directory. It exists so tests can pass recording or
-// failing implementations without package-level mutable state.
-type fsOps struct {
-	write    func(f *os.File, b []byte) error
-	syncFile func(f *os.File) error
-	close    func(f *os.File) error
-	rename   func(oldpath, newpath string) error
-	syncDir  func(dir string) error
-}
-
-// defaultFSOps returns fsOps backed by the real os calls.
-func defaultFSOps() fsOps {
-	return fsOps{
-		write: func(f *os.File, b []byte) error {
-			_, err := f.Write(b)
-			return err
-		},
-		syncFile: (*os.File).Sync,
-		close:    (*os.File).Close,
-		rename:   os.Rename,
-		syncDir: func(dir string) error {
-			d, err := os.Open(dir)
-			if err != nil {
-				return err
-			}
-			if err := d.Sync(); err != nil {
-				d.Close()
-				return err
-			}
-			return d.Close()
-		},
-	}
-}
-
-// writeFileAtomicWith is writeFileAtomic with injectable file operations.
-func writeFileAtomicWith(ops fsOps, path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create dir %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp file in %s: %w", dir, err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename succeeds
-	if err := tmp.Chmod(mode); err != nil {
-		ops.close(tmp)
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	if err := ops.write(tmp, data); err != nil {
-		ops.close(tmp)
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	// On macOS, (*os.File).Sync already issues F_FULLFSYNC (Go's
-	// internal/poll/fd_fsync_darwin.go, falling back to fsync on ENOTSUP),
-	// so no darwin-specific code is needed here or for the directory sync.
-	if err := ops.syncFile(tmp); err != nil {
-		ops.close(tmp)
-		return fmt.Errorf("sync temp file: %w", err)
-	}
-	if err := ops.close(tmp); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := ops.rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp file to %s: %w", path, err)
-	}
-	// Persist the rename itself. Some filesystems (network, FUSE) cannot
-	// sync a directory and report EINVAL or ENOTSUP; the key is in place
-	// regardless, so treat that as "not supported here" rather than failing.
-	if err := ops.syncDir(dir); err != nil {
-		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
-			return nil
-		}
-		return fmt.Errorf("sync dir %s: %w", dir, err)
-	}
-	return nil
 }

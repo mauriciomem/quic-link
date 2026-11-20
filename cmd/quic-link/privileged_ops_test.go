@@ -55,6 +55,9 @@ var filesAllowedToRunOtherPrograms = map[string]string{
 	// Asks the system for its own version, to find out whether a resolver here
 	// can be pointed at a port at all. Reading only; changes nothing.
 	"internal/setup/resolver.go": "asks the system its version before setup decides anything",
+	// Re-runs only its own test binary so two processes contend for a file
+	// lock. It starts nothing else and grants nothing.
+	"internal/pairstate/twoprocess_test.go": "re-runs its own test binary to prove the file lock across processes",
 }
 
 // privilegeTools are program names whose entire purpose is to grant or use a
