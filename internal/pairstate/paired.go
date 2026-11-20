@@ -1,16 +1,131 @@
 package pairstate
 
-import "time"
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+	"unicode"
 
-// PairedServer is one [servers.NAME] table of paired.toml.
+	"github.com/pelletier/go-toml/v2"
+
+	"github.com/mauriciomem/quic-link/internal/atomicfile"
+	"github.com/mauriciomem/quic-link/internal/identity"
+)
+
+// PairedServer is one [servers.NAME] table of paired.toml: a server this
+// client paired with, its address, its pin and when the pairing happened.
 type PairedServer struct {
 	Addr     string    `toml:"addr"`
 	Pin      string    `toml:"pin"`
 	PairedAt time.Time `toml:"paired_at"`
 }
 
-func LoadPaired(path string) (map[string]PairedServer, error) { return nil, errNotImplemented }
+// pairedFile is the whole of paired.toml.
+type pairedFile struct {
+	Servers map[string]PairedServer `toml:"servers"`
+}
 
-func UpsertPaired(path, name, addr, pin string, now time.Time) error { return errNotImplemented }
+// LoadPaired reads paired.toml. A missing file is an empty, non-nil map.
+// Unknown keys are ignored so a file written by a newer version still loads
+// (they are dropped if this version rewrites the file). Bad TOML or an
+// invalid server is a *MalformedError with Line 0, and no servers.
+//
+// paired.toml is written only by the client's own pairing verbs, run by one
+// operator at a time, so unlike authorized_clients it takes no lock.
+func LoadPaired(path string) (map[string]PairedServer, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]PairedServer{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("pairstate: read %s: %w", path, err)
+	}
+	var f pairedFile
+	if err := toml.NewDecoder(bytes.NewReader(data)).Decode(&f); err != nil {
+		return nil, &MalformedError{Path: path, Reason: fmt.Sprintf("invalid TOML: %v", err)}
+	}
+	servers := make(map[string]PairedServer, len(f.Servers))
+	for name, s := range f.Servers {
+		if err := validatePaired(name, s.Addr, s.Pin); err != nil {
+			return nil, &MalformedError{Path: path, Reason: err.Error()}
+		}
+		servers[name] = s
+	}
+	return servers, nil
+}
 
-func ForgetPaired(path, name string) error { return errNotImplemented }
+// UpsertPaired records server name at addr with pin, paired at now, replacing
+// any earlier record of the same name and keeping the others. The file is
+// written atomically, mode 0600, its directory 0700. Invalid input or an
+// existing malformed file is an error and leaves the file untouched.
+func UpsertPaired(path, name, addr, pin string, now time.Time) error {
+	if err := validatePaired(name, addr, pin); err != nil {
+		return fmt.Errorf("pairstate: %w", err)
+	}
+	servers, err := LoadPaired(path)
+	if err != nil {
+		return err
+	}
+	servers[name] = PairedServer{Addr: addr, Pin: pin, PairedAt: now}
+	return writePaired(path, servers)
+}
+
+// ForgetPaired removes server name. An unknown name, or a missing file, is
+// ErrNotFound and leaves the file untouched.
+func ForgetPaired(path, name string) error {
+	servers, err := LoadPaired(path)
+	if err != nil {
+		return err
+	}
+	if _, ok := servers[name]; !ok {
+		return fmt.Errorf("pairstate: server %q is not in %s: %w", name, path, ErrNotFound)
+	}
+	delete(servers, name)
+	return writePaired(path, servers)
+}
+
+// writePaired replaces paired.toml with servers.
+func writePaired(path string, servers map[string]PairedServer) error {
+	data, err := toml.Marshal(pairedFile{Servers: servers})
+	if err != nil {
+		return fmt.Errorf("pairstate: encode %s: %w", path, err)
+	}
+	if err := atomicfile.Write(path, data, 0o600); err != nil {
+		return fmt.Errorf("pairstate: write %s: %w", path, err)
+	}
+	return nil
+}
+
+// validatePaired checks one server record. The name becomes a TOML table key
+// under [servers], so it must not contain '.', whitespace or control
+// characters; the pin must be canonical.
+func validatePaired(name, addr, pin string) error {
+	if err := validateServerName(name); err != nil {
+		return err
+	}
+	if addr == "" {
+		return fmt.Errorf("server %q: addr is empty", name)
+	}
+	if _, err := identity.ParsePinStrict(pin); err != nil {
+		return fmt.Errorf("server %q: invalid pin %q: %w", name, pin, err)
+	}
+	return nil
+}
+
+func validateServerName(name string) error {
+	if name == "" {
+		return errors.New("server name is empty")
+	}
+	if strings.Contains(name, ".") {
+		return fmt.Errorf("server name %q contains '.'", name)
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("server name %q contains whitespace or a control character", name)
+		}
+	}
+	return nil
+}
