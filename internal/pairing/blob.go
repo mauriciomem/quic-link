@@ -41,21 +41,31 @@ var (
 
 // Blob is the decoded join blob: a one-time secret and the listener's pin.
 //
-// The fields are unexported and the secret sits behind a pointer, so the
-// secret is not reachable where Blob's redacting methods are bypassed: fmt
-// printing a struct that holds a Blob in an unexported field shows only an
-// address, and reflection encoders (CBOR, gob) see no exported fields.
+// Its fields are unexported and the secret is reachable only by calling a
+// function held in one of them. Where Blob's redacting methods are bypassed -
+// a Blob inside an unexported struct field - fmt prints at most a function
+// address, for every verb, and reflection encoders (CBOR, gob) see no
+// exported fields.
+//
+// Blob is not comparable: compare Encode() or the accessors. The zero Blob
+// carries an all-zero secret, which ParseBlob and VerifyProof refuse.
 type Blob struct {
-	secret      *[SecretLen]byte
+	secret      func() *[SecretLen]byte // nil in the zero Blob
 	listenerPin [sha256.Size]byte
 }
 
-// Secret returns the join secret, or the zero value for a zero Blob.
+// holdSecret returns a function that yields s. fmt and reflection print a
+// function as an address and never call it.
+func holdSecret(s *[SecretLen]byte) func() *[SecretLen]byte {
+	return func() *[SecretLen]byte { return s }
+}
+
+// Secret returns a copy of the join secret, or the zero value for a zero Blob.
 func (b Blob) Secret() [SecretLen]byte {
 	if b.secret == nil {
 		return [SecretLen]byte{}
 	}
-	return *b.secret
+	return *b.secret()
 }
 
 // ListenerPin returns the listener's pin as raw SHA-256 bytes.
@@ -69,13 +79,14 @@ func NewBlob(listenerPinB64 string) (Blob, error) {
 	if err != nil {
 		return Blob{}, fmt.Errorf("pairing: listener pin: %w", err)
 	}
-	b := Blob{secret: new([SecretLen]byte)}
+	secret := new([SecretLen]byte)
+	b := Blob{secret: holdSecret(secret)}
 	raw, err := base64.StdEncoding.DecodeString(pin)
 	if err != nil {
 		return Blob{}, fmt.Errorf("pairing: listener pin: %w", err)
 	}
 	copy(b.listenerPin[:], raw)
-	if _, err := rand.Read(b.secret[:]); err != nil {
+	if _, err := rand.Read(secret[:]); err != nil {
 		return Blob{}, fmt.Errorf("pairing: generating join secret: %w", err)
 	}
 	return b, nil
@@ -99,7 +110,8 @@ func (b Blob) PinB64() string {
 
 // ParseBlob decodes s exactly as given. It never trims or normalizes: any
 // spelling other than the one Encode would produce is refused, including
-// non-zero unused trailing bits.
+// non-zero unused trailing bits. An all-zero secret, which no listener
+// accepts, is ErrBlobZeroSecret.
 func ParseBlob(s string) (Blob, error) {
 	body, ok := strings.CutPrefix(s, BlobPrefix)
 	if !ok {
@@ -120,11 +132,16 @@ func ParseBlob(s string) (Blob, error) {
 	if raw[0] != BlobVersion {
 		return Blob{}, ErrBlobVersion
 	}
-	b := Blob{secret: new([SecretLen]byte)}
-	copy(b.secret[:], raw[1:1+SecretLen])
+	secret := new([SecretLen]byte)
+	copy(secret[:], raw[1:1+SecretLen])
+	b := Blob{secret: holdSecret(secret)}
 	copy(b.listenerPin[:], raw[1+SecretLen:])
 	if b.Encode() != s {
 		return Blob{}, ErrBlobNonCanonical
+	}
+	// Checked last so every other defect keeps its own error.
+	if b.Secret() == ([SecretLen]byte{}) {
+		return Blob{}, ErrBlobZeroSecret
 	}
 	return b, nil
 }

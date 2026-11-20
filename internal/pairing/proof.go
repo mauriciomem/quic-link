@@ -3,6 +3,7 @@ package pairing
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 )
 
 const (
@@ -22,7 +23,8 @@ func ExporterContext(label string) []byte {
 	return append([]byte{}, label...)
 }
 
-// Proof returns HMAC-SHA256(key=secret, msg=ekm).
+// Proof returns HMAC-SHA256(key=secret, msg=ekm). VerifyProof, not Proof,
+// refuses an all-zero key.
 func Proof(secret, ekm []byte) []byte {
 	m := hmac.New(sha256.New, secret)
 	m.Write(ekm)
@@ -32,9 +34,10 @@ func Proof(secret, ekm []byte) []byte {
 // VerifyProof reports whether got is the proof for secret and ekm, comparing
 // in constant time. A secret shorter than SecretLen is always rejected, even
 // with a matching proof; a proof of the wrong length is rejected by
-// hmac.Equal.
+// hmac.Equal. An all-zero secret is always rejected: it is what an unset Blob
+// holds, and it is public.
 func VerifyProof(secret, ekm, got []byte) bool {
-	if len(secret) < SecretLen {
+	if len(secret) < SecretLen || subtle.ConstantTimeCompare(secret, make([]byte, len(secret))) == 1 {
 		return false
 	}
 	return hmac.Equal(Proof(secret, ekm), got)
