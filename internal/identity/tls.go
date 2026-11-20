@@ -113,8 +113,9 @@ func staticSource(set map[string]struct{}) AllowedSource {
 // by the next handshake.
 //
 // allowEmptyAtStart lets a listener start with no authorized pin (every peer
-// is then rejected with ErrPinMismatch). It stays unexported: the exported
-// constructors always pass false, so no public path builds an empty set.
+// is then rejected with ErrPinMismatch). Only ListenTLSWithPairing passes
+// true, because a fresh agent pairs its first client through that listener.
+// Every other constructor passes false, so they refuse an empty set.
 func pinningTLSFrom(key ed25519.PrivateKey, mode transportMode, src AllowedSource, allowEmptyAtStart bool) (*tls.Config, error) {
 	if src == nil {
 		return nil, errNilSource
