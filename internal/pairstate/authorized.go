@@ -136,7 +136,8 @@ func LoadAuthorized(path string) (LoadResult, error) {
 
 // LoadAuthorizedAtStart is LoadAuthorized for process start, where there is
 // no previously loaded set to fall back to: a malformed file returns an error
-// matching both ErrColdStart and the *MalformedError.
+// matching both ErrColdStart and the *MalformedError. An unsafe path is
+// returned as the ErrUnsafePath error, without ErrColdStart.
 func LoadAuthorizedAtStart(path string) (LoadResult, error) {
 	res, err := LoadAuthorized(path)
 	var me *MalformedError
@@ -156,8 +157,14 @@ func Allowed(r LoadResult) map[string]struct{} {
 	return set
 }
 
-// readAuthorized reads path without locking; a missing file parses as empty.
+// readAuthorized reads path without locking; a missing directory or file
+// parses as empty. The directory and the file are checked first (see
+// checkPrivate), so a FIFO is refused before it is ever opened.
 func readAuthorized(path string) (parsedFile, error) {
+	exists, err := verifyStatePath(path)
+	if err != nil || !exists {
+		return parsedFile{}, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return parsedFile{}, nil
@@ -546,12 +553,27 @@ func defaultLockOpts() lockOpts {
 // as the same user. A hand edit of authorized_clients bypasses it. Lock
 // behavior on NFS, FUSE and other network or userspace filesystems is
 // untested and unsupported; keep the state directory on a local filesystem.
+//
+// State files, their directory and the lock file must be owned by the current
+// user and not writable by group or others, and must not be symbolic links;
+// otherwise every operation fails with ErrUnsafePath. The directory is checked
+// before the lock is opened, and the lock is opened without following a
+// symbolic link and then checked on its open descriptor.
 func withLock(o lockOpts, path string, fn func() error) (err error) {
 	lockPath := path + ".lock"
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+	dir := filepath.Dir(lockPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("pairstate: create dir for %s: %w", lockPath, err)
 	}
-	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|unix.O_CLOEXEC, 0o600)
+	if exists, err := verifyStateDir(dir); err != nil {
+		return err
+	} else if !exists {
+		return fmt.Errorf("pairstate: state directory %s vanished after it was created", dir)
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if errors.Is(err, unix.ELOOP) {
+		return unsafePath(lockPath, "is a symbolic link")
+	}
 	if err != nil {
 		return fmt.Errorf("pairstate: open lock %s: %w", lockPath, err)
 	}
@@ -561,6 +583,13 @@ func withLock(o lockOpts, path string, fn func() error) (err error) {
 			err = fmt.Errorf("pairstate: close lock %s: %w", lockPath, cerr)
 		}
 	}()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("pairstate: stat lock %s: %w", lockPath, err)
+	}
+	if err := checkPrivate(lockPath, fi, false, os.Geteuid()); err != nil {
+		return err
+	}
 	if err := acquire(o, int(f.Fd())); err != nil {
 		return fmt.Errorf("%w (lock file %s)", err, lockPath)
 	}

@@ -34,8 +34,18 @@ type pairedFile struct {
 // invalid server is a *MalformedError with Line 0, and no servers.
 //
 // paired.toml is written only by the client's own pairing verbs, run by one
-// operator at a time, so unlike authorized_clients it takes no lock.
+// operator at a time, so unlike authorized_clients it takes no lock. Its
+// directory and the file itself must be private to the current user (see
+// checkPrivate), otherwise the error matches ErrUnsafePath; UpsertPaired and
+// ForgetPaired read through LoadPaired and are refused the same way.
 func LoadPaired(path string) (map[string]PairedServer, error) {
+	exists, err := verifyStatePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return map[string]PairedServer{}, nil
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return map[string]PairedServer{}, nil

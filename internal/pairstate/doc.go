@@ -19,5 +19,8 @@
 // Every writer of authorized_clients holds an exclusive flock on a sibling
 // ".lock" file across its read-modify-write, so concurrent processes cannot
 // lose each other's updates. Readers do not lock: the file is only ever
-// replaced by an atomic rename.
+// replaced by an atomic rename. State files, their directory and the lock file
+// must be owned by the current user and not writable by group or others, and
+// must not be symbolic links; otherwise every operation fails with
+// ErrUnsafePath.
 package pairstate
