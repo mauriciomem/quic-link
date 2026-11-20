@@ -5,7 +5,8 @@
  *   - File shape: [servers.NAME] addr, pin, paired_at (go-toml/v2); missing file -> empty map, nil
  *   - Upsert creates or replaces NAME with paired_at = now (injected clock); other servers kept; file 0600, dir 0700
  *   - Forget removes NAME; unknown NAME -> ErrNotFound, file untouched
- *   - Load and write validate: pin ParsePinStrict, name non-empty without '.', whitespace or control chars, addr non-empty
+ *   - Load, write and ResolveServers validate: name passes config.ValidateServerName (bytes 0x21-0x7E first); addr printable ASCII and config.DialableAddr; pin ParsePinStrict
+ *   - Validation error text is printable ASCII only
  *   - Invalid entry or bad TOML on load -> *MalformedError{Path, Line: 0, Reason} matching ErrMalformed
  * @edge-cases
  *   - Unknown keys are ignored on load (forward compatible), not rejected
@@ -19,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,10 +111,27 @@ func TestUpsertPaired_RoundTripModesAndOverwrite(t *testing.T) {
 			"pin with space":     {"new", "a:1", pb + " "},
 			"non-canonical pin":  {"new", "a:1", nonCanonicalVariant(t, pb)},
 			"overwrite, bad pin": {"home", "a:1", "nope"},
+			"uppercase name":     {"Home", "a:1", pb},
+			"name with _":        {"a_b", "a:1", pb},
+			"name with /":        {"a/b", "a:1", pb},
+			"64-char name":       {strings.Repeat("a", 64), "a:1", pb},
+			"name with RLO":      {"a\u202eb", "a:1", pb},
+			"name with ZWSP":     {"a\u200bb", "a:1", pb},
+			"addr with ESC":      {"new", "a\x1b:1", pb},
+			"addr with newline":  {"new", "a\nb:1", pb},
+			"addr with space":    {"new", "a b:1", pb},
+			"non-ASCII addr":     {"new", "caf\u00e9:1", pb},
+			"addr without port":  {"new", "host", pb},
+			"addr without host":  {"new", ":1", pb},
 		}
 		for name, c := range cases {
-			if err := UpsertPaired(path, c[0], c[1], c[2], clockT2); err == nil {
+			err := UpsertPaired(path, c[0], c[1], c[2], clockT2)
+			if err == nil {
 				t.Errorf("%s: UpsertPaired accepted %q", name, c)
+				continue
+			}
+			if !printableASCII(err.Error()) {
+				t.Errorf("%s: error text %+q has bytes outside 0x20-0x7E", name, err.Error())
 			}
 		}
 		if after, _ := os.ReadFile(path); string(after) != string(before) {
@@ -123,6 +142,18 @@ func TestUpsertPaired_RoundTripModesAndOverwrite(t *testing.T) {
 			t.Errorf("UpsertPaired(new file, bad name) accepted")
 		}
 		assertAbsent(t, missing)
+	})
+	t.Run("accepts a 63-char name and a bracketed IPv6 addr", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "paired.toml")
+		name := strings.Repeat("a", 63)
+		if err := UpsertPaired(p, name, "[2001:db8::1]:4433", pb, clockT1); err != nil {
+			t.Fatalf("UpsertPaired(63-char name, IPv6) = %v, want nil", err)
+		}
+		got, err := LoadPaired(p)
+		if err != nil {
+			t.Fatalf("LoadPaired: %v", err)
+		}
+		assertPaired(t, got, map[string]PairedServer{name: {Addr: "[2001:db8::1]:4433", Pin: pb, PairedAt: clockT1}})
 	})
 }
 
@@ -180,6 +211,12 @@ func TestLoadPaired_RejectsInvalidEntries(t *testing.T) {
 		"name with dot":       entry(`"a.b"`, "h:1", p),
 		"name with space":     entry(`"a b"`, "h:1", p),
 		"empty name":          entry(`""`, "h:1", p),
+		"uppercase name":      entry(`"Home"`, "h:1", p),
+		"name with _":         entry(`"a_b"`, "h:1", p),
+		"name with /":         entry(`"a/b"`, "h:1", p),
+		"64-char name":        entry(`"`+strings.Repeat("a", 64)+`"`, "h:1", p),
+		"addr with ESC":       entry("home", `h\u001b[31m:1`, p),
+		"addr without port":   entry("home", "host", p),
 	}
 	for name, content := range bad {
 		t.Run(name, func(t *testing.T) {

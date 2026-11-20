@@ -4,22 +4,22 @@
  *   (Blob) Secret() [SecretLen]byte; (Blob) ListenerPin() [sha256.Size]byte
  * @behavior
  *   - Encode = "QLJ1-" + base64.RawURLEncoding(0x01 || Secret[16] || ListenerPin[32]); always BlobLen (71) chars
- *   - ParseBlob(Encode(b)) == b; PinB64 is base64.StdEncoding of ListenerPin
+ *   - ParseBlob(Encode(b)) has the same accessors and the same Encode as b; Blob is not comparable; PinB64 is base64.StdEncoding of ListenerPin
  *   - NewBlob fills Secret from crypto/rand; pin must be std-b64, 32 bytes, canonical (no normalization)
  * @edge-cases
- *   - Order: prefix -> decode -> length != 49 -> version != 0x01 -> re-encode != input
- *   - Errors (errors.Is-distinct): ErrBlobPrefix, ErrBlobDecode, ErrBlobLength, ErrBlobVersion, ErrBlobNonCanonical
+ *   - Order: prefix -> decode -> length != 49 -> version != 0x01 -> re-encode != input -> all-zero secret
+ *   - Errors (errors.Is-distinct): ErrBlobPrefix, ErrBlobDecode, ErrBlobLength, ErrBlobVersion, ErrBlobNonCanonical, ErrBlobZeroSecret
  *   - 15 non-canonical spellings of the last char refused; ErrBlobNonCanonical text says the "last character" looks mistyped
  *   - No trimming; every ParseBlob error is exactly one sentinel (no blob material in error text)
  *   - Redaction: fmt (%v %+v %#v %s), slog (Text/JSON via LogValue) and json.Marshal of a Blob show a "redacted"
  *     marker and never the secret (raw/hex/base64) nor the encoded blob body
  *   - Blob fields are unexported with accessors Secret() [SecretLen]byte (zero if unset) and ListenerPin() [32]byte;
- *     the secret is held behind a pointer, so a struct holding a Blob in an UNEXPORTED field (where fmt cannot call
- *     Blob's methods) prints an address, never the secret: %v, %+v and slog text of such a struct carry no secret
+ *     the secret is reachable only through a function-valued field, so a struct holding a Blob in an UNEXPORTED field
+ *     (where fmt cannot call Blob's methods) prints no secret under any fmt verb (%v %+v %#v %s %q %t %c %e %f %g %U %O %x %d) nor in slog text
  *   - cbor.Marshal and gob of a Blob (value, pointer, or inside a struct) carry no secret bytes;
  *     gob refusing with "no exported fields" is acceptable
  *   - Secret()/ListenerPin() return what NewBlob was given / ParseBlob decoded; Secret() returns a copy
- *   - Zero Blob: Secret() is all-zero (no panic), Encode carries an all-zero secret (current behavior, under review)
+ *   - Zero Blob: Secret() is all-zero (no panic), Encode carries the zero secret, ParseBlob of that encoding is ErrBlobZeroSecret, VerifyProof refuses a zero key
  *   - Tests reach the secret only through Encode/ParseBlob and the accessors, never through Blob's fields
  * @see ../identity/pin.go (ParsePinStrict)
  */
@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -115,6 +116,7 @@ func TestParseBlob_Defects(t *testing.T) {
 	body := good[5:]
 	raw, _ := base64.RawURLEncoding.DecodeString(body)
 	badVer := append([]byte{0x02}, raw[1:]...)
+	zeroSecret := append(append([]byte{pairing.BlobVersion}, make([]byte, pairing.SecretLen)...), fixedPin[:]...)
 	secretB64 := base64.RawURLEncoding.EncodeToString(fixedSecret[:])
 
 	cases := []struct {
@@ -132,8 +134,9 @@ func TestParseBlob_Defects(t *testing.T) {
 		{"short", "QLJ1-" + base64.RawURLEncoding.EncodeToString(raw[:48]), pairing.ErrBlobLength},
 		{"long", "QLJ1-" + base64.RawURLEncoding.EncodeToString(append(raw, 0)), pairing.ErrBlobLength},
 		{"bad version", "QLJ1-" + base64.RawURLEncoding.EncodeToString(badVer), pairing.ErrBlobVersion},
+		{"all-zero secret", "QLJ1-" + base64.RawURLEncoding.EncodeToString(zeroSecret), pairing.ErrBlobZeroSecret},
 	}
-	all := []error{pairing.ErrBlobPrefix, pairing.ErrBlobDecode, pairing.ErrBlobLength, pairing.ErrBlobVersion, pairing.ErrBlobNonCanonical}
+	all := []error{pairing.ErrBlobPrefix, pairing.ErrBlobDecode, pairing.ErrBlobLength, pairing.ErrBlobVersion, pairing.ErrBlobNonCanonical, pairing.ErrBlobZeroSecret}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := pairing.ParseBlob(tc.in)
@@ -320,7 +323,7 @@ func TestBlob_NotPrintedThroughUnexportedField(t *testing.T) {
 		}
 	}
 	h := blobHolder{name: "h", b: b}
-	for _, verb := range []string{"%v", "%+v"} {
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%t", "%c", "%e", "%f", "%g", "%U", "%O", "%x", "%d"} {
 		t.Run("fmt "+verb, func(t *testing.T) {
 			check(t, fmt.Sprintf(verb, h))
 			check(t, fmt.Sprintf(verb, &h))
@@ -431,6 +434,11 @@ func TestBlob_AccessorsReturnCarriedValues(t *testing.T) {
 			t.Errorf("ParseBlob(Encode(b)) accessors = %x/%x, want %x/%x", got.Secret(), got.ListenerPin(), b.Secret(), pin)
 		}
 	})
+	t.Run("Blob is not comparable", func(t *testing.T) {
+		if reflect.TypeOf(pairing.Blob{}).Comparable() {
+			t.Errorf("pairing.Blob is comparable: == would compare secret identity, not the blob")
+		}
+	})
 }
 
 func TestBlob_SecretAccessorReturnsACopy(t *testing.T) {
@@ -448,7 +456,6 @@ func TestBlob_SecretAccessorReturnsACopy(t *testing.T) {
 			t.Errorf("Encode changed after mutating the Secret() result")
 		}
 	})
-	// Current behavior, under review: a zero Blob is not rejected.
 	t.Run("zero Blob has an all-zero secret", func(t *testing.T) {
 		var b pairing.Blob
 		if b.Secret() != ([pairing.SecretLen]byte{}) {
@@ -459,6 +466,9 @@ func TestBlob_SecretAccessorReturnsACopy(t *testing.T) {
 		}
 		if secret, _ := payloadOf(t, b); secret != ([pairing.SecretLen]byte{}) {
 			t.Errorf("zero Blob encodes secret %x, want all zero", secret)
+		}
+		if _, err := pairing.ParseBlob(b.Encode()); !errors.Is(err, pairing.ErrBlobZeroSecret) {
+			t.Errorf("ParseBlob(zero Blob encoding) = %v, want ErrBlobZeroSecret", err)
 		}
 	})
 }
@@ -484,7 +494,7 @@ func FuzzParseBlob(f *testing.F) {
 	for low := range 16 {
 		f.Add(good[:len(good)-1] + string(b64url[last|low]))
 	}
-	sentinels := []error{pairing.ErrBlobPrefix, pairing.ErrBlobDecode, pairing.ErrBlobLength, pairing.ErrBlobVersion, pairing.ErrBlobNonCanonical}
+	sentinels := []error{pairing.ErrBlobPrefix, pairing.ErrBlobDecode, pairing.ErrBlobLength, pairing.ErrBlobVersion, pairing.ErrBlobNonCanonical, pairing.ErrBlobZeroSecret}
 	f.Fuzz(func(t *testing.T, s string) {
 		b, err := pairing.ParseBlob(s)
 		if err != nil {

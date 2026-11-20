@@ -1,6 +1,7 @@
 /**
  * @spec-handoff
- * @interface AppendAuthorized / RemoveAuthorized exercised from two re-executed copies of this test binary
+ * @interface appendAuthorizedWith / removeAuthorizedWith (the exported writers' code path) exercised from two re-executed copies of this test binary
+ * @interface childLockOpts() lockOpts  // defaultLockOpts with a 30 s timeout: children test lost updates, not the production timeout
  * @behavior
  *   - Two processes appending concurrently both survive: the exact union of their pins is on disk
  *   - A pin removed while another process appends stays removed (no read-modify-write resurrects it)
@@ -270,6 +271,15 @@ func TestAuthorizedRemove_RacingAppendStaysRemoved(t *testing.T) {
 	}
 }
 
+// childLockOpts lets a child wait up to 30 s for the lock. On a slow disk one
+// child can hold the lock for its whole run, and these tests are about lost
+// updates, not the production timeout (pinned in lock_test.go).
+func childLockOpts() lockOpts {
+	o := defaultLockOpts()
+	o.timeout = 30 * time.Second
+	return o
+}
+
 // TestAuthorizedHelperProcess is the child side of the two-process tests. It
 // does nothing unless PAIRSTATE_HELPER=1.
 func TestAuthorizedHelperProcess(t *testing.T) {
@@ -300,20 +310,20 @@ func TestAuthorizedHelperProcess(t *testing.T) {
 		}
 		if role == roleAppend {
 			for _, p := range pins {
-				if added, err := AppendAuthorized(path, Entry{Pin: p, State: StateUnconfirmed}); err != nil || !added {
+				if added, err := appendAuthorizedWith(childLockOpts(), path, Entry{Pin: p, State: StateUnconfirmed}); err != nil || !added {
 					t.Fatalf("AppendAuthorized(%s) = (%v, %v), want (true, nil)", p, added, err)
 				}
 			}
 			return
 		}
-		if e, err := RemoveAuthorized(path, pins[0]); err != nil || e.Pin != pins[0] {
+		if e, err := removeAuthorizedWith(childLockOpts(), path, pins[0]); err != nil || e.Pin != pins[0] {
 			t.Fatalf("RemoveAuthorized(target) = (%+v, %v)", e, err)
 		}
 		for _, p := range pins[1:] {
-			if added, err := AppendAuthorized(path, Entry{Pin: p, State: StateUnconfirmed}); err != nil || !added {
+			if added, err := appendAuthorizedWith(childLockOpts(), path, Entry{Pin: p, State: StateUnconfirmed}); err != nil || !added {
 				t.Fatalf("AppendAuthorized(%s) = (%v, %v), want (true, nil)", p, added, err)
 			}
-			if e, err := RemoveAuthorized(path, p); err != nil || e.Pin != p {
+			if e, err := removeAuthorizedWith(childLockOpts(), path, p); err != nil || e.Pin != p {
 				t.Fatalf("RemoveAuthorized(%s) = (%+v, %v)", p, e, err)
 			}
 		}

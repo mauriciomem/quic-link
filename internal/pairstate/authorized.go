@@ -45,8 +45,9 @@ type Entry struct {
 
 // Note reports a token that was ignored on a line.
 type Note struct {
-	Line  int
-	Token string
+	Line   int
+	Token  string
+	Reason string
 }
 
 // LoadResult is the parsed content of an authorized_clients file.
@@ -61,6 +62,7 @@ var (
 	ErrPrefixShort = errors.New("pairstate: pin prefix must be at least 8 characters")
 	ErrLockTimeout = errors.New("pairstate: timed out waiting for the authorized_clients lock")
 	ErrColdStart   = errors.New("pairstate: authorized_clients is malformed at startup")
+	ErrUnsafePath  = errors.New("pairstate: refusing an unsafe state path")
 )
 
 // minPrefix is the shortest pin prefix RemoveAuthorized accepts.

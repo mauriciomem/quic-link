@@ -4,11 +4,14 @@
  * @interface AppendAuthorized(path string, e Entry) (added bool, err error); RemoveAuthorized(path, pinPrefix string) (Entry, error); PromoteAuthorized(path, pin string) error
  * @behavior
  *   - Line = blank | "#"-comment | PIN *(1*WSP token) [1*WSP "#" text]; WSP is SP/HTAB only; LF-terminated; Comment = text after "# "
- *   - PIN must equal identity.ParsePinStrict(PIN) - nothing is trimmed first; a bad pin rejects the whole file: *MalformedError{Path, Line}, errors.Is ErrMalformed, empty result
- *   - no state= -> StateConfirmed; state=unconfirmed/confirmed; unknown state= value -> StateUnknown + Note{Line, Token}; other tokens ignored + Note
- *   - duplicate state= tokens and CRLF -> malformed; a pin listed twice is deduped (first line wins)
+ *   - PIN must equal identity.ParsePinStrict(PIN) - nothing is trimmed first; a bad pin field is the ONLY thing that rejects the whole file: *MalformedError{Path, Line}, errors.Is ErrMalformed, empty result
+ *   - no state= -> StateConfirmed; state=unconfirmed/confirmed; anything else on a line whose pin parses is tolerated and reported as Note{Line, Token, Reason}:
+ *     "unknown tag", "unknown state value" (-> StateUnknown), "duplicate state tag" (first state= wins), "malformed tag" (Token = strconv.QuoteToASCII, never interpreted),
+ *     "comment with control or non-ASCII characters" (Token quoted; Entry.Comment escaped), "CRLF line ending" (Token "", one \r stripped); notes in line order, CRLF first, comment last
+ *   - Note.Token, Note.Reason and MalformedError text are printable ASCII only; Entry.Comment is %x20-7E/HTAB only; a pin listed twice is deduped (first line wins)
  *   - Allowed includes every entry of every state; the package doc says no tag may restrict access and revocation is deleting the line
- *   - Writers emit exactly "PIN state=<v>" or "PIN state=<v> # <comment>" + LF, keep every other line byte-for-byte, write 0600, dir 0700
+ *   - Writers emit exactly "PIN state=<v>" or "PIN state=<v> # <comment>" + LF, keep every other line byte-for-byte (CRLF, UTF-8, bad tags included), write 0600, dir 0700
+ *   - Promote rewrites each line carrying the pin as "PIN state=confirmed[ # escaped comment]": \r and tags dropped
  *   - Append: strict pin, state confirmed|unconfirmed, comment in %x20-7E/HTAB; present pin -> (false, nil), file untouched
  *   - Remove: prefix < 8 -> ErrPrefixShort; >1 match -> *AmbiguousPrefixError; none -> ErrNotFound; removes every line carrying that pin, nothing else
  *   - Promote: absent -> ErrNotFound (never re-adds); already confirmed -> nil, untouched; writers refuse a malformed file
@@ -56,14 +59,28 @@ func assertMalformed(t *testing.T, res LoadResult, err error, path string, line 
 	if me.Reason == "" {
 		t.Errorf("MalformedError.Reason is empty")
 	}
+	if !printableASCII(me.Error()) {
+		t.Errorf("MalformedError text %+q has bytes outside 0x20-0x7E", me.Error())
+	}
 	if len(res.Entries) != 0 || len(res.Notes) != 0 {
 		t.Errorf("malformed file returned a partial result: %+v", res)
 	}
 }
 
+// printableASCII reports whether every byte of s is in 0x20-0x7E.
+func printableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
 func TestParseAuthorizedLine_Grammar(t *testing.T) {
 	p := testPin("grammar-a")
 	q := testPin("grammar-b")
+	const ctl = "comment with control or non-ASCII characters"
 
 	valid := []struct {
 		name    string
@@ -82,13 +99,47 @@ func TestParseAuthorizedLine_Grammar(t *testing.T) {
 		{"tab separates fields", p + "\tstate=unconfirmed\n", []Entry{{Pin: p, State: StateUnconfirmed}}, nil},
 		{"blank, whitespace-only and comment lines", "\n   \n\t\n# a comment\n   # indented comment\n", nil, nil},
 		{"unknown tag ignored with note", p + " label=x\n",
-			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "label=x"}}},
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "label=x", Reason: "unknown tag"}}},
 		{"unknown tags beside state each noted", "# header\n" + p + " via=qr state=unconfirmed future\n",
-			[]Entry{{Pin: p, State: StateUnconfirmed}}, []Note{{Line: 2, Token: "via=qr"}, {Line: 2, Token: "future"}}},
+			[]Entry{{Pin: p, State: StateUnconfirmed}}, []Note{
+				{Line: 2, Token: "via=qr", Reason: "unknown tag"},
+				{Line: 2, Token: "future", Reason: "unknown tag"},
+			}},
 		{"entries kept in file order", q + "\n" + p + " state=unconfirmed\n",
 			[]Entry{{Pin: q, State: StateConfirmed}, {Pin: p, State: StateUnconfirmed}}, nil},
 		{"duplicate pin deduped, first line wins", p + " state=unconfirmed # first\n" + p + " # second\n",
 			[]Entry{{Pin: p, State: StateUnconfirmed, Comment: "first"}}, nil},
+		{"duplicate state tokens", p + " state=confirmed state=unconfirmed\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "state=unconfirmed", Reason: "duplicate state tag"}}},
+		{"duplicate identical state tokens", p + " state=confirmed state=confirmed\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "state=confirmed", Reason: "duplicate state tag"}}},
+		{"CRLF entry line", p + "\r\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "", Reason: "CRLF line ending"}}},
+		{"CRLF comment line", q + "\n# note\r\n",
+			[]Entry{{Pin: q, State: StateConfirmed}}, []Note{{Line: 2, Token: "", Reason: "CRLF line ending"}}},
+		{"non-ASCII comment-only line", "# caf\u00e9\n",
+			nil, []Note{{Line: 1, Token: "\"caf\\u00e9\"", Reason: ctl}}},
+		{"non-ASCII trailing comment is escaped", p + " # caf\u00e9\n",
+			[]Entry{{Pin: p, State: StateConfirmed, Comment: "caf\\u00e9"}}, []Note{{Line: 1, Token: "\"caf\\u00e9\"", Reason: ctl}}},
+		{"non-ASCII tag is malformed", p + " label=caf\u00e9\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "\"label=caf\\u00e9\"", Reason: "malformed tag"}}},
+		{"hash inside a tag is malformed", p + " a#b\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "\"a#b\"", Reason: "malformed tag"}}},
+		{"control byte in a tag is malformed", p + " tag=\x01\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "\"tag=\\x01\"", Reason: "malformed tag"}}},
+		{"malformed state tag is not interpreted", p + " state=unc\xff\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "\"state=unc\\xff\"", Reason: "malformed tag"}}},
+		{"escape sequence in a comment is escaped", p + " state=unconfirmed # \x1b[31m\n",
+			[]Entry{{Pin: p, State: StateUnconfirmed, Comment: "\\x1b[31m"}}, []Note{{Line: 1, Token: "\"\\x1b[31m\"", Reason: ctl}}},
+		{"CRLF after a state tag", p + " state=confirmed\r\n",
+			[]Entry{{Pin: p, State: StateConfirmed}}, []Note{{Line: 1, Token: "", Reason: "CRLF line ending"}}},
+		{"first state tag wins", p + " state=unconfirmed state=confirmed # x\n",
+			[]Entry{{Pin: p, State: StateUnconfirmed, Comment: "x"}}, []Note{{Line: 1, Token: "state=confirmed", Reason: "duplicate state tag"}}},
+		{"CRLF note comes before the comment note", p + " # \u00e9\r\n",
+			[]Entry{{Pin: p, State: StateConfirmed, Comment: "\\u00e9"}}, []Note{
+				{Line: 1, Token: "", Reason: "CRLF line ending"},
+				{Line: 1, Token: "\"\\u00e9\"", Reason: ctl},
+			}},
 	}
 	for _, tc := range valid {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,6 +153,16 @@ func TestParseAuthorizedLine_Grammar(t *testing.T) {
 			if len(res.Notes) != len(tc.notes) || (len(tc.notes) > 0 && !reflect.DeepEqual(res.Notes, tc.notes)) {
 				t.Errorf("Notes = %+v, want %+v", res.Notes, tc.notes)
 			}
+			for _, n := range res.Notes {
+				if !printableASCII(n.Token) || !printableASCII(n.Reason) {
+					t.Errorf("note %+q has bytes outside 0x20-0x7E", []string{n.Token, n.Reason})
+				}
+			}
+			for _, e := range res.Entries {
+				if !validText(e.Comment) {
+					t.Errorf("Entry.Comment %+q is not comment text", e.Comment)
+				}
+			}
 		})
 	}
 
@@ -110,10 +171,9 @@ func TestParseAuthorizedLine_Grammar(t *testing.T) {
 		content string
 		line    int
 	}{
-		{"duplicate state tokens", p + " state=confirmed state=unconfirmed\n", 1},
-		{"duplicate identical state tokens", p + " state=confirmed state=confirmed\n", 1},
-		{"CRLF entry line", p + "\r\n", 1},
-		{"CRLF comment line", q + "\n# note\r\n", 2},
+		{"CRLF stripped and the pin still fails", "not-a-pin\r\n", 1},
+		{"non-ASCII before the pin", "caf\u00e9" + p + "\n", 1},
+		{"escape sequence as the pin field", "\x1b[2J\n", 1},
 		{"pin field with vertical tab", p + "\v state=confirmed\n", 1},
 		{"pin field with form feed", p + "\f\n", 1},
 		{"pin field with no-break space", p + "\u00a0\n", 1},
@@ -240,7 +300,7 @@ func TestLoadAuthorized_UnknownStateToken(t *testing.T) {
 	if !reflect.DeepEqual(res.Entries, want) {
 		t.Errorf("Entries = %+v, want %+v", res.Entries, want)
 	}
-	if wantNotes := []Note{{Line: 2, Token: "state=revoked"}}; !reflect.DeepEqual(res.Notes, wantNotes) {
+	if wantNotes := []Note{{Line: 2, Token: "state=revoked", Reason: "unknown state value"}}; !reflect.DeepEqual(res.Notes, wantNotes) {
 		t.Errorf("Notes = %+v, want %+v", res.Notes, wantNotes)
 	}
 	for s, want := range map[State]string{StateConfirmed: "confirmed", StateUnconfirmed: "unconfirmed", StateUnknown: "unknown"} {
@@ -714,4 +774,112 @@ func TestAuthorizedWriters_FileLockAndDirModes(t *testing.T) {
 	if want := []string{"authorized_clients", "authorized_clients.lock"}; !reflect.DeepEqual(names, want) {
 		t.Errorf("dir holds %q, want %q (no temp files left)", names, want)
 	}
+}
+
+// Writers leave lines they do not own byte-for-byte, even ones the reader only
+// tolerates, and rewrite a promoted line in the strict format with an escaped
+// comment.
+func TestAuthorizedWriters_PreserveToleratedLines(t *testing.T) {
+	p, q, r, n := testPin("tolerated-p"), testPin("tolerated-q"), testPin("tolerated-r"), testPin("tolerated-n")
+	const ctl = "comment with control or non-ASCII characters"
+	l1 := "# caf\u00e9\r\n"
+	l2 := p + " label=caf\u00e9 a#b state=unconfirmed state=confirmed # \x1b[31m\r\n"
+	l3 := q + "\n"
+	l4 := r + " state=unconfirmed # \u00e9\n"
+	seed := l1 + l2 + l3 + l4
+	path := filepath.Join(t.TempDir(), "authorized_clients")
+	writeRaw(t, path, seed)
+
+	if added, err := AppendAuthorized(path, Entry{Pin: n, State: StateUnconfirmed}); err != nil || !added {
+		t.Fatalf("append to a file with tolerated lines = (%v, %v), want (true, nil)", added, err)
+	}
+	l5 := n + " state=unconfirmed\n"
+	if got, want := readRaw(t, path), seed+l5; got != want {
+		t.Fatalf("after append file =\n%q\nwant\n%q", got, want)
+	}
+
+	if _, err := RemoveAuthorized(path, q); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if got, want := readRaw(t, path), l1+l2+l4+l5; got != want {
+		t.Fatalf("after remove file =\n%q\nwant\n%q", got, want)
+	}
+
+	if err := PromoteAuthorized(path, p); err != nil {
+		t.Fatalf("promote p: %v", err)
+	}
+	l2p := p + " state=confirmed # \\x1b[31m\n"
+	if got, want := readRaw(t, path), l1+l2p+l4+l5; got != want {
+		t.Fatalf("after promote file =\n%q\nwant\n%q", got, want)
+	}
+
+	if err := PromoteAuthorized(path, r); err != nil {
+		t.Fatalf("promote r: %v", err)
+	}
+	l4p := r + " state=confirmed # \\u00e9\n"
+	if got, want := readRaw(t, path), l1+l2p+l4p+l5; got != want {
+		t.Fatalf("after second promote file =\n%q\nwant\n%q", got, want)
+	}
+
+	res, err := LoadAuthorized(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	wantEntries := []Entry{
+		{Pin: p, State: StateConfirmed, Comment: "\\x1b[31m"},
+		{Pin: r, State: StateConfirmed, Comment: "\\u00e9"},
+		{Pin: n, State: StateUnconfirmed},
+	}
+	if !reflect.DeepEqual(res.Entries, wantEntries) {
+		t.Errorf("reloaded Entries = %+v, want %+v", res.Entries, wantEntries)
+	}
+	wantNotes := []Note{
+		{Line: 1, Token: "", Reason: "CRLF line ending"},
+		{Line: 1, Token: "\"caf\\u00e9\"", Reason: ctl},
+	}
+	if !reflect.DeepEqual(res.Notes, wantNotes) {
+		t.Errorf("reloaded Notes = %+v, want %+v (rewritten lines are strict, the untouched line keeps its notes)", res.Notes, wantNotes)
+	}
+}
+
+func TestAuthorizedWriters_UnterminatedLastLine(t *testing.T) {
+	a, b := testPin("unterminated-a"), testPin("unterminated-b")
+
+	t.Run("append terminates the last line", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "authorized_clients")
+		writeRaw(t, path, "# x\n"+a)
+		if added, err := AppendAuthorized(path, Entry{Pin: b, State: StateUnconfirmed}); err != nil || !added {
+			t.Fatalf("append = (%v, %v), want (true, nil)", added, err)
+		}
+		if got, want := readRaw(t, path), "# x\n"+a+"\n"+b+" state=unconfirmed\n"; got != want {
+			t.Errorf("file = %q, want %q", got, want)
+		}
+		res, err := LoadAuthorized(path)
+		if err != nil {
+			t.Fatalf("reload: %v", err)
+		}
+		if got := Allowed(res); !reflect.DeepEqual(got, map[string]struct{}{a: {}, b: {}}) {
+			t.Errorf("Allowed = %v, want both pins", got)
+		}
+	})
+	t.Run("remove keeps an unterminated last line", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "authorized_clients")
+		writeRaw(t, path, a+"\n"+b)
+		if _, err := RemoveAuthorized(path, a); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		if got := readRaw(t, path); got != b {
+			t.Errorf("file = %q, want %q", got, b)
+		}
+	})
+	t.Run("promote keeps an unterminated line unterminated", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "authorized_clients")
+		writeRaw(t, path, a+"\n"+b+" state=unconfirmed")
+		if err := PromoteAuthorized(path, b); err != nil {
+			t.Fatalf("promote: %v", err)
+		}
+		if got, want := readRaw(t, path), a+"\n"+b+" state=confirmed"; got != want {
+			t.Errorf("file = %q, want %q", got, want)
+		}
+	})
 }

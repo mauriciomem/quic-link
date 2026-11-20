@@ -10,7 +10,7 @@
  *   - syncDir failure after rename: error wraps the cause; the new content is already in place; closeDir still runs
  * @edge-cases
  *   - EINVAL, ENOTSUP, EOPNOTSUPP from syncDir ONLY -> nil (filesystem cannot sync directories); EIO from syncDir -> returned
- *   - the same errnos from openDir or closeDir -> returned (wrapped), never ignored
+ *   - the same errnos from openDir or closeDir -> returned (wrapped), never ignored; a closeDir failure after an ignored syncDir errno -> returned
  * @see ./atomicfile.go
  */
 
@@ -417,6 +417,30 @@ func TestWrite_DirOpenAndCloseErrorsAreNotIgnored(t *testing.T) {
 			}
 			if !slices.Contains(r.calls, "syncDir") {
 				t.Errorf("syncDir not called; ops = %v", r.calls)
+			}
+		})
+		// An ignored "unsupported" sync must not hide a close failure after it.
+		t.Run("syncUnsupportedThenClose_"+u.name, func(t *testing.T) {
+			t.Parallel()
+			_, path := existingTarget(t)
+			var r recorder
+			o := r.ops()
+			o.syncDir = func(*os.File) error {
+				r.calls = append(r.calls, "syncDir")
+				return u.errno
+			}
+			o.closeDir = func(d *os.File) error {
+				r.calls = append(r.calls, "closeDir")
+				_ = d.Close()
+				return errInjected
+			}
+
+			err := writeWith(o, path, []byte("new"), 0o600)
+			if !errors.Is(err, errInjected) {
+				t.Errorf("err = %v, want an error wrapping %v from closeDir after an unsupported sync", err, errInjected)
+			}
+			if !slices.Contains(r.calls, "closeDir") {
+				t.Errorf("closeDir not called; ops = %v", r.calls)
 			}
 		})
 	}

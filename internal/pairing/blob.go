@@ -36,6 +36,7 @@ var (
 	ErrBlobLength       = errors.New("pairing: join blob has the wrong length")
 	ErrBlobVersion      = errors.New("pairing: join blob has an unknown version")
 	ErrBlobNonCanonical = errors.New("blob: last character looks mistyped (not canonically encoded)")
+	ErrBlobZeroSecret   = errors.New("pairing: join blob has an all-zero secret")
 )
 
 // Blob is the decoded join blob: a one-time secret and the listener's pin.
