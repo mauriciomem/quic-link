@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -43,14 +45,20 @@ type Entry struct {
 	Comment string // text after "# ", may be empty
 }
 
-// Note reports a token that was ignored on a line.
+// Note reports something on a line that was ignored or tolerated. Token and
+// Reason are always printable ASCII: text taken from the file is escaped.
 type Note struct {
-	Line   int
-	Token  string
-	Reason string
+	Line   int    // 1-based
+	Token  string // what Reason is about; "" for a CRLF line ending
+	Reason string // one of the fixed reason texts, such as "unknown tag"
 }
 
 // LoadResult is the parsed content of an authorized_clients file.
+//
+// Note.Token, Note.Reason and the text of every *MalformedError for
+// authorized_clients contain only bytes 0x20-0x7E; Entry.Comment contains
+// only those bytes and tab. MalformedError.Path is the caller's path and is
+// printed as given.
 type LoadResult struct {
 	Entries []Entry
 	Notes   []Note
@@ -116,7 +124,7 @@ type parsedFile struct {
 }
 
 // LoadAuthorized reads and parses path. A missing file is an empty result.
-// A file with any malformed line is rejected whole with a *MalformedError and
+// A file in which any line's pin field does not parse is rejected whole with a *MalformedError and
 // an empty result.
 func LoadAuthorized(path string) (LoadResult, error) {
 	pf, err := readAuthorized(path)
@@ -174,8 +182,8 @@ func parseAuthorized(path, data string) (parsedFile, error) {
 		if reason != "" {
 			return parsedFile{}, &MalformedError{Path: path, Line: i + 1, Reason: reason}
 		}
-		for _, tok := range notes {
-			pf.result.Notes = append(pf.result.Notes, Note{Line: i + 1, Token: tok})
+		for _, n := range notes {
+			pf.result.Notes = append(pf.result.Notes, Note{Line: i + 1, Token: n.token, Reason: n.reason})
 		}
 		if entry != nil {
 			l.entry = entry
@@ -200,51 +208,72 @@ func isText(b byte) bool { return b == '\t' || (b >= 0x20 && b <= 0x7e) }
 // isTokenByte reports whether b may appear in a tag token.
 func isTokenByte(b byte) bool { return b >= 0x21 && b <= 0x7e && b != '#' }
 
+// Note reasons. They are fixed texts so callers can match them.
+const (
+	reasonUnknownTag     = "unknown tag"
+	reasonUnknownState   = "unknown state value"
+	reasonDuplicateState = "duplicate state tag"
+	reasonMalformedTag   = "malformed tag"
+	reasonCommentText    = "comment with control or non-ASCII characters"
+	reasonCRLF           = "CRLF line ending"
+)
+
+// lineNote is a Note before its line number is known.
+type lineNote struct {
+	token  string
+	reason string
+}
+
 // parseLine parses one line (without its LF). It returns the entry (nil for
-// blank and comment lines), the ignored tokens, and a non-empty reason when
-// the line is malformed.
-func parseLine(s string) (entry *Entry, notes []string, reason string) {
-	if strings.HasSuffix(s, "\r") {
-		return nil, nil, "CRLF line ending; lines must end with LF only"
+// blank and comment lines) and the notes for what it tolerated. A non-empty
+// reason means the pin field does not parse, the only thing that makes a
+// line malformed; the entry and notes are then meaningless.
+func parseLine(s string) (entry *Entry, notes []lineNote, reason string) {
+	if trimmed, crlf := strings.CutSuffix(s, "\r"); crlf {
+		s = trimmed
+		notes = append(notes, lineNote{reason: reasonCRLF})
 	}
 	i := skipWSP(s, 0)
 	if i == len(s) {
-		return nil, nil, ""
+		return nil, notes, ""
 	}
 	if s[i] == '#' {
-		if !validText(s[i+1:]) {
-			return nil, nil, "comment contains a control or non-ASCII character"
+		if text := strings.TrimPrefix(s[i+1:], " "); !validText(text) {
+			notes = append(notes, lineNote{strconv.QuoteToASCII(text), reasonCommentText})
 		}
-		return nil, nil, ""
+		return nil, notes, ""
 	}
 	field, i := nextField(s, i)
 	pin, err := identity.ParsePinStrict(field)
 	if err != nil {
-		return nil, nil, fmt.Sprintf("invalid pin field %q: %v", field, err)
+		return nil, nil, fmt.Sprintf("invalid pin field %+q: %v", field, err)
 	}
 	e := &Entry{Pin: pin, State: StateConfirmed}
 	sawState := false
 	for i = skipWSP(s, i); i < len(s); i = skipWSP(s, i) {
 		if s[i] == '#' {
-			comment := strings.TrimPrefix(s[i+1:], " ")
-			if !validText(comment) {
-				return nil, nil, "comment contains a control or non-ASCII character"
+			text := strings.TrimPrefix(s[i+1:], " ")
+			e.Comment = text
+			if !validText(text) {
+				e.Comment = escapeText(text)
+				notes = append(notes, lineNote{strconv.QuoteToASCII(text), reasonCommentText})
 			}
-			e.Comment = comment
 			break
 		}
 		var tok string
 		tok, i = nextField(s, i)
 		if !validToken(tok) {
-			return nil, nil, fmt.Sprintf("invalid token %q", tok)
-		}
-		value, isState := strings.CutPrefix(tok, "state=")
-		if !isState {
-			notes = append(notes, tok)
+			notes = append(notes, lineNote{strconv.QuoteToASCII(tok), reasonMalformedTag})
 			continue
 		}
-		if sawState {
-			return nil, nil, "more than one state= token"
+		value, isState := strings.CutPrefix(tok, "state=")
+		switch {
+		case !isState:
+			notes = append(notes, lineNote{tok, reasonUnknownTag})
+			continue
+		case sawState:
+			notes = append(notes, lineNote{tok, reasonDuplicateState})
+			continue
 		}
 		sawState = true
 		switch value {
@@ -254,10 +283,32 @@ func parseLine(s string) (entry *Entry, notes []string, reason string) {
 			e.State = StateUnconfirmed
 		default:
 			e.State = StateUnknown
-			notes = append(notes, tok)
+			notes = append(notes, lineNote{tok, reasonUnknownState})
 		}
 	}
 	return e, notes, ""
+}
+
+// escapeText makes s comment text: printable ASCII and tab are kept, an
+// invalid UTF-8 byte becomes \xNN and any other rune its Go escape (\x1b,
+// \u00e9, \U0001f600). It is safe to display but not reversible: a literal
+// backslash is kept as is.
+func escapeText(s string) string {
+	var b strings.Builder
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		switch {
+		case size == 1 && isText(s[0]):
+			b.WriteByte(s[0])
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[0])
+		default:
+			q := strconv.QuoteRuneToASCII(r)
+			b.WriteString(q[1 : len(q)-1])
+		}
+		s = s[size:]
+	}
+	return b.String()
 }
 
 func skipWSP(s string, i int) int {
@@ -347,8 +398,10 @@ func RemoveAuthorized(path, pinPrefix string) (Entry, error) {
 }
 
 // PromoteAuthorized marks pin confirmed. An absent pin returns ErrNotFound and
-// is never re-added, so a promote racing a removal cannot resurrect it. It
-// holds the authorized_clients lock (see withLock).
+// is never re-added, so a promote racing a removal cannot resurrect it. Each
+// line carrying the pin is rewritten as "PIN state=confirmed[ # comment]";
+// other tags on it are dropped and a non-ASCII comment is kept in its escaped
+// form. It holds the authorized_clients lock (see withLock).
 func PromoteAuthorized(path, pin string) error {
 	return promoteAuthorizedWith(defaultLockOpts(), path, pin)
 }

@@ -7,8 +7,14 @@
 // forensic only, and an unconfirmed or unknown entry is authorized. No tag
 // may restrict access, now or in any future version, because an older reader
 // ignores tags it does not know; revocation is deleting the line. A line whose
-// pin does not parse rejects the whole file, so a damaged file is never half
-// trusted.
+// pin field does not parse rejects the whole file, so a damaged file is never
+// half trusted; nothing else does. Any other irregularity on a line whose pin
+// parses - an unknown or malformed tag, a repeated state tag, a CRLF line
+// ending, control or non-ASCII bytes in a comment - is tolerated and reported
+// as a Note. Text taken from the file is escaped to printable ASCII before it
+// reaches a Note, an Entry comment or an error. Writers emit only
+// "PIN state=<value>[ # <comment>]" lines and leave every line they do not
+// rewrite byte-for-byte.
 //
 // Every writer of authorized_clients holds an exclusive flock on a sibling
 // ".lock" file across its read-modify-write, so concurrent processes cannot
