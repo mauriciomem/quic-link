@@ -38,7 +38,9 @@ func EffectiveAuthorized(cfgList, flagList []string, fileEntries []Entry) map[st
 // only when config sets neither addr nor listen. The
 // two sources naming different pins for one server is an error matching both
 // ErrPinConflict and config.ErrInvalid, since silently trusting either would
-// hide a re-keyed or impersonated server. It takes no flag input.
+// hide a re-keyed or impersonated server. Each paired entry is re-validated
+// as LoadPaired validates it, and the first invalid one is an error matching
+// config.ErrInvalid. It takes no flag input.
 func ResolveServers(cfg map[string]config.Server, paired map[string]PairedServer) (map[string]config.Server, error) {
 	out := make(map[string]config.Server, len(cfg)+len(paired))
 	for name, s := range cfg {
@@ -51,6 +53,9 @@ func ResolveServers(cfg map[string]config.Server, paired map[string]PairedServer
 	sort.Strings(names) // report the same conflict on every run
 	for _, name := range names {
 		p := paired[name]
+		if err := validatePaired(name, p.Addr, p.Pin); err != nil {
+			return nil, fmt.Errorf("%w: paired.toml entry: %v", config.ErrInvalid, err)
+		}
 		s, inConfig := out[name]
 		if !inConfig {
 			out[name] = config.Server{Addr: p.Addr, Pin: p.Pin}

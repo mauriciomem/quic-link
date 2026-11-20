@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/mauriciomem/quic-link/internal/atomicfile"
+	"github.com/mauriciomem/quic-link/internal/config"
 	"github.com/mauriciomem/quic-link/internal/identity"
 )
 
@@ -109,15 +108,26 @@ func writePaired(path string, servers map[string]PairedServer) error {
 	return nil
 }
 
-// validatePaired checks one server record. The name becomes a TOML table key
-// under [servers], so it must not contain '.', whitespace or control
-// characters; the pin must be canonical.
+// validatePaired checks one server record the way config checks a server:
+// the name is a hostname label (config.ValidateServerName), the addr is a
+// host:port with a host (config.DialableAddr) and the pin is canonical. The
+// name and the addr are first limited to bytes 0x21-0x7E, so every error
+// text, including config's, is printable ASCII.
 func validatePaired(name, addr, pin string) error {
-	if err := validateServerName(name); err != nil {
+	if !visibleASCII(name) {
+		return fmt.Errorf("server name %+q cannot be part of a hostname", name)
+	}
+	if err := config.ValidateServerName(name); err != nil {
 		return err
 	}
 	if addr == "" {
 		return fmt.Errorf("server %q: addr is empty", name)
+	}
+	if !visibleASCII(addr) {
+		return fmt.Errorf("server %q: addr %+q contains a space, control or non-ASCII character", name, addr)
+	}
+	if err := config.DialableAddr(name, addr); err != nil {
+		return err
 	}
 	if _, err := identity.ParsePinStrict(pin); err != nil {
 		return fmt.Errorf("server %q: invalid pin %q: %w", name, pin, err)
@@ -125,17 +135,12 @@ func validatePaired(name, addr, pin string) error {
 	return nil
 }
 
-func validateServerName(name string) error {
-	if name == "" {
-		return errors.New("server name is empty")
-	}
-	if strings.Contains(name, ".") {
-		return fmt.Errorf("server name %q contains '.'", name)
-	}
-	for _, r := range name {
-		if unicode.IsSpace(r) || unicode.IsControl(r) {
-			return fmt.Errorf("server name %q contains whitespace or a control character", name)
+// visibleASCII reports whether every byte of s is in 0x21-0x7E.
+func visibleASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
 		}
 	}
-	return nil
+	return true
 }
