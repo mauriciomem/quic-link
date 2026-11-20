@@ -10,7 +10,7 @@
  *   - Allowed includes every entry of every state; the package doc says no tag may restrict access and revocation is deleting the line
  *   - Writers emit exactly "PIN state=<v>" or "PIN state=<v> # <comment>" + LF, keep every other line byte-for-byte, write 0600, dir 0700
  *   - Append: strict pin, state confirmed|unconfirmed, comment in %x20-7E/HTAB; present pin -> (false, nil), file untouched
- *   - Remove: prefix < 8 -> ErrPrefixShort; >1 match -> *AmbiguousPrefixError; none -> ErrNotFound; removes that line only
+ *   - Remove: prefix < 8 -> ErrPrefixShort; >1 match -> *AmbiguousPrefixError; none -> ErrNotFound; removes every line carrying that pin, nothing else
  *   - Promote: absent -> ErrNotFound (never re-adds); already confirmed -> nil, untouched; writers refuse a malformed file
  * @see ./authorized.go
  */
@@ -536,6 +536,57 @@ func TestRemoveAuthorized_PrefixRules(t *testing.T) {
 			t.Errorf("file =\n%q\nwant\n%q", got, want)
 		}
 	})
+}
+
+// A pin listed on more than one line is revoked only when every such line is
+// gone: a surviving copy would keep it in Allowed.
+func TestRemoveAuthorized_DropsEveryLineCarryingThePin(t *testing.T) {
+	dup := testPin("remove-dup")
+	other := testPin("remove-dup-other")
+	content := "# clients\n" +
+		dup + " state=confirmed # laptop\n" +
+		"\n" +
+		other + " state=unconfirmed # other\n" +
+		"# between the copies\n" +
+		dup + "\tstate=unconfirmed tag=x # re-paired\n" +
+		"\t# trailing comment\n"
+	path := filepath.Join(t.TempDir(), "authorized_clients")
+	writeRaw(t, path, content)
+
+	removed, err := RemoveAuthorized(path, dup[:12])
+	if err != nil {
+		t.Fatalf("RemoveAuthorized: %v", err)
+	}
+	if want := (Entry{Pin: dup, State: StateConfirmed, Comment: "laptop"}); removed != want {
+		t.Errorf("removed = %+v, want %+v (first line wins)", removed, want)
+	}
+
+	got := readRaw(t, path)
+	for i, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, dup) {
+			t.Errorf("line %d still carries the removed pin: %q", i+1, l)
+		}
+	}
+	want := "# clients\n" +
+		"\n" +
+		other + " state=unconfirmed # other\n" +
+		"# between the copies\n" +
+		"\t# trailing comment\n"
+	if got != want {
+		t.Errorf("file =\n%q\nwant\n%q", got, want)
+	}
+
+	res, err := LoadAuthorized(path)
+	if err != nil {
+		t.Fatalf("LoadAuthorized after remove: %v", err)
+	}
+	allowed := Allowed(res)
+	if _, ok := allowed[dup]; ok {
+		t.Errorf("Allowed still contains the removed pin %q", dup)
+	}
+	if _, ok := allowed[other]; !ok || len(allowed) != 1 {
+		t.Errorf("Allowed = %v, want only %q", allowed, other)
+	}
 }
 
 func TestPromoteAuthorized_NeverResurrectsRemovedPin(t *testing.T) {
