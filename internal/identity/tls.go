@@ -272,9 +272,9 @@ func verifyPinFrom(src AllowedSource) func([][]byte, [][]*x509.Certificate) erro
 	}
 }
 
-// alpnPair1 is the ALPN a pairing joiner offers. Unexported until the pairing
-// transport defines its own constant.
-const alpnPair1 = "quic-link/pair1"
+// alpnPair1 is the ALPN a pairing joiner offers, the pairing transport's
+// constant under the name this package already uses.
+const alpnPair1 = transport.ALPNPair
 
 // configSource yields the steady-state listener config for one handshake. It
 // never sees the ClientHello: selection depends only on the offered ALPN list

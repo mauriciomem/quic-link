@@ -135,10 +135,10 @@ type RemoteAddrProvider interface {
 	RemoteAddr() net.Addr
 }
 
-// ALPNPair is the ALPN of the pairing protocol.
-//
-// Placeholder value: not yet defined.
-const ALPNPair = ""
+// ALPNPair is the ALPN of the pairing protocol. It names the pairing framing
+// (version byte 0x50), not protocol v1; the two move independently, and this
+// value changes only if the pairing framing or request/response envelope breaks.
+const ALPNPair = "quic-link/pair1"
 
 // ALPNProvider is implemented by connections that know the negotiated ALPN.
 // Valid only after the handshake completed (every Conn returned by Dial or

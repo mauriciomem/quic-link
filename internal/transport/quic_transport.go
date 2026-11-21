@@ -432,14 +432,20 @@ func (c *quicConn) PeerCertificates() []*x509.Certificate {
 
 var _ RemoteAddrProvider = (*quicConn)(nil)
 
-// NegotiatedProtocol is a placeholder: it does not read the handshake yet.
+// NegotiatedProtocol returns the ALPN negotiated in the handshake. Valid only
+// after the handshake completed, which holds for every Conn returned by Dial
+// or Accept.
 func (c *quicConn) NegotiatedProtocol() string {
-	return ""
+	return c.c.ConnectionState().TLS.NegotiatedProtocol
 }
 
-// ExportKeyingMaterial is a placeholder: it does not read the handshake yet.
+// ExportKeyingMaterial exports keying material of the completed handshake
+// (RFC 5705 / RFC 8446 section 7.5). Valid only after the handshake completed.
 func (c *quicConn) ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error) {
-	return nil, errors.New("transport: keying material export not implemented")
+	// ExportKeyingMaterial has a pointer receiver, so the state must be held
+	// in an addressable variable first.
+	cs := c.c.ConnectionState()
+	return cs.TLS.ExportKeyingMaterial(label, context, length)
 }
 
 var (
@@ -452,7 +458,36 @@ var (
 	errPairBlobMismatch = errors.New("the join blob does not match this listener (reissued token, wrong host, or rotated key)")
 )
 
-// classifyPairDialError is a placeholder: it returns err unchanged.
+// alertBadCertificate is the QUIC error code of TLS alert bad_certificate (42).
+const alertBadCertificate quic.TransportErrorCode = tlsAlertBase + 42
+
+// classifyPairDialError classifies an error seen by a pairing joiner: the Dial
+// error, or a first-read error / context.Cause(conn.Context()) after a Dial
+// that succeeded. The caller passes both. The input may be raw or already
+// wrapped by classifyDialError.
+//
+//   - 0x178 (no_application_protocol): no pairing window is open
+//     (errNoPairingWindow).
+//   - 0x12a (bad_certificate), local or remote: the join blob does not match
+//     the listener (errPairBlobMismatch). Local means the joiner rejected the
+//     listener's pin; remote means the listener refused the joiner.
+//   - anything else is returned unchanged; the caller's retry policy decides.
+//
+// The two pairing classes drop the original chain so they can never satisfy
+// ErrAuthFailed or IsAuthFailed and be reported as an authentication failure;
+// the message keeps the code for diagnosis. They are the two classes meant to
+// get their own exit code once a joiner command exists.
 func classifyPairDialError(err error) error {
-	return err
+	var te *quic.TransportError
+	if !errors.As(err, &te) {
+		return err
+	}
+	switch te.ErrorCode {
+	case alertNoAppProtocol:
+		return fmt.Errorf("%w (TLS alert no_application_protocol 0x178)", errNoPairingWindow)
+	case alertBadCertificate:
+		return fmt.Errorf("%w (TLS error 0x12a)", errPairBlobMismatch)
+	default:
+		return err
+	}
 }
