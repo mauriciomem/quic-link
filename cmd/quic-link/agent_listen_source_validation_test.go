@@ -98,25 +98,24 @@ func (c *retrySniffConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	return n, addr, err
 }
 
-// sniffResult is what the client's socket saw during one handshake.
+// sniffResult is what the client's socket saw during one handshake, plus both
+// ends of the connection it completed.
 type sniffResult struct {
 	completed bool
 	inbound   int64
 	retries   int64
 	first     int64
 	firstVer  int64
+
+	server transport.Conn // the connection the listener accepted
+	client transport.Conn // the dialling side's connection
 }
 
-// retryHandshake completes one handshake between a client, whose socket is
-// watched, and a listener built by newServer, and reports what the client's
-// socket received. It calls t.Fatalf if the handshake does not complete: with
-// no handshake there is nothing meaningful to say about Retry.
-func retryHandshake(
-	t *testing.T,
-	newServer func(net.PacketConn, *tls.Config) (*transport.QUICTransport, error),
-) sniffResult {
+// defaultRetryTLS is the steady agent/client pair the source-validation test
+// handshakes with: an agent listener that authorizes the client, and a client
+// pinned to the agent.
+func defaultRetryTLS(t *testing.T) (serverTLS, clientTLS *tls.Config) {
 	t.Helper()
-
 	agentKey, agentPin := stdioAuthGenIdentity(t)
 	clientKey, clientPin := stdioAuthGenIdentity(t)
 
@@ -124,11 +123,33 @@ func retryHandshake(
 	if err != nil {
 		t.Fatalf("agent TLS: %v", err)
 	}
-	clientTLS, err := identity.ClientDialTLS(clientKey, agentPin)
+	clientTLS, err = identity.ClientDialTLS(clientKey, agentPin)
 	if err != nil {
 		t.Fatalf("client TLS: %v", err)
 	}
+	return serverTLS, clientTLS
+}
 
+// retryRig is one listener built by newServer and one watched client socket,
+// with an Accept running in the background. Its cleanups are registered on t.
+type retryRig struct {
+	ctx      context.Context
+	sniff    *retrySniffConn
+	addr     net.Addr
+	acceptCh chan retryAccepted
+}
+
+type retryAccepted struct {
+	conn transport.Conn
+	err  error
+}
+
+func newRetryRig(
+	t *testing.T,
+	newServer func(net.PacketConn, *tls.Config) (*transport.QUICTransport, error),
+	serverTLS *tls.Config,
+) *retryRig {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 	// Cleanups run last-registered first: connections and the context go
@@ -153,12 +174,6 @@ func retryHandshake(
 		t.Fatalf("agent transport: %v", err)
 	}
 	t.Cleanup(func() { serverTr.Close() })
-	clientTr, err := transport.NewQUICTransport(sniff, clientTLS, nil)
-	if err != nil {
-		cancel()
-		t.Fatalf("client transport: %v", err)
-	}
-	t.Cleanup(func() { clientTr.Close() })
 
 	ln, err := serverTr.Listen()
 	if err != nil {
@@ -167,22 +182,58 @@ func retryHandshake(
 	}
 	t.Cleanup(func() { ln.Close() })
 
-	type accepted struct {
-		conn transport.Conn
-		err  error
-	}
-	acceptCh := make(chan accepted, 1)
+	acceptCh := make(chan retryAccepted, 1)
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
 		c, err := ln.Accept(ctx)
-		acceptCh <- accepted{c, err}
+		acceptCh <- retryAccepted{c, err}
 	}()
-
-	var serverConn, clientConn transport.Conn
 	t.Cleanup(func() {
 		cancel() // unblocks Accept if the dial never reached it
 		<-acceptDone
+		select {
+		case a := <-acceptCh: // accepted but never collected by the test
+			if a.conn != nil {
+				a.conn.CloseWithError(0, "test done")
+			}
+		default:
+		}
+	})
+	return &retryRig{ctx: ctx, sniff: sniff, addr: ln.Addr(), acceptCh: acceptCh}
+}
+
+func (r *retryRig) result() sniffResult {
+	return sniffResult{
+		inbound:  r.sniff.inbound.Load(),
+		retries:  r.sniff.retries.Load(),
+		first:    r.sniff.first.Load(),
+		firstVer: r.sniff.firstVer.Load(),
+	}
+}
+
+// retryHandshake completes one handshake between a client using clientTLS,
+// whose socket is watched, and a listener built by newServer serving
+// serverTLS, and reports what the client's socket received. It calls t.Fatalf
+// if the handshake does not complete: with no handshake there is nothing
+// meaningful to say about Retry.
+func retryHandshake(
+	t *testing.T,
+	newServer func(net.PacketConn, *tls.Config) (*transport.QUICTransport, error),
+	serverTLS, clientTLS *tls.Config,
+) sniffResult {
+	t.Helper()
+	rig := newRetryRig(t, newServer, serverTLS)
+	ctx := rig.ctx
+
+	clientTr, err := transport.NewQUICTransport(rig.sniff, clientTLS, nil)
+	if err != nil {
+		t.Fatalf("client transport: %v", err)
+	}
+	t.Cleanup(func() { clientTr.Close() })
+
+	var serverConn, clientConn transport.Conn
+	t.Cleanup(func() {
 		if clientConn != nil {
 			clientConn.CloseWithError(0, "test done")
 		}
@@ -191,13 +242,13 @@ func retryHandshake(
 		}
 	})
 
-	clientConn, err = clientTr.Dial(ctx, ln.Addr().String())
+	clientConn, err = clientTr.Dial(ctx, rig.addr.String())
 	if err != nil {
-		t.Fatalf("dial %s: %v", ln.Addr(), err)
+		t.Fatalf("dial %s: %v", rig.addr, err)
 	}
 
 	select {
-	case a := <-acceptCh:
+	case a := <-rig.acceptCh:
 		if a.err != nil {
 			t.Fatalf("accept: %v", a.err)
 		}
@@ -218,18 +269,16 @@ func retryHandshake(
 		t.Fatalf("handshake did not complete within the deadline: %v", ctx.Err())
 	}
 
-	return sniffResult{
-		completed: completed,
-		inbound:   sniff.inbound.Load(),
-		retries:   sniff.retries.Load(),
-		first:     sniff.first.Load(),
-		firstVer:  sniff.firstVer.Load(),
-	}
+	r := rig.result()
+	r.completed = completed
+	r.server, r.client = serverConn, clientConn
+	return r
 }
 
 func TestAgentListenTransport_PerformsRetrySourceValidation(t *testing.T) {
 	t.Run("production_helper", func(t *testing.T) {
-		r := retryHandshake(t, agentListenTransport)
+		srvTLS, cliTLS := defaultRetryTLS(t)
+		r := retryHandshake(t, agentListenTransport, srvTLS, cliTLS)
 
 		if r.inbound <= 0 {
 			t.Errorf("agentListenTransport: the client socket received no datagrams, so nothing was observed")
@@ -253,9 +302,10 @@ func TestAgentListenTransport_PerformsRetrySourceValidation(t *testing.T) {
 	// subtest could pass or fail for the wrong reason; here the detector must
 	// positively see an Initial and no Retry.
 	t.Run("control_plain_NewQUICTransport", func(t *testing.T) {
+		srvTLS, cliTLS := defaultRetryTLS(t)
 		r := retryHandshake(t, func(c net.PacketConn, tc *tls.Config) (*transport.QUICTransport, error) {
 			return transport.NewQUICTransport(c, tc, nil)
-		})
+		}, srvTLS, cliTLS)
 
 		if r.inbound <= 0 {
 			t.Errorf("control: the client socket received no datagrams, so the detector is blind")

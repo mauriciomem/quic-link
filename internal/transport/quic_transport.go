@@ -431,3 +431,28 @@ func (c *quicConn) PeerCertificates() []*x509.Certificate {
 }
 
 var _ RemoteAddrProvider = (*quicConn)(nil)
+
+// NegotiatedProtocol is a placeholder: it does not read the handshake yet.
+func (c *quicConn) NegotiatedProtocol() string {
+	return ""
+}
+
+// ExportKeyingMaterial is a placeholder: it does not read the handshake yet.
+func (c *quicConn) ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error) {
+	return nil, errors.New("transport: keying material export not implemented")
+}
+
+var (
+	_ ALPNProvider = (*quicConn)(nil)
+	_ EKMProvider  = (*quicConn)(nil)
+)
+
+var (
+	errNoPairingWindow  = errors.New("no pairing window is open on the listener")
+	errPairBlobMismatch = errors.New("the join blob does not match this listener (reissued token, wrong host, or rotated key)")
+)
+
+// classifyPairDialError is a placeholder: it returns err unchanged.
+func classifyPairDialError(err error) error {
+	return err
+}

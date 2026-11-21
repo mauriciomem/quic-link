@@ -134,3 +134,21 @@ type RemoteAddrProvider interface {
 	// RemoteAddr returns the network address of the peer.
 	RemoteAddr() net.Addr
 }
+
+// ALPNPair is the ALPN of the pairing protocol.
+//
+// Placeholder value: not yet defined.
+const ALPNPair = ""
+
+// ALPNProvider is implemented by connections that know the negotiated ALPN.
+// Valid only after the handshake completed (every Conn returned by Dial or
+// Accept); a Conn that does not implement it must be treated as "unknown".
+type ALPNProvider interface {
+	NegotiatedProtocol() string
+}
+
+// EKMProvider exports TLS keying material (RFC 5705 / RFC 8446 section 7.5)
+// of the completed handshake. Valid only after the handshake completed.
+type EKMProvider interface {
+	ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error)
+}
