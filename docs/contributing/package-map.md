@@ -31,6 +31,17 @@ comment points at. It is deliberately thin — the accept-loop and protocol logi
 wraps live in `internal/`, not here, so a verb's `.go` file is mostly
 wiring. See [`add-a-verb.md`](add-a-verb.md) for the shape a new verb takes.
 
+## `internal/atomicfile`
+
+Replaces a file atomically and durably: `Write` writes a temp file in the same
+directory, fsyncs it, renames it over the target, then fsyncs the parent
+directory so the rename itself survives a crash. On any failure before the
+rename the target is untouched. Used for identity key writes
+(`internal/identity/key.go`) and by `internal/pairstate`.
+
+Different from `internal/setup`'s `Write`, which also checks its ownership
+marker and refuses to replace a file that is not its own.
+
 ## `internal/backoff`
 
 Provides the reconnect schedule shared by both sides of a tunnel. Whichever
@@ -172,6 +183,28 @@ layers — that split is what lets a browser report "cannot connect" instead of
 (`dns.go`), TLS SNI parsing to route unencrypted-looking bytes without decrypting
 them (`sni.go`), and the actual listening servers (`server.go`).
 
+## `internal/pairing`
+
+Holds the pairing primitives: the join blob a listener hands to a joiner
+(`blob.go`), the HMAC proof bound to the TLS exporter of the pairing
+connection (`proof.go`), the pairing request and response messages
+(`msg.go`), and their framing (`frame.go`). It performs no I/O beyond the
+reader and writer it is given.
+
+Not wired yet: nothing in production imports it.
+
+## `internal/pairstate`
+
+Persists pairing state: the agent's `authorized_clients` file
+(`authorized.go`) and the client's `paired.toml` (`paired.go`).
+`authorized_clients` holds one client pin per line; a valid pin authorizes,
+and the `state=` tag is forensic only. Every writer of `authorized_clients`
+holds an exclusive flock on a sibling `.lock` file across its
+read-modify-write; readers do not lock, because the file is only ever
+replaced by an atomic rename.
+
+Not wired yet: the agent still reads `authorized_clients` from `config.toml`.
+
 ## `internal/probe`
 
 Implements the `ping` subcommand's measurement logic: opening a fresh QUIC
@@ -258,6 +291,7 @@ into any other package's job:
 
 | Package | Answers |
 |---|---|
+| `atomicfile` | How do I replace a file safely |
 | `backoff` | How to retry |
 | `buildinfo` | What version am I |
 | `config` | What does the config say |
@@ -266,6 +300,8 @@ into any other package's job:
 | `identity` | Who am I |
 | `ipc` | How do I talk to the daemon locally |
 | `names` | What do I answer to |
+| `pairing` | How does a new peer prove it holds the join secret |
+| `pairstate` | Who have I paired with, on disk |
 | `probe` | How do I measure a handshake |
 | `proto` | What do these bytes mean |
 | `router` | Where does this name go |
