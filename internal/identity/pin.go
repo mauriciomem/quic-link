@@ -8,6 +8,14 @@
 // from the SubjectPublicKeyInfo alone, the pin computed from the carrier
 // certificate equals the pin keygen prints for the same key.
 //
+// The steady-state configs pin the peer; the *From builders read the allowed
+// pin set from an AllowedSource on every handshake and refuse, at build time,
+// a source that authorizes nobody. PairingTLS, for pairing only, does not pin
+// and accepts any peer whose leaf certificate parses. ListenTLSWithPairing
+// picks the pairing or the steady config per handshake from the offered ALPN
+// and a window-open predicate. Every config built here refuses resumed TLS
+// sessions.
+//
 // The package is split across three files: pin.go (the pin credential and its
 // parsing), key.go (Ed25519 key generation, loading, and on-disk persistence),
 // and tls.go (the carrier certificate and the pinning tls.Config builders).

@@ -98,6 +98,49 @@ Beyond `build`, `test`, and `test-race`:
 | `release` | `VERSION=v0.1.0`, builds release artifacts locally exactly as CI does and verifies they are reproducible. |
 | `clean` | Removes the build and test caches, and any `dist` output from `release`. |
 
+## Source-scan guards
+
+A few tests in `cmd/quic-link` do not run code at all: they parse the module's
+Go source with `go/ast` and fail when it contains something it must not. They
+look like ordinary test failures, but the fix is a decision about the code,
+not a change to the test.
+
+**Starting other programs** (`cmd/quic-link/privileged_ops_test.go`).
+`TestOnlyAllowlistedFilesRunOtherPrograms` keeps a list of the only files that
+may import `os/exec` or call one of the lower-level ways to start a process
+(`os.StartProcess`, `syscall.Exec`, and the like). The list covers test files
+too. A file that starts programs without an entry fails, and so does an entry
+for a file that no longer does, so the list stays true. Every entry carries
+the reason it is safe; adding one is a deliberate decision for review, not a
+way to make the test pass. Its companion, `TestNoSourceNamesAPrivilegeTool`,
+fails if production code contains a string that is exactly the name of a
+privilege tool such as `sudo` or `iptables`.
+
+**Pairing is not wired yet.** Two guards keep the pairing code out of
+production paths until it is deliberately connected. Both scan non-test files
+only.
+
+- `TestPairingSurface_NotWired` (`cmd/quic-link/pairing_surface_test.go`):
+  only `internal/identity` may reference `PairingTLS`, `ListenTLSWithPairing`,
+  `AgentListenTLSFrom`, or `AgentDialTLSFrom`, and only `internal/pairstate`
+  may import `internal/pairstate`.
+- `TestAgentAndDaemon_AdvertiseOnlyQuicLink1`
+  (`cmd/quic-link/agent_listen_seam_test.go`): checks over a real handshake
+  that the configs the agent and daemon listen with (`AgentListenTLS`,
+  `ClientListenTLS`) advertise only `quic-link/1` and refuse a
+  `quic-link/pair1` offer, then
+  scans every package except `internal/identity` and `internal/pairing`. No
+  scanned file may import `internal/pairing`, reference
+  `ListenTLSWithPairingConfig`, or contain the string `"quic-link/pair1"`, even
+  built by concatenation. The one place that literal is allowed is as the
+  value of the `ALPNPair` constant in `internal/transport`, and the name
+  `ALPNPair` may appear only in `internal/identity`, `internal/pairing`, and
+  `internal/transport`.
+
+Both guards also check that they are not blind: each fails if its scan never
+sees the names it is anchored to. When pairing is wired into a
+command, these guards are removed or narrowed in the same change.
+
 ## Test-file layout
 
 Tests sit beside the code they test, as `<name>_test.go` in the same package and
