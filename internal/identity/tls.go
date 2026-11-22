@@ -516,6 +516,14 @@ func verifyParsableLeaf(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 // set (every steady peer is then refused). Both configs are built once here;
 // freshness of the authorized set comes from src, not from rebuilding.
 //
+// pairingOpen is called on the TLS handshake goroutine, concurrently with
+// other handshakes and with the pairing window's attempts. It must be
+// goroutine-safe, must not block and must not call back into the listener; a
+// panic rejects the handshake. Its answer only picks the config: a handshake
+// that saw the window open may finish after it closed, so the pairing handler
+// re-checks the window when the request arrives (Window.Attempt) and answers
+// window_closed instead of serving a late request.
+//
 // Not wired into any production listener.
 func ListenTLSWithPairing(key ed25519.PrivateKey, src AllowedSource, pairingOpen func() bool) (*tls.Config, error) {
 	if len(key) != ed25519.PrivateKeySize || src == nil || pairingOpen == nil {
