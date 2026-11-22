@@ -71,6 +71,19 @@ func LoadPaired(path string) (map[string]PairedServer, error) {
 // written atomically, mode 0600, its directory 0700. Invalid input or an
 // existing malformed file is an error and leaves the file untouched.
 func UpsertPaired(path, name, addr, pin string, now time.Time) error {
+	return upsertPairedWith(defaultPairedOpts(), path, name, addr, pin, now)
+}
+
+// pairedOpts are the paired.toml writer's injectable dependencies.
+type pairedOpts struct {
+	write func(path string, data []byte, perm os.FileMode) error
+}
+
+// defaultPairedOpts returns the production dependencies.
+func defaultPairedOpts() pairedOpts { return pairedOpts{write: atomicfile.Write} }
+
+// upsertPairedWith is UpsertPaired with injectable dependencies.
+func upsertPairedWith(o pairedOpts, path, name, addr, pin string, now time.Time) error {
 	if err := validatePaired(name, addr, pin); err != nil {
 		return fmt.Errorf("pairstate: %w", err)
 	}
@@ -79,7 +92,7 @@ func UpsertPaired(path, name, addr, pin string, now time.Time) error {
 		return err
 	}
 	servers[name] = PairedServer{Addr: addr, Pin: pin, PairedAt: now}
-	return writePaired(path, servers)
+	return writePairedWith(o, path, servers)
 }
 
 // ForgetPaired removes server name. An unknown name, or a missing file, is
@@ -93,16 +106,16 @@ func ForgetPaired(path, name string) error {
 		return fmt.Errorf("pairstate: server %q is not in %s: %w", name, path, ErrNotFound)
 	}
 	delete(servers, name)
-	return writePaired(path, servers)
+	return writePairedWith(defaultPairedOpts(), path, servers)
 }
 
-// writePaired replaces paired.toml with servers.
-func writePaired(path string, servers map[string]PairedServer) error {
+// writePairedWith replaces paired.toml with servers.
+func writePairedWith(o pairedOpts, path string, servers map[string]PairedServer) error {
 	data, err := toml.Marshal(pairedFile{Servers: servers})
 	if err != nil {
 		return fmt.Errorf("pairstate: encode %s: %w", path, err)
 	}
-	if err := atomicfile.Write(path, data, 0o600); err != nil {
+	if err := o.write(path, data, 0o600); err != nil {
 		return fmt.Errorf("pairstate: write %s: %w", path, err)
 	}
 	return nil

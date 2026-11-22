@@ -108,6 +108,14 @@ func (a *routedAgent) handledProtos() []string {
 
 func startRoutedAgent(t *testing.T, srvKey ed25519.PrivateKey, srvPin, steadyPin string, w *pairing.Window, p pairing.Persister) *routedAgent {
 	t.Helper()
+	src := func() map[string]struct{} { return map[string]struct{}{steadyPin: {}} }
+	return startRoutedAgentFrom(t, srvKey, srvPin, src, w, p)
+}
+
+// startRoutedAgentFrom is startRoutedAgent with the steady AllowedSource
+// supplied by the caller.
+func startRoutedAgentFrom(t *testing.T, srvKey ed25519.PrivateKey, srvPin string, src func() map[string]struct{}, w *pairing.Window, p pairing.Persister) *routedAgent {
+	t.Helper()
 	a := &routedAgent{sinkCh: make(chan []byte, 8)}
 
 	sink, err := net.Listen("tcp", "127.0.0.1:0")
@@ -130,7 +138,6 @@ func startRoutedAgent(t *testing.T, srvKey ed25519.PrivateKey, srvPin, steadyPin
 		}
 	}()
 
-	src := func() map[string]struct{} { return map[string]struct{}{steadyPin: {}} }
 	conf, err := identity.ListenTLSWithPairing(srvKey, src, w.IsOpen)
 	if err != nil {
 		t.Fatalf("ListenTLSWithPairing: %v", err)

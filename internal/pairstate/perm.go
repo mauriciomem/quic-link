@@ -74,3 +74,6 @@ func verifyStatePath(path string) (exists bool, err error) {
 	}
 	return verifyStateFile(path)
 }
+
+// readStateFile opens and reads one state file. Stub: not implemented yet.
+func readStateFile(path string) ([]byte, error) { return os.ReadFile(path) }

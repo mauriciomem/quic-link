@@ -744,3 +744,14 @@ func checkRemovedKeys(path string, survey map[string]any) error {
 	}
 	return nil
 }
+
+// AuthorizedClientsPath returns ~/.config/quic-link/authorized_clients.
+// Stub: not implemented yet.
+func AuthorizedClientsPath() (string, error) { return "", nil }
+
+// PairedPath returns ~/.config/quic-link/paired.toml. Stub: not implemented yet.
+func PairedPath() (string, error) { return "", nil }
+
+// ValidateDistinctListenPins is the exported form of
+// validateDistinctListenPins. Stub: not implemented yet.
+func ValidateDistinctListenPins(servers map[string]Server) error { return nil }
