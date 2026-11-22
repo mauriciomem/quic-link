@@ -485,6 +485,40 @@ func TestAuthorizedHolder_StaleEventRateLimited(t *testing.T) {
 		}
 	})
 
+	t.Run("a recovery resets the rate limit: the same cause within 60 s is reported again", func(t *testing.T) {
+		_, path := holderDir(t)
+		writeRaw(t, path, good)
+		clock := newFakeClock()
+		rec := &staleRecorder{}
+		h, err := openAuthorizedWith(holderOpts{now: clock.now}, path, rec.record)
+		if err != nil {
+			t.Fatalf("openAuthorizedWith = %v", err)
+		}
+
+		writeRaw(t, path, malformed)
+		h.Entries()
+		clock.advance(10 * time.Second)
+		writeRaw(t, path, good)
+		h.Entries()
+		clock.advance(10 * time.Second) // 20 s after the first event: still inside its 60 s window
+		writeRaw(t, path, malformed)
+		h.Entries()
+
+		evs := rec.events()
+		if len(evs) != 3 {
+			t.Fatalf("events = %+v, want stale, recovery, stale: the same cause after a recovery must be reported even within 60 s", evs)
+		}
+		if evs[0].Recovered || !errors.Is(evs[0].Err, ErrMalformed) {
+			t.Errorf("event 0 = %+v, want a malformed stale event", evs[0])
+		}
+		if !evs[1].Recovered || evs[1].Err != nil {
+			t.Errorf("event 1 = %+v, want a recovery event", evs[1])
+		}
+		if evs[2].Recovered || !errors.Is(evs[2].Err, ErrMalformed) || evs[2].Err.Error() != evs[0].Err.Error() {
+			t.Errorf("event 2 = %+v, want a stale event with the first event's cause %q", evs[2], evs[0].Err)
+		}
+	})
+
 	t.Run("LoadedAt of the cold-start set is the injected clock's", func(t *testing.T) {
 		_, path := holderDir(t)
 		writeRaw(t, path, good)
