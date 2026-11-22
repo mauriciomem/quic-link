@@ -1,9 +1,13 @@
 package pairing
 
 import (
+	"context"
 	"io"
+	"log/slog"
 	"net/netip"
 	"time"
+
+	"github.com/mauriciomem/quic-link/internal/transport"
 )
 
 // Test-only access to the window's unexported seams for the black-box tests
@@ -37,6 +41,17 @@ func OpenWindowWith(listenerPin string, ttl time.Duration, o WindowOpts) (*Windo
 	}
 	return openWindowWith(listenerPin, ttl, d)
 }
+
+// ServeWithDeadline is Serve with the stream, frame and linger deadline set
+// to d instead of the default.
+func ServeWithDeadline(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger, d time.Duration) error {
+	o := defaultServeOpts()
+	o.deadline = d
+	return serveWith(ctx, conn, w, p, log, o)
+}
+
+// DefaultServeDeadline is the deadline Serve uses.
+func DefaultServeDeadline() time.Duration { return defaultServeOpts().deadline }
 
 // SourceKey exposes sourceKey.
 func SourceKey(a netip.Addr) (netip.Prefix, bool) { return sourceKey(a) }

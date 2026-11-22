@@ -1,0 +1,29 @@
+Run the quic-link session owner in the foreground.
+
+daemon is THE owner: it manages QUIC sessions to agent(s), binds the local TCP
+edge ports, and serves the unix socket used by status, stdio, and fwd.
+
+  No flag: manage all enabled servers in the config.
+  --server NAME: manage only the named server (scoped pool — status reports
+                 only that server).
+
+Backgrounding is the operator's job: use a systemd user unit, launchd agent,
+or a shell '&'. quic-link does not daemonise itself.
+
+Exactly one owner may hold the socket at a time. A second invocation exits 3
+and tells you to use 'quic-link status' or stop the running owner first.
+
+Ctrl-C (SIGINT) or SIGTERM causes a bounded graceful drain then exit.
+
+Usage:
+  quic-link daemon [flags]
+
+Flags:
+  -h, --help[=true|false]   help for daemon
+      --server string       manage only this server (name from config); default manages all enabled servers
+      --server-add spec     define a server as NAME=ADDR, repeatable; replaces the servers in your settings file
+      --server-pin spec     the pin for a server defined with --server-add, as NAME=PIN, repeatable
+
+Global Flags:
+      --config string      path to config file (optional)
+      --log-level string   log verbosity: debug, info, warn, or error (default "info")
