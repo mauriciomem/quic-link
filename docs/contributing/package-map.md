@@ -226,10 +226,6 @@ On top of those sit the listener-side pieces:
   connection. It reads one request, lets the window judge the proof, and
   records an admitted pin through a `Persister` before answering ok.
 
-The package's own doc comment predates these and still says it performs no
-I/O beyond a reader and writer; the routed listener and `Serve` now work on
-transport connections.
-
 Not wired yet: nothing in production imports it.
 
 ## `internal/pairstate`
