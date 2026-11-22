@@ -14,6 +14,9 @@ var ErrPinConflict = errors.New("pairstate: server pin differs between config an
 // non-empty flag list replaces both the config list and the file; otherwise
 // the result is the config list together with every file entry, whatever its
 // state.
+//
+// The config and flag pins are used as given: callers must already have
+// validated them with identity.ParsePinStrict (config.Validate does).
 func EffectiveAuthorized(cfgList, flagList []string, fileEntries []Entry) map[string]struct{} {
 	set := make(map[string]struct{})
 	if len(flagList) > 0 {
@@ -40,7 +43,9 @@ func EffectiveAuthorized(cfgList, flagList []string, fileEntries []Entry) map[st
 // ErrPinConflict and config.ErrInvalid, since silently trusting either would
 // hide a re-keyed or impersonated server. Each paired entry is re-validated
 // as LoadPaired validates it, and the first invalid one is an error matching
-// config.ErrInvalid. It takes no flag input.
+// config.ErrInvalid. The merged result is then checked with
+// config.ValidateDistinctListenPins, since a paired pin can make two waiting
+// servers share one. It takes no flag input.
 func ResolveServers(cfg map[string]config.Server, paired map[string]PairedServer) (map[string]config.Server, error) {
 	out := make(map[string]config.Server, len(cfg)+len(paired))
 	for name, s := range cfg {
@@ -71,6 +76,9 @@ func ResolveServers(cfg map[string]config.Server, paired map[string]PairedServer
 		}
 		s.Pin = p.Pin
 		out[name] = s
+	}
+	if err := config.ValidateDistinctListenPins(out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

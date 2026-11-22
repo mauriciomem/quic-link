@@ -474,13 +474,13 @@ func validateServers(c *Config) ([]string, error) {
 			return warns, err
 		}
 	}
-	if err := validateDistinctListenPins(c.Servers); err != nil {
+	if err := ValidateDistinctListenPins(c.Servers); err != nil {
 		return warns, err
 	}
 	return warns, nil
 }
 
-// validateDistinctListenPins rejects two servers that wait to be connected to
+// ValidateDistinctListenPins rejects two servers that wait to be connected to
 // while sharing a pin, which means sharing a keypair.
 //
 // A server this machine dials is identified by its address, so two of those may
@@ -492,7 +492,10 @@ func validateServers(c *Config) ([]string, error) {
 //
 // Servers are visited in sorted order so the same pair is always reported for a
 // given config rather than whichever the map happened to yield first.
-func validateDistinctListenPins(servers map[string]Server) error {
+//
+// Validate runs it on the config's servers; it is exported so a caller that
+// merges in servers from elsewhere can run it on the result.
+func ValidateDistinctListenPins(servers map[string]Server) error {
 	names := make([]string, 0, len(servers))
 	for name := range servers {
 		names = append(names, name)
@@ -746,12 +749,23 @@ func checkRemovedKeys(path string, survey map[string]any) error {
 }
 
 // AuthorizedClientsPath returns ~/.config/quic-link/authorized_clients.
-// Stub: not implemented yet.
-func AuthorizedClientsPath() (string, error) { return "", nil }
+// Unlike the key and config defaults it never falls back to a relative path:
+// an unknown or relative home directory is an error.
+func AuthorizedClientsPath() (string, error) { return statePath("authorized_clients") }
 
-// PairedPath returns ~/.config/quic-link/paired.toml. Stub: not implemented yet.
-func PairedPath() (string, error) { return "", nil }
+// PairedPath returns ~/.config/quic-link/paired.toml, with the same rules as
+// AuthorizedClientsPath.
+func PairedPath() (string, error) { return statePath("paired.toml") }
 
-// ValidateDistinctListenPins is the exported form of
-// validateDistinctListenPins. Stub: not implemented yet.
-func ValidateDistinctListenPins(servers map[string]Server) error { return nil }
+// statePath returns file under ~/.config/quic-link, resolved with
+// os.UserHomeDir like the other defaults.
+func statePath(file string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate %s: %w", file, err)
+	}
+	if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("locate %s: home directory %q is not an absolute path", file, home)
+	}
+	return filepath.Join(home, ".config", "quic-link", file), nil
+}
