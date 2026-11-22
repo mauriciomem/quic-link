@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -30,7 +32,8 @@ type pairedFile struct {
 // LoadPaired reads paired.toml. A missing file is an empty, non-nil map.
 // Unknown keys are ignored so a file written by a newer version still loads
 // (they are dropped if this version rewrites the file). Bad TOML or an
-// invalid server is a *MalformedError with Line 0, and no servers.
+// invalid server, or a file larger than 1 MiB, is a *MalformedError with
+// Line 0, and no servers.
 //
 // paired.toml is written only by the client's own pairing verbs, run by one
 // operator at a time, so unlike authorized_clients it takes no lock. Its
@@ -38,6 +41,9 @@ type pairedFile struct {
 // checkPrivate), otherwise the error matches ErrUnsafePath; UpsertPaired and
 // ForgetPaired read through LoadPaired and are refused the same way.
 func LoadPaired(path string) (map[string]PairedServer, error) {
+	if err := checkStatePathSyntax(path); err != nil {
+		return nil, err
+	}
 	exists, err := verifyStatePath(path)
 	if err != nil {
 		return nil, err
@@ -45,12 +51,12 @@ func LoadPaired(path string) (map[string]PairedServer, error) {
 	if !exists {
 		return map[string]PairedServer{}, nil
 	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	data, err := readStateFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return map[string]PairedServer{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("pairstate: read %s: %w", path, err)
+		return nil, err
 	}
 	var f pairedFile
 	if err := toml.NewDecoder(bytes.NewReader(data)).Decode(&f); err != nil {
@@ -69,7 +75,9 @@ func LoadPaired(path string) (map[string]PairedServer, error) {
 // UpsertPaired records server name at addr with pin, paired at now, replacing
 // any earlier record of the same name and keeping the others. The file is
 // written atomically, mode 0600, its directory 0700. Invalid input or an
-// existing malformed file is an error and leaves the file untouched.
+// existing malformed file is an error and leaves the file untouched. A
+// directory found unsafe after the write is an ErrUnsafePath error; the file
+// is then already written, and the next LoadPaired refuses it.
 func UpsertPaired(path, name, addr, pin string, now time.Time) error {
 	return upsertPairedWith(defaultPairedOpts(), path, name, addr, pin, now)
 }
@@ -84,6 +92,9 @@ func defaultPairedOpts() pairedOpts { return pairedOpts{write: atomicfile.Write}
 
 // upsertPairedWith is UpsertPaired with injectable dependencies.
 func upsertPairedWith(o pairedOpts, path, name, addr, pin string, now time.Time) error {
+	if err := checkStatePathSyntax(path); err != nil {
+		return err
+	}
 	if err := validatePaired(name, addr, pin); err != nil {
 		return fmt.Errorf("pairstate: %w", err)
 	}
@@ -98,6 +109,9 @@ func upsertPairedWith(o pairedOpts, path, name, addr, pin string, now time.Time)
 // ForgetPaired removes server name. An unknown name, or a missing file, is
 // ErrNotFound and leaves the file untouched.
 func ForgetPaired(path, name string) error {
+	if err := checkStatePathSyntax(path); err != nil {
+		return err
+	}
 	servers, err := LoadPaired(path)
 	if err != nil {
 		return err
@@ -109,7 +123,9 @@ func ForgetPaired(path, name string) error {
 	return writePairedWith(defaultPairedOpts(), path, servers)
 }
 
-// writePairedWith replaces paired.toml with servers.
+// writePairedWith replaces paired.toml with servers, then checks its
+// directory: LoadPaired treats a missing directory as empty without checking
+// anything, so the write may have created it, or found one swapped in.
 func writePairedWith(o pairedOpts, path string, servers map[string]PairedServer) error {
 	data, err := toml.Marshal(pairedFile{Servers: servers})
 	if err != nil {
@@ -117,6 +133,14 @@ func writePairedWith(o pairedOpts, path string, servers map[string]PairedServer)
 	}
 	if err := o.write(path, data, 0o600); err != nil {
 		return fmt.Errorf("pairstate: write %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	exists, err := verifyStateDir(dir)
+	if err != nil {
+		return fmt.Errorf("pairstate: %s was written, but its directory is unsafe: %w", path, err)
+	}
+	if !exists {
+		return fmt.Errorf("pairstate: %s was written, but its directory %s vanished", path, dir)
 	}
 	return nil
 }
