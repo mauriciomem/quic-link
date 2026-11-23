@@ -442,9 +442,10 @@ type seamScan struct {
 }
 
 // seamAllowsALPNPairName reports whether production code in dir (module-relative,
-// slash-separated) may name ALPNPair: the pairing-capable packages only.
+// slash-separated) may name ALPNPair: the pairing packages only; internal/transport
+// may only declare it.
 func seamAllowsALPNPairName(dir string) bool {
-	for _, p := range []string{"internal/identity", "internal/pairing", "internal/transport"} {
+	for _, p := range []string{"internal/identity", "internal/pairing"} {
 		if dir == p || strings.HasPrefix(dir, p+"/") {
 			return true
 		}
@@ -454,9 +455,9 @@ func seamAllowsALPNPairName(dir string) bool {
 
 // seamScanFile returns one message per seam violation in a production file in
 // dir (module-relative, slash-separated). The "quic-link/pair1" literal is
-// exempt only as the plain value of a const named ALPNPair in
-// internal/transport itself; the name ALPNPair is a violation outside the
-// pairing-capable packages.
+// exempt only as the plain value of the top-level const ALPNPair in
+// internal/transport; that declaring identifier is the only use of the name
+// ALPNPair allowed outside internal/identity and internal/pairing.
 func seamScanFile(fset *token.FileSet, f *ast.File, dir, pairingImport string, scan *seamScan) []string {
 	var out []string
 	for _, imp := range f.Imports {
@@ -465,32 +466,13 @@ func seamScanFile(fset *token.FileSet, f *ast.File, dir, pairingImport string, s
 		}
 	}
 	exempt := map[*ast.BasicLit]bool{}
+	declIdent := map[*ast.Ident]bool{}
+	if dir == "internal/transport" {
+		seamExemptALPNPairDecl(f, scan, exempt, declIdent)
+	}
 	allowName := seamAllowsALPNPairName(dir)
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
-		case *ast.GenDecl:
-			if x.Tok != token.CONST || dir != "internal/transport" {
-				break
-			}
-			for _, spec := range x.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for i, name := range vs.Names {
-					if name.Name != "ALPNPair" {
-						continue
-					}
-					scan.sawALPNPairDecl = true
-					if i < len(vs.Values) {
-						if lit, ok := vs.Values[i].(*ast.BasicLit); ok {
-							if v, ok := seamConstString(lit); ok && v == seamPair1 {
-								exempt[lit] = true
-							}
-						}
-					}
-				}
-			}
 		case *ast.Ident:
 			if x.Name == "ListenTLSWithPairingConfig" {
 				out = append(out, fmt.Sprintf("%s: production code references ListenTLSWithPairingConfig", fset.Position(x.Pos())))
@@ -498,8 +480,8 @@ func seamScanFile(fset *token.FileSet, f *ast.File, dir, pairingImport string, s
 			if x.Name == "AgentListenTLS" {
 				scan.sawAgentListenTLS = true
 			}
-			if x.Name == "ALPNPair" && !allowName {
-				out = append(out, fmt.Sprintf("%s: production code outside identity, pairing and transport names ALPNPair", fset.Position(x.Pos())))
+			if x.Name == "ALPNPair" && !allowName && !declIdent[x] {
+				out = append(out, fmt.Sprintf("%s: production code names ALPNPair outside identity and pairing (internal/transport may only declare it)", fset.Position(x.Pos())))
 			}
 		case *ast.BinaryExpr:
 			if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) {
@@ -514,6 +496,39 @@ func seamScanFile(fset *token.FileSet, f *ast.File, dir, pairingImport string, s
 		return true
 	})
 	return out
+}
+
+// seamExemptALPNPairDecl marks the exemptions of internal/transport's own
+// declaration: the declaring identifier of each top-level const named ALPNPair
+// and its plain "quic-link/pair1" value. It walks f.Decls only, so a
+// function-local const of that name is never exempt.
+func seamExemptALPNPairDecl(f *ast.File, scan *seamScan, exempt map[*ast.BasicLit]bool, declIdent map[*ast.Ident]bool) {
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name != "ALPNPair" {
+					continue
+				}
+				scan.sawALPNPairDecl = true
+				declIdent[name] = true
+				if i < len(vs.Values) {
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok {
+						if v, ok := seamConstString(lit); ok && v == seamPair1 {
+							exempt[lit] = true
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // seamModuleRoot finds the directory holding go.mod, walking up from the
