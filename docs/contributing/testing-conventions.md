@@ -133,9 +133,10 @@ only.
   scanned file may import `internal/pairing`, reference
   `ListenTLSWithPairingConfig`, or contain the string `"quic-link/pair1"`, even
   built by concatenation. The one place that literal is allowed is as the
-  value of the `ALPNPair` constant in `internal/transport`, and the name
-  `ALPNPair` may appear only in `internal/identity`, `internal/pairing`, and
-  `internal/transport`.
+  plain value of the top-level `ALPNPair` constant in `internal/transport`.
+  The name `ALPNPair` may appear in `internal/identity` and
+  `internal/pairing`; `internal/transport` may only declare it at package
+  level, and any other use there (or in a transport subpackage) is flagged.
 
 Both guards also check that they are not blind: each fails if its scan never
 sees the names it is anchored to. When pairing is wired into a

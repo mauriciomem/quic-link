@@ -221,10 +221,17 @@ On top of those sit the listener-side pieces:
 - **The routed listener** (`route.go`): `NewRoutedListener` wraps a transport
   listener. `Accept` returns only connections that negotiated the steady
   protocol (`quic-link/1`). A pairing connection goes to the handler in its own
-  goroutine, with a cap on how many run at once; anything else is closed.
+  goroutine, with a cap on how many run at once (16) and on how many run from
+  one source (2, keyed like the window's budget); a connection over either cap
+  is closed as busy, never queued. Anything else is closed.
 - **The handler** (`serve.go`): `Serve` handles one pairing exchange on one
   connection. It reads one request, lets the window judge the proof, and
-  records an admitted pin through a `Persister` before answering ok.
+  records an admitted pin through a `Persister` before answering ok. One
+  deadline (10 seconds) bounds the request and the response together. Once an
+  admitted pin is being saved, shutdown no longer cuts the exchange short: the
+  joiner is answered ok. If the pin was saved but the ok answer could not be
+  written, `Serve` logs a WARN and returns an error wrapping
+  `ErrSavedNotAcknowledged`; the pin stays authorized and unconfirmed.
 
 Not wired yet: nothing in production imports it.
 
@@ -321,8 +328,8 @@ is bound to). The QUIC connection implements both; the in-memory one does
 not, and a caller must treat absence as "unknown." An unexported classifier
 for a pairing joiner's dial errors maps a refusal at ALPN to "no pairing
 window is open" and a `bad_certificate` alert to "the join blob does not match
-this listener," and returns anything else unchanged for the caller's retry
-policy.
+this listener," and classifies everything else as transient (the attempt may
+succeed if retried). No result is ever reported as an authentication failure.
 
 ## `internal/tunnel`
 
