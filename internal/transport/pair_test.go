@@ -310,6 +310,13 @@ func TestClassifyPairDialError_RealRefusals(t *testing.T) {
 			t.Fatalf("first read timed out instead of seeing the refusal: %v", readErr)
 		}
 		wantPairClass(t, transport.ClassifyPairDialError(readErr), transport.ErrPairBlobMismatch, "0x12a")
+		// quic-go unblocks AcceptStream before it cancels the connection context with
+		// the close cause, so wait for the context to end before reading the cause.
+		select {
+		case <-conn.Context().Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection context not done 5 s after the first read saw the refusal")
+		}
 		cause := context.Cause(conn.Context())
 		if cause == nil {
 			t.Fatal("connection context has no cause after the refusal")

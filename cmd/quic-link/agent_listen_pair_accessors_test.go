@@ -295,6 +295,13 @@ func TestAgentListenTransport_PairRefusalShapes(t *testing.T) {
 			t.Fatalf("first read timed out instead of seeing the refusal: %v", err)
 		}
 		wantTransportErr(t, "first read err", err, 0x12a, true)
+		// quic-go unblocks AcceptStream before it cancels the connection context with
+		// the close cause, so wait for the context to end before reading the cause.
+		select {
+		case <-d.conn.Context().Done():
+		case <-time.After(5 * time.Second):
+			t.Fatal("connection context not done 5 s after the first read saw the refusal")
+		}
 		wantTransportErr(t, "context.Cause", context.Cause(d.conn.Context()), 0x12a, true)
 	})
 
