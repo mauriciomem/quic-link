@@ -3,6 +3,7 @@ package pairing
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 
 	"github.com/mauriciomem/quic-link/internal/transport"
@@ -21,9 +22,13 @@ const (
 // queue; refusing at the cap keeps a flood from holding goroutines.
 const maxPairConns = 16
 
+// maxPairConnsPerSource bounds the pairing conversations one source runs at
+// once, keyed like the window's budget (sourceKey: IPv4 /32, IPv6 /64).
+const maxPairConnsPerSource = 2
+
 // routeOpts are a routed listener's test hooks.
 type routeOpts struct {
-	// released, if set, runs after a handler's slot was released (test hook).
+	// released, if set, runs after a handler's counts were released (test hook).
 	released func()
 }
 
@@ -37,11 +42,12 @@ type routedListener struct {
 	// Accept call, and ends only with Close.
 	ctx    context.Context
 	cancel context.CancelFunc
-	slots  chan struct{} // one token per running handler
 
-	mu     sync.Mutex // guards closed and the Add side of wg
-	closed bool
-	wg     sync.WaitGroup
+	mu        sync.Mutex // guards closed, running, perSource and the Add side of wg
+	closed    bool
+	running   int                  // handlers running
+	perSource map[netip.Prefix]int // handlers running per source key; never holds a zero
+	wg        sync.WaitGroup
 }
 
 // NewRoutedListener wraps ln. Accept returns only connections that negotiated
@@ -51,10 +57,14 @@ type routedListener struct {
 // CodePairRejected and never returned. ln's Conns must be the transport's own
 // (not wrapped), or the optional interfaces are lost and everything is refused.
 //
-// At most maxPairConns handlers run at once; a pairing connection arriving at
-// the cap is closed with CodePairBusy, never queued. Handlers run under a
-// context that Close cancels, and Close returns only after every handler has.
-// A nil handle refuses pairing connections like an unknown protocol.
+// At most maxPairConns handlers run at once, and at most maxPairConnsPerSource
+// from one source (the IPv4 /32 or IPv6 /64 the window budgets on); a pairing
+// connection over either cap is closed with CodePairBusy, never queued, and one
+// whose UDP source cannot be read is closed with CodePairRejected. Handlers run
+// under a context that Close cancels, and Close returns only after every
+// handler has. A nil handle refuses pairing connections like an unknown
+// protocol. Many distinct sources can still fill the global cap; that is
+// accepted, like the per-window source table bound.
 func NewRoutedListener(ln transport.Listener, handle func(context.Context, transport.Conn)) transport.Listener {
 	return newRoutedListener(ln, handle, routeOpts{})
 }
@@ -68,7 +78,8 @@ func newRoutedListener(ln transport.Listener, handle func(context.Context, trans
 		opts:   o,
 		ctx:    ctx,
 		cancel: cancel,
-		slots:  make(chan struct{}, maxPairConns),
+
+		perSource: make(map[netip.Prefix]int),
 	}
 }
 
@@ -106,31 +117,52 @@ func (l *routedListener) dispatch(c transport.Conn) {
 		_ = c.CloseWithError(CodePairRejected, "")
 		return
 	}
-	select {
-	case l.slots <- struct{}{}:
-	default:
-		_ = c.CloseWithError(CodePairBusy, "")
-		return
-	}
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		<-l.slots
+	from, err := udpSource(c)
+	key, ok := sourceKey(from.Addr())
+	if err != nil || !ok {
+		// Fail closed: Serve would refuse it anyway; do not spend a slot.
 		_ = c.CloseWithError(CodePairRejected, "")
 		return
 	}
-	l.wg.Add(1)
+	l.mu.Lock()
+	var code uint64
+	switch {
+	case l.closed:
+		code = CodePairRejected
+	case l.running >= maxPairConns || l.perSource[key] >= maxPairConnsPerSource:
+		code = CodePairBusy
+	default:
+		l.running++
+		l.perSource[key]++
+		l.wg.Add(1)
+	}
 	l.mu.Unlock()
+	if code != 0 {
+		_ = c.CloseWithError(code, "")
+		return
+	}
 	go func() {
 		defer l.wg.Done()
-		defer func() {
-			<-l.slots
-			if l.opts.released != nil {
-				l.opts.released()
-			}
-		}()
+		defer l.release(key)
 		l.handle(l.ctx, c)
 	}()
+}
+
+// release returns a finished handler's counts, then runs the test hook. The
+// hook runs after the unlock, so once it fires the freed slot is visible to
+// the next dispatch.
+func (l *routedListener) release(key netip.Prefix) {
+	l.mu.Lock()
+	l.running--
+	if n := l.perSource[key] - 1; n == 0 {
+		delete(l.perSource, key)
+	} else {
+		l.perSource[key] = n
+	}
+	l.mu.Unlock()
+	if l.opts.released != nil {
+		l.opts.released()
+	}
 }
 
 func (l *routedListener) Addr() net.Addr { return l.ln.Addr() }
