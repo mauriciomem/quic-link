@@ -33,6 +33,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"go.uber.org/goleak"
 
 	"github.com/mauriciomem/quic-link/internal/identity"
 	"github.com/mauriciomem/quic-link/internal/pairing"
@@ -310,8 +311,9 @@ func (c *pairClient) wantClosedWith(t *testing.T, what string, want uint64, d ti
 
 // serveRun is one Serve call in the background.
 type serveRun struct {
-	done  chan error
-	start time.Time
+	done   chan error
+	start  time.Time
+	cancel context.CancelFunc // ends Serve's ctx (shutdown)
 }
 
 // runServe runs serve in the background; at cleanup it requires it to have
@@ -319,7 +321,7 @@ type serveRun struct {
 func runServe(t *testing.T, srv transport.Conn, serve func(ctx context.Context) error) *serveRun {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &serveRun{done: make(chan error, 1), start: time.Now()}
+	r := &serveRun{done: make(chan error, 1), start: time.Now(), cancel: cancel}
 	go func() { r.done <- serve(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -342,6 +344,15 @@ func (r *serveRun) wait(d time.Duration) (error, time.Duration, bool) {
 	case <-time.After(d):
 		return nil, 0, false
 	}
+}
+
+// verifyNoLeakWhileLive requires that no goroutine started after opt was
+// taken is still running, while Serve's ctx is still live: a goroutine that
+// waits only for the caller's ctx is a per-exchange leak for the listener's
+// lifetime. The connections' own run loops may still be winding down.
+func (r *serveRun) verifyNoLeakWhileLive(t *testing.T, opt goleak.Option) {
+	t.Helper()
+	goleak.VerifyNone(t, opt, goleak.IgnoreAnyFunction("github.com/quic-go/quic-go.(*Conn).run"))
 }
 
 type persistCall struct {

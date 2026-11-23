@@ -10,8 +10,9 @@
  *   - guard: AgentListenTLS / ClientListenTLS listeners advertise only quic-link/1
  *   - guard: no non-test .go file in the module outside internal/identity and internal/pairing references
  *     ListenTLSWithPairingConfig, imports internal/pairing, or spells "quic-link/pair1" (also as a constant concatenation);
- *     the one exemption is the plain literal value of const ALPNPair in internal/transport itself, and the name
- *     ALPNPair is a violation outside internal/identity, internal/pairing and internal/transport
+ *     the one exemption is the plain literal value of the top-level const ALPNPair in internal/transport itself, and the name
+ *     ALPNPair is a violation outside internal/identity and internal/pairing except as that declaring identifier
+ *     (an alias, a use or a function-local const in internal/transport, or any use in a transport subpackage, is flagged)
  * @edge-cases
  *   - ticket storage is post-handshake and async: positive checks wait on a Put signal, negative checks wait a bounded window
  * @see ../../internal/identity/tls.go
@@ -346,8 +347,8 @@ func TestAgentAndDaemon_AdvertiseOnlyQuicLink1(t *testing.T) {
 				`package pairing; import "x/internal/transport"; var _ = transport.ALPNPair`, 0, false},
 			{"name allowed in internal/identity", "internal/identity",
 				`package identity; import "x/internal/transport"; const alpnPair1 = transport.ALPNPair`, 0, false},
-			{"name allowed in internal/transport/mem", "internal/transport/mem",
-				`package mem; import "x/internal/transport"; var _ = transport.ALPNPair`, 0, false},
+			{"flagged: transport/mem names ALPNPair", "internal/transport/mem",
+				`package mem; import "x/internal/transport"; var _ = transport.ALPNPair`, 1, false},
 			{"flagged: transport.ALPNPair referenced from cmd", "cmd/quic-link",
 				`package main; import "x/internal/transport"; var _ = transport.ALPNPair`, 1, false},
 			{"flagged: ALPNPair declared outside transport", "internal/daemon",
@@ -355,17 +356,23 @@ func TestAgentAndDaemon_AdvertiseOnlyQuicLink1(t *testing.T) {
 			{"flagged: literal under another constant name", "internal/transport",
 				`package transport; const Other = "quic-link/pair1"`, 1, false},
 			{"flagged: ALPNPair as a var", "internal/transport",
-				`package transport; var ALPNPair = "quic-link/pair1"`, 1, false},
+				`package transport; var ALPNPair = "quic-link/pair1"`, 2, false},
 			{"flagged: ALPNPair built by concatenation", "internal/transport",
 				`package transport; const ALPNPair = "quic-link/" + "pair1"`, 1, true},
 			{"flagged: ALPNPair parenthesized", "internal/transport",
 				`package transport; const ALPNPair = ("quic-link/pair1")`, 1, true},
 			{"flagged: literal in transport subpackage", "internal/transport/mem",
-				`package mem; const ALPNPair = "quic-link/pair1"`, 1, false},
+				`package mem; const ALPNPair = "quic-link/pair1"`, 2, false},
 			{"flagged: second name of the same spec", "internal/transport",
 				`package transport; const ALPNPair, B = "quic-link/pair1", "quic-link/pair1"`, 1, true},
 			{"flagged: literal elsewhere in transport", "internal/transport",
 				`package transport; const ALPNPair = "quic-link/pair1"; func f() string { return "quic-link/pair1" }`, 1, true},
+			{"flagged: alias of ALPNPair in transport", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/pair1"; const PairProto = ALPNPair`, 1, true},
+			{"flagged: ALPNPair returned by a transport function", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/pair1"; func PairProtos() []string { return []string{ALPNPair} }`, 1, true},
+			{"flagged: function-local ALPNPair const in transport", "internal/transport",
+				`package transport; func f() string { const ALPNPair = "quic-link/pair1"; return ALPNPair }`, 3, false},
 			{"flagged: pairing import", "internal/daemon",
 				`package daemon; import _ "` + imp + `"`, 1, false},
 			{"flagged: seam constructor", "internal/daemon",

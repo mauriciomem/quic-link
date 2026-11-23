@@ -7,4 +7,5 @@ var (
 	ClassifyDialError     = classifyDialError
 	ErrNoPairingWindow    = errNoPairingWindow
 	ErrPairBlobMismatch   = errPairBlobMismatch
+	ErrPairTransient      = errPairTransient
 )

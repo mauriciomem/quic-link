@@ -456,6 +456,7 @@ var (
 var (
 	errNoPairingWindow  = errors.New("no pairing window is open on the listener")
 	errPairBlobMismatch = errors.New("the join blob does not match this listener (reissued token, wrong host, or rotated key)")
+	errPairTransient    = errors.New("the pairing attempt failed; it may succeed if retried")
 )
 
 // alertBadCertificate is the QUIC error code of TLS alert bad_certificate (42).

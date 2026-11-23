@@ -7,13 +7,16 @@
  *   - any *quic.TransportError 0x178 in the chain -> wraps errNoPairingWindow, message names 0x178
  *   - any *quic.TransportError 0x12a in the chain (local or remote) -> wraps errPairBlobMismatch, message names 0x12a
  *   - the two pairing classes drop the original chain: not ErrAuthFailed, not IsAuthFailed, no *quic.TransportError
- *   - anything else is returned unchanged (transient; a handshake timeout stays ErrUnreachable)
+ *   - an input already wrapping errNoPairingWindow, errPairBlobMismatch or errPairTransient is returned unchanged
+ *   - any other TLS alert, or IsAuthFailed without one -> wraps errPairTransient, chain dropped, message names the code
+ *   - anything else -> fmt.Errorf("%w: %w", errPairTransient, err): chain kept (a timeout stays ErrUnreachable)
+ *   - no output ever matches ErrAuthFailed or IsAuthFailed
  *   - real refusals over loopback QUIC through NewQUICListenTransport (a Retry is seen first):
  *     closed window -> no-window; joiner pinned to another key -> blob mismatch from Dial;
  *     listener refusing the joiner's certificate -> blob mismatch from the first read and from context.Cause
  * @edge-cases
  *   - input already wrapped by classifyDialError (QUICTransport.Dial always wraps) or by %w still classifies
- *   - 0x150 internal_error and an application close are transient, not blob mismatch
+ *   - 0x150 internal_error, other TLS alerts, application/busy closes, timeouts and ctx errors are transient, not blob mismatch
  * @see ./quic_transport.go
  */
 package transport_test
@@ -102,30 +105,119 @@ func TestClassifyPairDialError_Table(t *testing.T) {
 		})
 	}
 
-	timeout := transport.ClassifyDialError(&quic.HandshakeTimeoutError{})
-	transient := []struct {
+	te := func(c quic.TransportErrorCode) *quic.TransportError {
+		return &quic.TransportError{ErrorCode: c, Remote: true}
+	}
+
+	// Auth-shaped inputs: transient, the chain dropped so nothing can map
+	// them to the steady authentication failure.
+	authShaped := []struct {
 		name string
 		in   error
+		code string
 	}{
-		{"0x150 internal_error", &quic.TransportError{ErrorCode: 0x150, Remote: true}},
-		{"0x150 wrapped by classifyDialError", transport.ClassifyDialError(&quic.TransportError{ErrorCode: 0x150, Remote: true})},
-		{"application close", &quic.ApplicationError{ErrorCode: 7, Remote: true}},
-		{"handshake timeout", timeout},
-		{"plain error", errors.New("boom")},
+		{"0x150 raw", te(0x150), "0x150"},
+		{"0x128 raw", te(0x128), "0x128"},
+		{"0x12e raw", te(0x12e), "0x12e"},
+		{"0x12b raw", te(0x12b), "0x12b"},
+		{"0x174 raw", te(0x174), "0x174"},
+		{"0x128 wrapped twice", fmt.Errorf("dial: %w", transport.ClassifyDialError(te(0x128))), "0x128"},
+		{"ErrAuthFailed without a TransportError", transport.AuthError(te(0x150)), "refused the handshake"},
 	}
-	for _, tc := range transient {
+	for _, tc := range authShaped {
 		t.Run("transient "+tc.name, func(t *testing.T) {
-			got := transport.ClassifyPairDialError(tc.in)
-			if got != tc.in {
-				t.Errorf("ClassifyPairDialError(%v) = %v, want the input unchanged", tc.in, got)
-			}
-			if errors.Is(got, transport.ErrNoPairingWindow) || errors.Is(got, transport.ErrPairBlobMismatch) {
-				t.Errorf("transient %v classified as a pairing class: %v", tc.in, got)
+			wantPairClass(t, transport.ClassifyPairDialError(tc.in), transport.ErrPairTransient, tc.code)
+		})
+	}
+	t.Run("transient 0x150 wrapped by classifyDialError", func(t *testing.T) {
+		got := transport.ClassifyPairDialError(transport.ClassifyDialError(te(0x150)))
+		wantPairClass(t, got, transport.ErrPairTransient, "0x150")
+		if strings.Contains(got.Error(), "--pin") {
+			t.Errorf("transient %q carries the steady pin advice", got.Error())
+		}
+	})
+
+	// Every other input: transient, the chain kept.
+	for _, tc := range []struct {
+		name string
+		code quic.ApplicationErrorCode
+	}{{"application close", 7}, {"busy close", 0x51}} {
+		t.Run("transient "+tc.name, func(t *testing.T) {
+			got := transport.ClassifyPairDialError(&quic.ApplicationError{ErrorCode: tc.code, Remote: true})
+			wantTransientKeeps(t, got)
+			var ae *quic.ApplicationError
+			if !errors.As(got, &ae) || ae.ErrorCode != tc.code {
+				t.Errorf("transient %v lost the application close code %#x", got, uint64(tc.code))
 			}
 		})
 	}
-	if !errors.Is(transport.ClassifyPairDialError(timeout), transport.ErrUnreachable) {
-		t.Errorf("handshake timeout no longer ErrUnreachable after pair classification")
+	timeout := transport.ClassifyDialError(&quic.HandshakeTimeoutError{})
+	refused := transport.ClassifyDialError(&quic.TransportError{ErrorCode: quic.ConnectionRefused})
+	boom := errors.New("boom")
+	canceled := fmt.Errorf("dial: %w", context.Canceled)
+	for _, tc := range []struct {
+		name string
+		in   error
+		keep error
+	}{
+		{"handshake timeout", timeout, transport.ErrUnreachable},
+		{"connection refused", refused, transport.ErrUnreachable},
+		{"plain error", boom, boom},
+		{"context canceled", canceled, context.Canceled},
+	} {
+		t.Run("transient "+tc.name, func(t *testing.T) {
+			got := transport.ClassifyPairDialError(tc.in)
+			wantTransientKeeps(t, got)
+			if !errors.Is(got, tc.keep) {
+				t.Errorf("transient %v no longer matches %v: the chain must be kept", got, tc.keep)
+			}
+		})
+	}
+
+	t.Run("already classified is returned unchanged", func(t *testing.T) {
+		for _, in := range []error{noApp, badCertRemote, te(0x150), boom} {
+			g := transport.ClassifyPairDialError(in)
+			if !errors.Is(g, transport.ErrNoPairingWindow) && !errors.Is(g, transport.ErrPairBlobMismatch) && !errors.Is(g, transport.ErrPairTransient) {
+				t.Errorf("ClassifyPairDialError(%v) = %v, want one of the three pairing classes", in, g)
+				continue
+			}
+			if again := transport.ClassifyPairDialError(g); again != g {
+				t.Errorf("ClassifyPairDialError(%v) = %v, want the classified input itself", g, again)
+			}
+		}
+	})
+
+	t.Run("no class is an auth failure", func(t *testing.T) {
+		inputs := []error{timeout, refused, boom, canceled,
+			&quic.ApplicationError{ErrorCode: 7, Remote: true}, &quic.ApplicationError{ErrorCode: 0x51, Remote: true},
+			transport.ClassifyDialError(te(0x150))}
+		for _, tc := range classes {
+			inputs = append(inputs, tc.in)
+		}
+		for _, tc := range authShaped {
+			inputs = append(inputs, tc.in)
+		}
+		for _, in := range inputs {
+			got := transport.ClassifyPairDialError(in)
+			if errors.Is(got, transport.ErrAuthFailed) || transport.IsAuthFailed(got) {
+				t.Errorf("ClassifyPairDialError(%v) = %v: an authentication failure", in, got)
+			}
+		}
+	})
+}
+
+// wantTransientKeeps checks that got is the transient class and not a pairing
+// class or an authentication failure.
+func wantTransientKeeps(t *testing.T, got error) {
+	t.Helper()
+	if !errors.Is(got, transport.ErrPairTransient) {
+		t.Errorf("classified = %v, want errors.Is(%v)", got, transport.ErrPairTransient)
+	}
+	if errors.Is(got, transport.ErrNoPairingWindow) || errors.Is(got, transport.ErrPairBlobMismatch) {
+		t.Errorf("transient %v classified as a pairing class", got)
+	}
+	if transport.IsAuthFailed(got) {
+		t.Errorf("IsAuthFailed(%v) = true, want false", got)
 	}
 }
 

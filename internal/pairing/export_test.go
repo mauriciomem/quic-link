@@ -50,6 +50,24 @@ func ServeWithDeadline(ctx context.Context, conn transport.Conn, w *Window, p Pe
 	return serveWith(ctx, conn, w, p, log, o)
 }
 
+// DefaultServeRefusalLinger is how long Serve waits for a refused peer to
+// hang up.
+func DefaultServeRefusalLinger() time.Duration { return defaultServeOpts().refusalLinger }
+
+// ServeWithShutdownHook is Serve with onShutdown run by the shutdown watcher
+// once ctx ended, before the watcher acts; blocking in it holds the watcher.
+func ServeWithShutdownHook(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger, onShutdown func()) error {
+	o := defaultServeOpts()
+	o.onShutdown = onShutdown
+	return serveWith(ctx, conn, w, p, log, o)
+}
+
+// NewRoutedListenerWithReleaseHook is NewRoutedListener with released run
+// after each handler's counts were released.
+func NewRoutedListenerWithReleaseHook(ln transport.Listener, handle func(context.Context, transport.Conn), released func()) transport.Listener {
+	return newRoutedListener(ln, handle, routeOpts{released: released})
+}
+
 // DefaultServeDeadline is the deadline Serve uses.
 func DefaultServeDeadline() time.Duration { return defaultServeOpts().deadline }
 

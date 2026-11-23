@@ -5,7 +5,8 @@
  *   - Accept returns only connections whose NEGOTIATED ALPN (transport.ALPNProvider) is transport.ALPN, in arrival order; it loops internally over the others
  *   - transport.ALPNPair -> handle(ctx, conn) in its own goroutine (Accept never waits for a handler); the listener does not close it
  *   - "" / any other ALPN (exact match, case-sensitive) / a Conn without ALPNProvider -> CloseWithError(CodePairRejected), never returned, never handled
- *   - at most 16 handlers run at once; a pair1 connection arriving at the cap is closed with CodePairBusy at once (never queued, never handled); a slot frees when a handler returns
+ *   - at most 16 handlers at once and at most 2 per source key (sourceKey); a pair1 connection over either cap is closed CodePairBusy at once (never queued, never handled); one whose UDP source cannot be read is closed CodePairRejected; a slot frees when a handler returns
+ *   - test seam: NewRoutedListenerWithReleaseHook(ln, handle, released) runs released after a handler's counts were returned (under no lock)
  *   - handler ctx: derived at construction (not from Accept's ctx), cancelled by Close; Close cancels, closes ln, and returns only after every handler returned
  *   - Accept returns ln.Accept's error unchanged; Addr is ln.Addr
  * @edge-cases
@@ -19,7 +20,9 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -98,22 +101,42 @@ func (c *fakeConn) closeCode(d time.Duration) (uint64, bool) {
 	}
 }
 
-// alpnConn is a fakeConn that reports a negotiated protocol.
+// alpnConn is a fakeConn that reports a negotiated protocol and a remote
+// address.
 type alpnConn struct {
 	*fakeConn
-	proto string
+	proto  string
+	remote net.Addr
 }
 
 func (c *alpnConn) NegotiatedProtocol() string { return c.proto }
+func (c *alpnConn) RemoteAddr() net.Addr       { return c.remote }
 
+// connSeq numbers the default remote addresses so every newALPNConn is its
+// own source.
+var connSeq atomic.Uint32
+
+// newALPNConn returns a conn from a source of its own: 10.n>>16.n>>8.n:4000.
 func newALPNConn(name, proto string) *alpnConn {
-	return &alpnConn{fakeConn: newFakeConn(name), proto: proto}
+	n := connSeq.Add(1)
+	return newALPNConnFrom(name, proto, &net.UDPAddr{IP: net.IPv4(10, byte(n>>16), byte(n>>8), byte(n)), Port: 4000})
 }
+
+func newALPNConnFrom(name, proto string, remote net.Addr) *alpnConn {
+	return &alpnConn{fakeConn: newFakeConn(name), proto: proto, remote: remote}
+}
+
+// noAddrConn negotiated pair1 but has no RemoteAddrProvider.
+type noAddrConn struct{ *fakeConn }
+
+func (c noAddrConn) NegotiatedProtocol() string { return transport.ALPNPair }
 
 // connName names a conn for messages.
 func connName(c transport.Conn) string {
 	switch v := c.(type) {
 	case *alpnConn:
+		return v.name
+	case noAddrConn:
 		return v.name
 	case *fakeConn:
 		return v.name
@@ -125,6 +148,8 @@ func connName(c transport.Conn) string {
 func fakeOf(c transport.Conn) *fakeConn {
 	switch v := c.(type) {
 	case *alpnConn:
+		return v.fakeConn
+	case noAddrConn:
 		return v.fakeConn
 	case *fakeConn:
 		return v
@@ -482,7 +507,11 @@ func TestRoutedListener_PairConnCap(t *testing.T) {
 	routeLeakCheck(t)
 	fl := newFakeListener()
 	h := newHandlerSpy(true)
-	rl := pairing.NewRoutedListener(fl, h.handle)
+	// The hook runs after a handler's counts were returned, so once it fired
+	// the slot is visible to the next connection (a handler-side signal comes
+	// before that and would make this test scheduler-dependent).
+	releases := make(chan struct{}, 64)
+	rl := pairing.NewRoutedListenerWithReleaseHook(fl, h.handle, func() { releases <- struct{}{} })
 	ctx, cancel := context.WithCancel(context.Background())
 	loop := startAcceptLoop(ctx, rl)
 	var gateOnce sync.Once
@@ -535,11 +564,11 @@ func TestRoutedListener_PairConnCap(t *testing.T) {
 	// connection is handled again.
 	release()
 	deadline := time.After(routeWait)
-	for h.exited.Load() < wantCap {
+	for n := 0; n < wantCap; n++ {
 		select {
+		case <-releases:
 		case <-deadline:
-			t.Fatalf("only %d of %d handlers returned after release", h.exited.Load(), wantCap)
-		case <-time.After(5 * time.Millisecond):
+			t.Fatalf("only %d of %d handler slots released within %v after the gate opened", n, wantCap, routeWait)
 		}
 	}
 	again := newALPNConn("pair1 after release", transport.ALPNPair)
@@ -550,4 +579,170 @@ func TestRoutedListener_PairConnCap(t *testing.T) {
 	if code, closed := again.closeCode(50 * time.Millisecond); closed {
 		t.Errorf("pair1 connection after slots freed closed with %#x; the cap counts running handlers, not totals", code)
 	}
+}
+
+// capRig is a routed listener over a fake listener with a gated handler spy
+// and a release hook, accepting in the background.
+type capRig struct {
+	fl       *fakeListener
+	h        *handlerSpy
+	releases chan struct{}
+	release  func() // opens the handler gate
+}
+
+func newCapRig(t *testing.T) *capRig {
+	t.Helper()
+	routeLeakCheck(t)
+	r := &capRig{fl: newFakeListener(), h: newHandlerSpy(true), releases: make(chan struct{}, 64)}
+	rl := pairing.NewRoutedListenerWithReleaseHook(r.fl, r.h.handle, func() { r.releases <- struct{}{} })
+	ctx, cancel := context.WithCancel(context.Background())
+	loop := startAcceptLoop(ctx, rl)
+	var once sync.Once
+	r.release = func() { once.Do(func() { close(r.h.gate) }) }
+	t.Cleanup(func() {
+		r.release()
+		cancel()
+		rl.Close()
+		<-loop.done
+	})
+	return r
+}
+
+// from returns a pair1 conn whose remote address is the UDP address s.
+func from(name, s string) *alpnConn {
+	return newALPNConnFrom(name, transport.ALPNPair, net.UDPAddrFromAddrPort(netip.MustParseAddrPort(s)))
+}
+
+// wantRefused requires each conn to be closed with code within one shared
+// routeWait budget, and never handled.
+func (r *capRig) wantRefused(t *testing.T, code uint64, cs ...transport.Conn) {
+	t.Helper()
+	end := time.Now().Add(routeWait)
+	for _, c := range cs {
+		got, closed := fakeOf(c).closeCode(max(time.Until(end), time.Millisecond))
+		switch {
+		case !closed:
+			t.Errorf("%s: not closed within %v; want close code %#x at once, never queued", connName(c), routeWait, code)
+		case got != code:
+			t.Errorf("%s: closed with %#x, want %#x", connName(c), got, code)
+		}
+	}
+	for _, hc := range r.h.handled() {
+		for _, c := range cs {
+			if hc == c {
+				t.Errorf("%s: handled; a connection refused with %#x must never reach the handler", connName(c), code)
+			}
+		}
+	}
+}
+
+// wantAdmitted requires each conn to reach the handler and stay open.
+func (r *capRig) wantAdmitted(t *testing.T, cs ...*alpnConn) {
+	t.Helper()
+	got := map[transport.Conn]bool{}
+	for _, c := range r.h.waitEntered(t, len(cs)) {
+		got[c] = true
+	}
+	for _, c := range cs {
+		if !got[c] {
+			t.Errorf("%s: not handled; want it admitted", c.name)
+		}
+		if code, closed := c.closeCode(0); closed {
+			t.Errorf("%s: closed with %#x; want it admitted", c.name, code)
+		}
+	}
+}
+
+func TestRoutedListener_PerSourceCap(t *testing.T) {
+	t.Run("a third concurrent exchange from one IPv4 source is busy", func(t *testing.T) {
+		r := newCapRig(t)
+		a, b := from("first", "192.0.2.10:1000"), from("second", "192.0.2.10:1001")
+		r.fl.push(a, b)
+		r.wantAdmitted(t, a, b)
+		third := from("third, same address", "192.0.2.10:1002")
+		mapped := from("fourth, IPv4-mapped", "[::ffff:192.0.2.10]:1003")
+		r.fl.push(third, mapped)
+		r.wantRefused(t, pairing.CodePairBusy, third, mapped)
+		if n := len(r.h.handled()); n != 2 {
+			t.Errorf("handler ran %d times, want 2 (two per source)", n)
+		}
+	})
+
+	t.Run("one /64 is one source", func(t *testing.T) {
+		r := newCapRig(t)
+		a, b := from("first in the /64", "[2001:db8:1:2::1]:1"), from("second in the /64", "[2001:db8:1:2::ffff]:2")
+		r.fl.push(a, b)
+		r.wantAdmitted(t, a, b)
+		third := from("third in the /64", "[2001:db8:1:2:abcd::1]:3")
+		r.fl.push(third)
+		r.wantRefused(t, pairing.CodePairBusy, third)
+		other := from("another /64", "[2001:db8:1:3::1]:4")
+		r.fl.push(other)
+		r.wantAdmitted(t, other)
+	})
+
+	t.Run("zones do not split a source", func(t *testing.T) {
+		r := newCapRig(t)
+		a, b := from("eth0", "[fe80::1%eth0]:1"), from("eth1", "[fe80::2%eth1]:2")
+		r.fl.push(a, b)
+		r.wantAdmitted(t, a, b)
+		third := from("eth2", "[fe80::3%eth2]:3")
+		r.fl.push(third)
+		r.wantRefused(t, pairing.CodePairBusy, third)
+	})
+
+	t.Run("a flooding source does not make another source busy", func(t *testing.T) {
+		r := newCapRig(t)
+		flood := make([]*alpnConn, 20)
+		for i := range flood {
+			flood[i] = from(fmt.Sprintf("flood #%d", i+1), netip.AddrPortFrom(netip.MustParseAddr("198.51.100.7"), uint16(5000+i)).String())
+			r.fl.push(flood[i])
+		}
+		r.h.waitEntered(t, 2)
+		var busy []transport.Conn
+		for _, c := range flood[2:] {
+			busy = append(busy, c)
+		}
+		r.wantRefused(t, pairing.CodePairBusy, busy...)
+		if n := len(r.h.handled()); n != 2 {
+			t.Errorf("handler ran %d times for one flooding source, want 2", n)
+		}
+		other := from("another source", "203.0.113.5:1")
+		r.fl.push(other)
+		r.wantAdmitted(t, other)
+		if code, closed := other.closeCode(50 * time.Millisecond); closed {
+			t.Errorf("another source closed with %#x while one source floods; it must be admitted", code)
+		}
+	})
+
+	t.Run("a freed slot is reusable by the same source", func(t *testing.T) {
+		r := newCapRig(t)
+		a, b := from("first", "192.0.2.10:1000"), from("second", "192.0.2.10:1001")
+		r.fl.push(a, b)
+		r.wantAdmitted(t, a, b)
+		r.release()
+		deadline := time.After(routeWait)
+		for n := 0; n < 2; n++ {
+			select {
+			case <-r.releases:
+			case <-deadline:
+				t.Fatalf("only %d of 2 handler slots released within %v", n, routeWait)
+			}
+		}
+		again := from("after release", "192.0.2.10:2000")
+		r.fl.push(again)
+		r.wantAdmitted(t, again)
+	})
+
+	t.Run("a pair1 connection without a readable UDP source is refused", func(t *testing.T) {
+		r := newCapRig(t)
+		cs := []transport.Conn{
+			noAddrConn{newFakeConn("no RemoteAddrProvider")},
+			newALPNConnFrom("TCP remote address", transport.ALPNPair, &net.TCPAddr{IP: net.IPv4(192, 0, 2, 20), Port: 9}),
+			newALPNConnFrom("nil UDP address", transport.ALPNPair, (*net.UDPAddr)(nil)),
+			newALPNConnFrom("invalid UDP address", transport.ALPNPair, &net.UDPAddr{}),
+		}
+		r.fl.push(cs...)
+		r.wantRefused(t, pairing.CodePairRejected, cs...)
+	})
 }

@@ -907,6 +907,54 @@ func TestWindow_SecretWipedOnEveryClose(t *testing.T) {
 		}
 		lateKey(t, h, secret)
 	})
+	t.Run("Blob racing Close never encodes a wiped secret", func(t *testing.T) {
+		// The next clock read after arming blocks, so Blob is held between
+		// its open check and encoding while Close is started. -race cannot
+		// see this: it does not instrument clear() on the secret.
+		var armed atomic.Bool
+		entered, gate := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		releaseClock := func() { once.Do(func() { close(gate) }) }
+		t.Cleanup(releaseClock)
+		h := openTest(t, time.Minute, func(o *pairing.WindowOpts) {
+			now := o.Now
+			o.Now = func() time.Time {
+				if armed.CompareAndSwap(true, false) {
+					close(entered)
+					<-gate
+				}
+				return now()
+			}
+		})
+		armed.Store(true)
+		blob := make(chan string, 1)
+		go func() { blob <- h.w.Blob() }()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Blob never read the clock")
+		}
+		closed := make(chan struct{})
+		go func() { defer close(closed); h.w.Close() }()
+		select {
+		case <-closed:
+		case <-time.After(100 * time.Millisecond):
+		}
+		releaseClock()
+		var got string
+		select {
+		case got = <-blob:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Blob did not return")
+		}
+		within(t, "Close", func() { <-closed })
+		if got == "" {
+			return // Blob saw the window closed: nothing encoded
+		}
+		if _, err := pairing.ParseBlob(got); err != nil {
+			t.Errorf("Blob racing Close returned %q, which does not parse: %v (a wiped secret was encoded)", got, err)
+		}
+	})
 	t.Run("crypto/rand stand-ins differ", func(t *testing.T) {
 		var keys [2][pairing.SecretLen]byte
 		for i := range keys {

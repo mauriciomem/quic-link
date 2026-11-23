@@ -1,14 +1,16 @@
 /**
  * @spec-handoff
- * @interface Serve(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger) error; Persister{Persist(pin, label string, from netip.AddrPort) error}; optional Confirmer{Confirm(pin string) error}; seam serveWith(..., serveOpts{deadline}) with defaultServeOpts().deadline == proto.ResponseDeadline (10 s)
+ * @interface Serve(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger) error; Persister{Persist(pin, label string, from netip.AddrPort) error}; optional Confirmer{Confirm(pin string) error}; var ErrSavedNotAcknowledged; seam serveWith(..., serveOpts{deadline, refusalLinger, onShutdown}) with defaults deadline == proto.ResponseDeadline (10 s), refusalLinger == 1 s; onShutdown (test hook) runs in the ctx watcher before it acts
  * @behavior
  *   - preconditions, else CloseWithError(CodePairRejected) + non-nil error with NO Attempt and NO Persist: ALPNProvider == transport.ALPNPair, EKMProvider, RemoteAddrProvider giving a *net.UDPAddr with a valid AddrPort, a peer certificate (pin = identity.PinFromCert(leaf)), non-nil w, p, log
- *   - AcceptStream within the deadline (else close CodePairRejected); further streams reset with proto.StreamResetCode while Serve runs; ReadFrame under a read deadline (a stalled frame ends in a close)
+ *   - one deadline, set once after the preconditions, bounds AcceptStream (else close CodePairRejected), the request frame and the response write; a frame still stalled at it gets no answer (the write deadline passed too) and a close; further streams reset with proto.StreamResetCode while Serve runs
  *   - frame error -> bad_header; ParsePairRequest error -> StatusForParseError (unsupported_method's msg names token-hmac-v1; every other msg ""); none of these call Attempt
  *   - EKM(EKMLabel, ExporterContext(req.Label), EKMLength); st := w.Attempt(from.Addr(), proof, ekm) - a request arriving after close is still read and proof-checked and answered window_closed
  *   - ok -> Persist(pin, label, from) BEFORE any response byte; Persist error -> answer window_closed, window stays closed, ERROR log naming the error (file); else ok
  *   - after the ok response is written: Confirm(pin) if p implements Confirmer; its error is WARN only
- *   - then wait for the peer to close or the deadline, and CloseWithError(0, "")
+ *   - ok saved but not written -> no Confirm, one WARN ("not told ok", "unconfirmed", pin prefix, source), error wrapping ErrSavedNotAcknowledged
+ *   - then wait for the peer to close - after ok up to the deadline, ignoring ctx; after any other answer 1 s or ctx - and CloseWithError(0, ""); no wait if the write failed
+ *   - ctx ending: before the commit point (ok judged, nothing saved yet; checked under the same lock, so a watcher that has not run yet does not matter) -> close CodePairRejected, no Persist, WARN "was not saved", error; from the commit point on -> ignored, the joiner is answered ok
  *   - logs carry at most the pin's 8-char prefix: never the full pin, blob, secret, proof or EKM
  * @edge-cases
  *   - dual-stack listener ([::]): an IPv4 client is budgeted as its IPv4 /32
@@ -31,6 +33,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"go.uber.org/goleak"
 
 	"github.com/mauriciomem/quic-link/internal/pairing"
 	"github.com/mauriciomem/quic-link/internal/proto"
@@ -437,6 +440,9 @@ func TestServe_StreamAndFrameDeadlines(t *testing.T) {
 	if got := pairing.DefaultServeDeadline(); got != proto.ResponseDeadline {
 		t.Errorf("Serve's default deadline = %v, want proto.ResponseDeadline %v", got, proto.ResponseDeadline)
 	}
+	if got := pairing.DefaultServeRefusalLinger(); got != time.Second {
+		t.Errorf("Serve's default refusal linger = %v, want 1s", got)
+	}
 	const d = 400 * time.Millisecond
 
 	t.Run("no stream within the deadline closes the connection", func(t *testing.T) {
@@ -533,6 +539,99 @@ func TestServe_StreamAndFrameDeadlines(t *testing.T) {
 		c.wantClosedWith(t, "lingering peer", 0, d+serveWait)
 		if _, _, ok := run.wait(serveWait); !ok {
 			t.Error("Serve still running after closing a lingering peer")
+		}
+	})
+
+	t.Run("one deadline covers stream, frame and answer", func(t *testing.T) {
+		const d = 2 * time.Second
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		_, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		t0 := time.Now()
+		run := runServe(t, c.srv, serveWithin(c.srv, r.h.w, newPersistSpy(), log, d))
+		limit := t0.Add(2800 * time.Millisecond)
+
+		// The stream opens late, inside the deadline, and its frame stalls.
+		time.Sleep(time.Until(t0.Add(1600 * time.Millisecond)))
+		s := c.openStream(t)
+		writeAll(t, s, []byte{pairing.FrameVersion, 0x00})
+		_, _ = readResponse(s, 5*time.Second) // ends with the close, or with an answer
+		_, closed, _ := c.waitClosed(5 * time.Second)
+		closedAt := time.Since(t0)
+		switch {
+		case !closed:
+			t.Error("connection still open 5s after the stalled frame")
+		case closedAt > limit.Sub(t0):
+			t.Errorf("connection closed %v after Serve started, want by %v: the stream, the frame and the answer share one %v deadline",
+				closedAt.Round(time.Millisecond), limit.Sub(t0), d)
+		}
+		err, took, ok := run.wait(max(time.Until(limit), time.Millisecond))
+		switch {
+		case !ok:
+			t.Errorf("Serve still running %v after it started, want returned by %v (one %v deadline for the whole exchange)",
+				time.Since(t0).Round(time.Millisecond), limit.Sub(t0), d)
+		case err == nil:
+			t.Error("Serve returned nil for a stalled request, want an error")
+		case took < 1500*time.Millisecond:
+			t.Errorf("Serve gave up after %v, before the %v deadline", took, d)
+		}
+	})
+
+	t.Run("a refusal lingers one second", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		_, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, serveDefault(c.srv, r.h.w, newPersistSpy(), log))
+		resp, err := c.exchange(t, requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: badProof}))
+		wantStatus(t, "bad proof", resp, err, pairing.StatusBadProof)
+		c.wantClosedWith(t, "refused peer that stays", 0, 2500*time.Millisecond)
+		_, took, ok := run.wait(serveWait)
+		switch {
+		case !ok:
+			t.Error("Serve still running after the refusal linger")
+		case took < 750*time.Millisecond:
+			t.Errorf("Serve closed the refused peer after %v, want a linger of about 1s", took)
+		}
+	})
+
+	t.Run("an ok lingers up to the deadline", func(t *testing.T) {
+		const d = 3 * time.Second
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		_, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, serveWithin(c.srv, r.h.w, newPersistSpy(), log, d))
+		resp, err := c.exchange(t, requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: r.proofFor(t, c, testLabel)}))
+		wantStatus(t, "valid proof", resp, err, pairing.StatusOK)
+		if code, closed, _ := c.waitClosed(1500 * time.Millisecond); closed {
+			t.Errorf("connection closed (code %#x) within 1.5s of the ok; an ok lingers up to the %v deadline", code, d)
+		}
+		c.wantClosedWith(t, "paired peer that stays", 0, d+serveWait)
+		if _, _, ok := run.wait(serveWait); !ok {
+			t.Error("Serve still running after the ok linger")
+		}
+	})
+
+	t.Run("further streams are reset after the answer too", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		_, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		runServe(t, c.srv, serveWithin(c.srv, r.h.w, newPersistSpy(), log, 5*time.Second))
+		resp, err := c.exchange(t, requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: r.proofFor(t, c, testLabel)}))
+		wantStatus(t, "valid proof", resp, err, pairing.StatusOK)
+		// Serve is now in the ok linger; its ctx is still live.
+		extra := c.openStream(t)
+		writeAll(t, extra, []byte{0x00})
+		if dl, ok := extra.(deadliner); ok {
+			_ = dl.SetReadDeadline(time.Now().Add(2 * time.Second))
+		}
+		_, err = extra.Read(make([]byte, 1))
+		var se *quic.StreamError
+		if !errors.As(err, &se) || !se.Remote || uint64(se.ErrorCode) != proto.StreamResetCode {
+			t.Errorf("read on a stream opened after the answer = %v, want a remote stream reset with code %#x", err, proto.StreamResetCode)
 		}
 	})
 }
@@ -642,5 +741,295 @@ func TestServe_DualStackIPv4ClientBudgetedAsIPv4(t *testing.T) {
 	}
 	if st := r.h.w.Attempt(netip.MustParseAddr("127.0.0.2"), valid, testEKM); st != pairing.StatusOK {
 		t.Errorf("valid proof from 127.0.0.2 = %v, want ok (a neighbouring /32 is unaffected)", st)
+	}
+}
+
+// recordsWith returns the log lines at level that contain every one of subs.
+func recordsWith(logs *logCapture, level slog.Level, subs ...string) []string {
+	var out []string
+	for _, rec := range logs.records(level) {
+		all := true
+		for _, sub := range subs {
+			all = all && strings.Contains(rec, sub)
+		}
+		if all {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// validRequest is a valid request for testLabel on c.
+func (r *serveRig) validRequest(t *testing.T, c *pairClient) []byte {
+	t.Helper()
+	return requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: r.proofFor(t, c, testLabel)})
+}
+
+// signalled waits (bounded) for ch to receive or close.
+func signalled(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(serveWait):
+		t.Fatalf("%s did not happen within %v", what, serveWait)
+	}
+}
+
+// wantShutDownUnsaved requires Serve to have refused the shutdown before the
+// save: an error naming it, nothing persisted, the window consumed, one WARN.
+func wantShutDownUnsaved(t *testing.T, r *serveRig, run *serveRun, spy *persistSpy, logs *logCapture) {
+	t.Helper()
+	err, _, ok := run.wait(serveWait)
+	switch {
+	case !ok:
+		t.Error("Serve still running after the shutdown")
+	case err == nil || !strings.Contains(err.Error(), "shut down before the admitted pin was saved"):
+		t.Errorf("Serve = %v, want an error saying it shut down before the admitted pin was saved", err)
+	}
+	if n := len(spy.persisted()); n != 0 {
+		t.Errorf("Persist called %d times after the joiner was refused for shutdown; nothing may be saved", n)
+	}
+	if res, ok := waitResult(t, r.h.w); !ok || res.Reason != pairing.ReasonPaired {
+		t.Errorf("window result %+v (ended %v), want ReasonPaired", res, ok)
+	}
+	if w := recordsWith(logs, slog.LevelWarn, "was not saved", r.joinPin[:8]); len(w) != 1 || len(logs.records(slog.LevelWarn)) != 1 {
+		t.Errorf("want exactly one WARN record, saying the client was not saved and naming %q; got %q", r.joinPin[:8], logs.records(slog.LevelWarn))
+	}
+}
+
+func TestServe_ShutdownDuringExchange(t *testing.T) {
+	t.Run("ctx ending during the read closes 0x50 and Serve returns", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		_, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, serveDefault(c.srv, r.h.w, newPersistSpy(), log))
+		s := c.openStream(t)
+		writeAll(t, s, []byte{pairing.FrameVersion, 0x00})
+		time.Sleep(100 * time.Millisecond)
+		run.cancel()
+		c.wantClosedWith(t, "shutdown during the read", pairing.CodePairRejected, 2*time.Second)
+		err, took, ok := run.wait(serveWait)
+		switch {
+		case !ok:
+			t.Errorf("Serve still running %v after its ctx ended", serveWait)
+		case err == nil:
+			t.Error("Serve returned nil after a shutdown during the read, want an error")
+		case took >= serveWait:
+			t.Errorf("Serve took %v; a shutdown must not wait out the deadline", took)
+		}
+	})
+
+	t.Run("ctx ending while the pin is saved still answers ok", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		spy := newPersistSpy()
+		spy.persistGate = make(chan struct{})
+		releasePersist := closer(t, spy.persistGate)
+		logs, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, serveDefault(c.srv, r.h.w, confirmSpy{spy}, log))
+		s := c.openStream(t)
+		writeAll(t, s, r.validRequest(t, c))
+		signalled(t, "Persist", spy.persistEntered)
+		run.cancel()
+		time.Sleep(100 * time.Millisecond)
+		releasePersist()
+		resp, err := readResponse(s, serveWait)
+		wantStatus(t, "valid proof saved during shutdown", resp, err, pairing.StatusOK)
+		signalled(t, "Confirm", spy.confirmEntered)
+		if got := spy.confirmed(); len(got) != 1 || got[0] != r.joinPin {
+			t.Errorf("Confirm calls %q, want exactly [%q]", got, r.joinPin)
+		}
+		c.conn.CloseWithError(0, "joiner done")
+		if err, _, ok := run.wait(serveWait); !ok || err != nil {
+			t.Errorf("Serve = %v (returned %v), want nil: the joiner was told ok", err, ok)
+		}
+		if n := len(recordsWith(logs, slog.LevelInfo, "client paired")); n != 1 {
+			t.Errorf("%d INFO records saying the client paired, want 1:\n%s", n, logs)
+		}
+		if w := logs.records(slog.LevelWarn); len(w) != 0 {
+			t.Errorf("WARN records %q, want none", w)
+		}
+	})
+
+	t.Run("ctx ending after ok was written does not refuse the joiner", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		_, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, serveDefault(c.srv, r.h.w, newPersistSpy(), log))
+		resp, err := c.exchange(t, r.validRequest(t, c))
+		wantStatus(t, "valid proof", resp, err, pairing.StatusOK)
+		run.cancel()
+		if code, closed, _ := c.waitClosed(300 * time.Millisecond); closed {
+			t.Errorf("connection closed (code %#x) right after shutdown; a paired joiner gets the ok linger", code)
+		}
+		c.conn.CloseWithError(0, "joiner done")
+		if err, _, ok := run.wait(serveWait); !ok || err != nil {
+			t.Errorf("Serve = %v (returned %v), want nil: the joiner was told ok", err, ok)
+		}
+	})
+
+	t.Run("ctx ending between Attempt and the save saves nothing", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		release := r.h.gated(t)
+		spy := newPersistSpy()
+		logs, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, serveDefault(c.srv, r.h.w, confirmSpy{spy}, log))
+		s := c.openStream(t)
+		writeAll(t, s, r.validRequest(t, c))
+		r.h.waitEntered(t)
+		run.cancel()
+		c.wantClosedWith(t, "shutdown while the proof is checked", pairing.CodePairRejected, 2*time.Second)
+		release()
+		wantShutDownUnsaved(t, r, run, spy, logs)
+	})
+
+	t.Run("ctx ended before the commit point refuses even if the watcher has not run", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		release := r.h.gated(t)
+		watcherIn, watcherGate := make(chan struct{}), make(chan struct{})
+		releaseWatcher := closer(t, watcherGate)
+		hook := func() { close(watcherIn); <-watcherGate }
+		spy := newPersistSpy()
+		logs, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, func(ctx context.Context) error {
+			return pairing.ServeWithShutdownHook(ctx, c.srv, r.h.w, confirmSpy{spy}, log, hook)
+		})
+		s := c.openStream(t)
+		writeAll(t, s, r.validRequest(t, c))
+		r.h.waitEntered(t)
+		run.cancel()
+		signalled(t, "the watcher seeing the shutdown", watcherIn)
+		// The watcher is held: only Serve's own commit check can see the
+		// ended ctx now.
+		release()
+		if resp, err := readResponse(s, 2*time.Second); err == nil && resp.Status == pairing.StatusOK {
+			t.Error("joiner answered ok although Serve's ctx had ended before the commit point")
+		}
+		c.wantClosedWith(t, "shutdown before the commit point", pairing.CodePairRejected, 2*time.Second)
+		releaseWatcher()
+		wantShutDownUnsaved(t, r, run, spy, logs)
+	})
+}
+
+// wantSavedNotAcknowledged requires the saved-but-not-told outcome: the
+// sentinel error, one Persist and no Confirm, one WARN naming the pin prefix
+// and the source, no success or refusal record, and no secrets in the log.
+func wantSavedNotAcknowledged(t *testing.T, r *serveRig, c *pairClient, run *serveRun, spy *persistSpy, logs *logCapture, secrets map[string][]byte) {
+	t.Helper()
+	err, _, ok := run.wait(serveWait)
+	switch {
+	case !ok:
+		t.Fatal("Serve still running")
+	case !errors.Is(err, pairing.ErrSavedNotAcknowledged):
+		t.Errorf("Serve = %v, want an error wrapping ErrSavedNotAcknowledged", err)
+	}
+	if calls := spy.persisted(); len(calls) != 1 || calls[0].pin != r.joinPin {
+		t.Errorf("Persist calls %+v, want exactly one for the joiner's pin", calls)
+	}
+	if got := spy.confirmed(); len(got) != 0 {
+		t.Errorf("Confirm called %q; a pin the joiner was not told about stays unconfirmed", got)
+	}
+	warns := logs.records(slog.LevelWarn)
+	if len(warns) != 1 || len(recordsWith(logs, slog.LevelWarn, r.joinPin[:8], c.local.String(), "not told ok", "unconfirmed")) != 1 {
+		t.Errorf("want exactly one WARN record saying the client was saved but not told ok and is unconfirmed, naming %q and %s; got %q",
+			r.joinPin[:8], c.local, warns)
+	}
+	if n := len(recordsWith(logs, slog.LevelInfo, "client paired")) + len(recordsWith(logs, slog.LevelInfo, "request refused")); n != 0 {
+		t.Errorf("%d INFO records saying paired or refused; the WARN is the only record:\n%s", n, logs)
+	}
+	logs.wantNoSecrets(t, r.joinPin, secrets)
+}
+
+func TestServe_SavedButNotAcknowledged(t *testing.T) {
+	t.Run("the joiner hangs up while its pin is saved", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		spy := newPersistSpy()
+		spy.persistGate = make(chan struct{})
+		releasePersist := closer(t, spy.persistGate)
+		logs, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		opt := goleak.IgnoreCurrent()
+		blob, secret, ekm := r.h.w.Blob(), secretOf(t, r.h.w), c.ekm(t, testLabel)
+		proof := r.proofFor(t, c, testLabel)
+		run := runServe(t, c.srv, serveDefault(c.srv, r.h.w, confirmSpy{spy}, log))
+		s := c.openStream(t)
+		writeAll(t, s, requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: proof}))
+		signalled(t, "Persist", spy.persistEntered)
+		c.conn.CloseWithError(0, "joiner gone")
+		select {
+		case <-c.srv.Context().Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("the listener side did not see the joiner's close within 2s")
+		}
+		releasePersist()
+		wantSavedNotAcknowledged(t, r, c, run, spy, logs, map[string][]byte{"secret": secret[:], "proof": proof, "EKM": ekm, "blob": []byte(blob)})
+		run.verifyNoLeakWhileLive(t, opt)
+	})
+
+	t.Run("a save that outlasts the exchange deadline", func(t *testing.T) {
+		const d = 500 * time.Millisecond
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		spy := newPersistSpy()
+		spy.persistGate = make(chan struct{})
+		releasePersist := closer(t, spy.persistGate)
+		logs, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		opt := goleak.IgnoreCurrent()
+		blob, secret, ekm := r.h.w.Blob(), secretOf(t, r.h.w), c.ekm(t, testLabel)
+		proof := r.proofFor(t, c, testLabel)
+		run := runServe(t, c.srv, serveWithin(c.srv, r.h.w, confirmSpy{spy}, log, d))
+		s := c.openStream(t)
+		writeAll(t, s, requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: proof}))
+		signalled(t, "Persist", spy.persistEntered)
+		time.Sleep(time.Until(run.start.Add(700 * time.Millisecond)))
+		releasePersist()
+		if resp, err := readResponse(s, time.Second); err == nil {
+			t.Errorf("joiner got %+v after the exchange deadline passed during the save; the answer must not be written late", resp)
+		}
+		c.wantClosedWith(t, "save past the deadline", 0, serveWait)
+		wantSavedNotAcknowledged(t, r, c, run, spy, logs, map[string][]byte{"secret": secret[:], "proof": proof, "EKM": ekm, "blob": []byte(blob)})
+		run.verifyNoLeakWhileLive(t, opt)
+	})
+}
+
+func TestServe_NoGoroutineOutlivesExchange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		valid bool
+		want  pairing.Status
+	}{
+		{"refused exchange", false, pairing.StatusBadProof},
+		{"ok exchange", true, pairing.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			routeLeakCheck(t)
+			r := newServeRig(t, time.Minute)
+			_, log := newLogCapture()
+			c := r.dial(t, r.joinKey, transport.ALPNPair)
+			opt := goleak.IgnoreCurrent()
+			proof := badProof
+			if tc.valid {
+				proof = r.proofFor(t, c, testLabel)
+			}
+			run := runServe(t, c.srv, serveWithin(c.srv, r.h.w, newPersistSpy(), log, 2*time.Second))
+			resp, err := c.exchange(t, requestFrame(t, pairing.PairRequest{Method: pairing.MethodTokenHMACv1, Label: testLabel, Proof: proof}))
+			wantStatus(t, tc.name, resp, err, tc.want)
+			c.conn.CloseWithError(0, "joiner done")
+			if _, _, ok := run.wait(serveWait); !ok {
+				t.Fatal("Serve still running after the joiner closed")
+			}
+			// Serve's ctx is still live here: a goroutine waiting only on it
+			// would outlive the exchange.
+			run.verifyNoLeakWhileLive(t, opt)
+		})
 	}
 }

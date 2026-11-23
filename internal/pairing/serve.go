@@ -31,6 +31,11 @@ type serveOpts struct {
 	// deadline bounds each wait: for the request stream, for the request
 	// frame, for writing the response and for the peer to hang up after it.
 	deadline time.Duration
+	// refusalLinger: placeholder, not used yet.
+	refusalLinger time.Duration
+	// onShutdown, if set, runs in the shutdown watcher once the caller's ctx
+	// ended, before the watcher acts (test hook).
+	onShutdown func()
 }
 
 // defaultServeOpts returns the production dependencies.
@@ -49,6 +54,11 @@ type pairPeer struct {
 	from netip.AddrPort
 	ekm  transport.EKMProvider
 }
+
+// ErrSavedNotAcknowledged is wrapped by Serve's error when the joiner's pin
+// was saved (it is authorized, unconfirmed) but the ok answer could not be
+// written. Confirm is not called; the operator may remove the pin.
+var ErrSavedNotAcknowledged = errors.New("pairing: serve: client saved (unconfirmed) but not told ok")
 
 // Serve handles one pairing exchange on conn against w: it reads one request,
 // lets w.Attempt judge it, records an admitted pin through p before answering
@@ -95,6 +105,9 @@ func serveWith(ctx context.Context, conn transport.Conn, w *Window, p Persister,
 		defer wg.Done()
 		select {
 		case <-parent.Done():
+			if o.onShutdown != nil {
+				o.onShutdown()
+			}
 			reject(conn)
 		case <-done:
 		}

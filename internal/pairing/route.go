@@ -21,10 +21,17 @@ const (
 // queue; refusing at the cap keeps a flood from holding goroutines.
 const maxPairConns = 16
 
+// routeOpts are a routed listener's test hooks.
+type routeOpts struct {
+	// released, if set, runs after a handler's slot was released (test hook).
+	released func()
+}
+
 // routedListener is the transport.Listener NewRoutedListener returns.
 type routedListener struct {
 	ln     transport.Listener
 	handle func(context.Context, transport.Conn)
+	opts   routeOpts
 
 	// ctx is the handlers' context: it belongs to the listener, not to any
 	// Accept call, and ends only with Close.
@@ -49,10 +56,16 @@ type routedListener struct {
 // context that Close cancels, and Close returns only after every handler has.
 // A nil handle refuses pairing connections like an unknown protocol.
 func NewRoutedListener(ln transport.Listener, handle func(context.Context, transport.Conn)) transport.Listener {
+	return newRoutedListener(ln, handle, routeOpts{})
+}
+
+// newRoutedListener is NewRoutedListener with test hooks.
+func newRoutedListener(ln transport.Listener, handle func(context.Context, transport.Conn), o routeOpts) *routedListener {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &routedListener{
 		ln:     ln,
 		handle: handle,
+		opts:   o,
 		ctx:    ctx,
 		cancel: cancel,
 		slots:  make(chan struct{}, maxPairConns),
@@ -110,7 +123,12 @@ func (l *routedListener) dispatch(c transport.Conn) {
 	l.mu.Unlock()
 	go func() {
 		defer l.wg.Done()
-		defer func() { <-l.slots }()
+		defer func() {
+			<-l.slots
+			if l.opts.released != nil {
+				l.opts.released()
+			}
+		}()
 		l.handle(l.ctx, c)
 	}()
 }
