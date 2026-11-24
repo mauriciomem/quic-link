@@ -38,6 +38,9 @@ type serveOpts struct {
 	// onShutdown, if set, runs in the shutdown watcher once the caller's ctx
 	// ended, before the watcher acts (test hook).
 	onShutdown func()
+	// beforeCommit, if set, runs on the main path just before the commit
+	// point takes the watcher's lock (test hook).
+	beforeCommit func()
 }
 
 // defaultServeOpts returns the production dependencies.
@@ -166,6 +169,9 @@ func serveWith(ctx context.Context, conn transport.Conn, w *Window, p Persister,
 		// The commit point. parent is checked here, under the watcher's lock,
 		// because the watcher may not have run yet; when it has, parent has
 		// ended too.
+		if o.beforeCommit != nil {
+			o.beforeCommit()
+		}
 		sm.Lock()
 		shutDown := parent.Err() != nil
 		committed = !shutDown

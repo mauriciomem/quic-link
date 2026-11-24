@@ -1,6 +1,6 @@
 /**
  * @spec-handoff
- * @interface Serve(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger) error; Persister{Persist(pin, label string, from netip.AddrPort) error}; optional Confirmer{Confirm(pin string) error}; var ErrSavedNotAcknowledged; seam serveWith(..., serveOpts{deadline, refusalLinger, onShutdown}) with defaults deadline == proto.ResponseDeadline (10 s), refusalLinger == 1 s; onShutdown (test hook) runs in the ctx watcher before it acts
+ * @interface Serve(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger) error; Persister{Persist(pin, label string, from netip.AddrPort) error}; optional Confirmer{Confirm(pin string) error}; var ErrSavedNotAcknowledged; seam serveWith(..., serveOpts{deadline, refusalLinger, onShutdown, beforeCommit}) with defaults deadline == proto.ResponseDeadline (10 s), refusalLinger == 1 s; onShutdown (test hook) runs in the ctx watcher before it acts; beforeCommit (test hook) runs on the main path just before the commit point takes the lock
  * @behavior
  *   - preconditions, else CloseWithError(CodePairRejected) + non-nil error with NO Attempt and NO Persist: ALPNProvider == transport.ALPNPair, EKMProvider, RemoteAddrProvider giving a *net.UDPAddr with a valid AddrPort, a peer certificate (pin = identity.PinFromCert(leaf)), non-nil w, p, log
  *   - one deadline, set once after the preconditions, bounds AcceptStream (else close CodePairRejected), the request frame and the response write; a frame still stalled at it gets no answer (the write deadline passed too) and a close; further streams reset with proto.StreamResetCode while Serve runs
@@ -914,6 +914,33 @@ func TestServe_ShutdownDuringExchange(t *testing.T) {
 		}
 		c.wantClosedWith(t, "shutdown before the commit point", pairing.CodePairRejected, 2*time.Second)
 		releaseWatcher()
+		wantShutDownUnsaved(t, r, run, spy, logs)
+	})
+
+	t.Run("ctx ending just before the commit point's lock saves nothing", func(t *testing.T) {
+		routeLeakCheck(t)
+		r := newServeRig(t, time.Minute)
+		commitIn, commitGate := make(chan struct{}), make(chan struct{})
+		releaseCommit := closer(t, commitGate)
+		hook := func() { close(commitIn); <-commitGate }
+		spy := newPersistSpy()
+		logs, log := newLogCapture()
+		c := r.dial(t, r.joinKey, transport.ALPNPair)
+		run := runServe(t, c.srv, func(ctx context.Context) error {
+			return pairing.ServeWithCommitHook(ctx, c.srv, r.h.w, confirmSpy{spy}, log, hook)
+		})
+		s := c.openStream(t)
+		writeAll(t, s, r.validRequest(t, c))
+		signalled(t, "Serve reaching the commit point", commitIn)
+		// The main path is held just before the commit point's lock, with ok
+		// judged. The watcher acts now, seeing nothing committed: the ctx check
+		// must be read under the lock, after this, not before it.
+		run.cancel()
+		c.wantClosedWith(t, "shutdown just before the commit point", pairing.CodePairRejected, 2*time.Second)
+		releaseCommit()
+		if resp, err := readResponse(s, 2*time.Second); err == nil && resp.Status == pairing.StatusOK {
+			t.Error("joiner answered ok after the watcher refused it for shutdown")
+		}
 		wantShutDownUnsaved(t, r, run, spy, logs)
 	})
 }

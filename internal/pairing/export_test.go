@@ -62,6 +62,15 @@ func ServeWithShutdownHook(ctx context.Context, conn transport.Conn, w *Window, 
 	return serveWith(ctx, conn, w, p, log, o)
 }
 
+// ServeWithCommitHook is Serve with beforeCommit run on the main path once
+// the request was judged ok, just before the commit point takes its lock;
+// blocking in it holds the main path there.
+func ServeWithCommitHook(ctx context.Context, conn transport.Conn, w *Window, p Persister, log *slog.Logger, beforeCommit func()) error {
+	o := defaultServeOpts()
+	o.beforeCommit = beforeCommit
+	return serveWith(ctx, conn, w, p, log, o)
+}
+
 // NewRoutedListenerWithReleaseHook is NewRoutedListener with released run
 // after each handler's counts were released.
 func NewRoutedListenerWithReleaseHook(ln transport.Listener, handle func(context.Context, transport.Conn), released func()) transport.Listener {
