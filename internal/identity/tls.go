@@ -272,9 +272,9 @@ func verifyPinFrom(src AllowedSource) func([][]byte, [][]*x509.Certificate) erro
 	}
 }
 
-// alpnPair1 is the ALPN a pairing joiner offers. Unexported until the pairing
-// transport defines its own constant.
-const alpnPair1 = "quic-link/pair1"
+// alpnPair1 is the ALPN a pairing joiner offers, the pairing transport's
+// constant under the name this package already uses.
+const alpnPair1 = transport.ALPNPair
 
 // configSource yields the steady-state listener config for one handshake. It
 // never sees the ClientHello: selection depends only on the offered ALPN list
@@ -515,6 +515,14 @@ func verifyParsableLeaf(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 // The steady branch reads src on every handshake and may start with an empty
 // set (every steady peer is then refused). Both configs are built once here;
 // freshness of the authorized set comes from src, not from rebuilding.
+//
+// pairingOpen is called on the TLS handshake goroutine, concurrently with
+// other handshakes and with the pairing window's attempts. It must be
+// goroutine-safe, must not block and must not call back into the listener; a
+// panic rejects the handshake. Its answer only picks the config: a handshake
+// that saw the window open may finish after it closed, so the pairing handler
+// re-checks the window when the request arrives (Window.Attempt) and answers
+// window_closed instead of serving a late request.
 //
 // Not wired into any production listener.
 func ListenTLSWithPairing(key ed25519.PrivateKey, src AllowedSource, pairingOpen func() bool) (*tls.Config, error) {

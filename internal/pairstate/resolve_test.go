@@ -10,6 +10,7 @@
  *   - Conflicts are checked in sorted name order, so the same server is reported on every run
  *   - Different pins -> error matching ErrPinConflict and config.ErrInvalid naming the server, paired.toml and "server forget NAME"
  *   - Returns a new map; inputs are never mutated
+ *   - The merged map is checked with config.ValidateDistinctListenPins before returning: two enabled waiting servers sharing a pin after the merge -> error matching config.ErrInvalid naming both, nil result
  * @see ./resolve.go
  */
 
@@ -203,6 +204,60 @@ func TestResolveServers_Rules(t *testing.T) {
 		got, err := ResolveServers(nil, nil)
 		if err != nil || got == nil || len(got) != 0 {
 			t.Errorf("ResolveServers(nil, nil) = (%#v, %v), want empty non-nil map", got, err)
+		}
+	})
+}
+
+func TestResolveServers_RejectsSharedListenPinAfterMerge(t *testing.T) {
+	shared, other := testPin("merge-shared"), testPin("merge-other")
+	off := false
+	// alpha waits with no pin of its own; paired.toml fills in beta's pin.
+	cfg := map[string]config.Server{
+		"alpha": {Listen: "127.0.0.1:7443"},
+		"beta":  {Listen: "127.0.0.1:7444", Pin: shared},
+	}
+
+	t.Run("paired pin collides with a waiting server", func(t *testing.T) {
+		got, err := ResolveServers(cfg, map[string]PairedServer{
+			"alpha": {Addr: "a.example.net:4433", Pin: shared, PairedAt: clockT1},
+		})
+		if !errors.Is(err, config.ErrInvalid) {
+			t.Fatalf("ResolveServers = (%v, %v), want an error matching config.ErrInvalid", got, err)
+		}
+		if got != nil {
+			t.Errorf("ResolveServers returned %v with its error, want nil", got)
+		}
+		if msg := err.Error(); !strings.Contains(msg, "servers.alpha") || !strings.Contains(msg, "servers.beta") {
+			t.Errorf("error %q should name both servers", msg)
+		}
+		if errors.Is(err, ErrPinConflict) {
+			t.Errorf("error %v must not be a pin conflict: the sources agree", err)
+		}
+	})
+	t.Run("control: distinct pins resolve", func(t *testing.T) {
+		got, err := ResolveServers(cfg, map[string]PairedServer{
+			"alpha": {Addr: "a.example.net:4433", Pin: other, PairedAt: clockT1},
+		})
+		if err != nil || got["alpha"].Pin != other || got["alpha"].Listen != "127.0.0.1:7443" {
+			t.Errorf("ResolveServers = (%v, %v), want alpha listening with the paired pin", got, err)
+		}
+	})
+	t.Run("control: a disabled waiting server does not collide", func(t *testing.T) {
+		in := map[string]config.Server{
+			"alpha": {Listen: "127.0.0.1:7443"},
+			"beta":  {Listen: "127.0.0.1:7444", Pin: shared, Enabled: &off},
+		}
+		if _, err := ResolveServers(in, map[string]PairedServer{
+			"alpha": {Addr: "a.example.net:4433", Pin: shared, PairedAt: clockT1},
+		}); err != nil {
+			t.Errorf("ResolveServers = %v, want nil", err)
+		}
+	})
+	t.Run("control: a paired-only dialing server sharing the pin is fine", func(t *testing.T) {
+		if _, err := ResolveServers(cfg, map[string]PairedServer{
+			"gamma": {Addr: "g.example.net:4433", Pin: shared, PairedAt: clockT1},
+		}); err != nil {
+			t.Errorf("ResolveServers = %v, want nil", err)
 		}
 	})
 }

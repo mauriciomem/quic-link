@@ -3,6 +3,7 @@ package pairstate
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -124,9 +125,16 @@ type parsedFile struct {
 }
 
 // LoadAuthorized reads and parses path. A missing file is an empty result.
-// A file in which any line's pin field does not parse is rejected whole with a *MalformedError and
-// an empty result.
+// A file in which any line's pin field does not parse, or a file larger than
+// 1 MiB, is rejected whole with a *MalformedError and an empty result.
+//
+// Every exported function of this package that takes a state path requires
+// it to be absolute and clean (filepath.Clean(path) == path); any other path
+// is refused with ErrUnsafePath before the file system is touched.
 func LoadAuthorized(path string) (LoadResult, error) {
+	if err := checkStatePathSyntax(path); err != nil {
+		return LoadResult{}, err
+	}
 	pf, err := readAuthorized(path)
 	if err != nil {
 		return LoadResult{}, err
@@ -159,18 +167,18 @@ func Allowed(r LoadResult) map[string]struct{} {
 
 // readAuthorized reads path without locking; a missing directory or file
 // parses as empty. The directory and the file are checked first (see
-// checkPrivate), so a FIFO is refused before it is ever opened.
+// checkPrivate), then the opened file again (see readStateFile).
 func readAuthorized(path string) (parsedFile, error) {
 	exists, err := verifyStatePath(path)
 	if err != nil || !exists {
 		return parsedFile{}, err
 	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	data, err := readStateFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return parsedFile{}, nil
 	}
 	if err != nil {
-		return parsedFile{}, fmt.Errorf("pairstate: read %s: %w", path, err)
+		return parsedFile{}, err
 	}
 	return parseAuthorized(path, string(data))
 }
@@ -414,6 +422,9 @@ func PromoteAuthorized(path, pin string) error {
 }
 
 func appendAuthorizedWith(o lockOpts, path string, e Entry) (bool, error) {
+	if err := checkStatePathSyntax(path); err != nil {
+		return false, err
+	}
 	if err := validateEntry(e); err != nil {
 		return false, err
 	}
@@ -439,6 +450,9 @@ func appendAuthorizedWith(o lockOpts, path string, e Entry) (bool, error) {
 }
 
 func removeAuthorizedWith(o lockOpts, path, pinPrefix string) (Entry, error) {
+	if err := checkStatePathSyntax(path); err != nil {
+		return Entry{}, err
+	}
 	if len(pinPrefix) < minPrefix {
 		return Entry{}, ErrPrefixShort
 	}
@@ -502,6 +516,9 @@ func sharesPrefix(prefix, self string, all []Entry) bool {
 }
 
 func promoteAuthorizedWith(o lockOpts, path, pin string) error {
+	if err := checkStatePathSyntax(path); err != nil {
+		return err
+	}
 	return withLock(o, path, func() error {
 		pf, err := readAuthorized(path)
 		if err != nil {
@@ -556,7 +573,9 @@ func defaultLockOpts() lockOpts {
 //
 // State files, their directory and the lock file must be owned by the current
 // user and not writable by group or others, and must not be symbolic links;
-// otherwise every operation fails with ErrUnsafePath. The directory is checked
+// the lock file must also not be readable by group or others (see
+// checkLock). Otherwise every operation fails with ErrUnsafePath; the lock is
+// never re-moded. The directory is checked
 // before the lock is opened, and the lock is opened without following a
 // symbolic link and then checked on its open descriptor.
 func withLock(o lockOpts, path string, fn func() error) (err error) {
@@ -587,7 +606,7 @@ func withLock(o lockOpts, path string, fn func() error) (err error) {
 	if err != nil {
 		return fmt.Errorf("pairstate: stat lock %s: %w", lockPath, err)
 	}
-	if err := checkPrivate(lockPath, fi, false, os.Geteuid()); err != nil {
+	if err := checkLock(lockPath, fi, os.Geteuid()); err != nil {
 		return err
 	}
 	if err := acquire(o, int(f.Fd())); err != nil {

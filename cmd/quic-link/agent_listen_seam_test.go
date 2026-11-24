@@ -9,7 +9,10 @@
  *   - a failing steady source fails closed as an auth failure (transport.IsAuthFailed)
  *   - guard: AgentListenTLS / ClientListenTLS listeners advertise only quic-link/1
  *   - guard: no non-test .go file in the module outside internal/identity and internal/pairing references
- *     ListenTLSWithPairingConfig, imports internal/pairing, or spells "quic-link/pair1" (also as a constant concatenation)
+ *     ListenTLSWithPairingConfig, imports internal/pairing, or spells "quic-link/pair1" (also as a constant concatenation);
+ *     the one exemption is the plain literal value of the top-level const ALPNPair in internal/transport itself, and the name
+ *     ALPNPair is a violation outside internal/identity and internal/pairing except as that declaring identifier
+ *     (an alias, a use or a function-local const in internal/transport, or any use in a transport subpackage, is flagged)
  * @edge-cases
  *   - ticket storage is post-handshake and async: positive checks wait on a Put signal, negative checks wait a bounded window
  * @see ../../internal/identity/tls.go
@@ -21,6 +24,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -288,7 +292,7 @@ func TestAgentAndDaemon_AdvertiseOnlyQuicLink1(t *testing.T) {
 			filepath.Join(root, "internal", "identity"): true,
 			filepath.Join(root, "internal", "pairing"):  true,
 		}
-		sawAnchor := false
+		var scan seamScan
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -308,39 +312,87 @@ func TestAgentAndDaemon_AdvertiseOnlyQuicLink1(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			for _, imp := range f.Imports {
-				if p, _ := strconv.Unquote(imp.Path.Value); p == pairingImport || strings.HasPrefix(p, pairingImport+"/") {
-					t.Errorf("%s: production code imports %s", fset.Position(imp.Pos()), p)
-				}
+			rel, err := filepath.Rel(root, filepath.Dir(path))
+			if err != nil {
+				return err
 			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.Ident:
-					if x.Name == "ListenTLSWithPairingConfig" {
-						t.Errorf("%s: production code references ListenTLSWithPairingConfig", fset.Position(x.Pos()))
-					}
-					if x.Name == "AgentListenTLS" {
-						sawAnchor = true
-					}
-				case *ast.BinaryExpr:
-					if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) {
-						t.Errorf("%s: production code builds %q", fset.Position(x.Pos()), v)
-						return false
-					}
-				case *ast.BasicLit:
-					if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) {
-						t.Errorf("%s: production code contains %q", fset.Position(x.Pos()), v)
-					}
-				}
-				return true
-			})
+			for _, v := range seamScanFile(fset, f, filepath.ToSlash(rel), pairingImport, &scan) {
+				t.Error(v)
+			}
 			return nil
 		})
 		if err != nil {
 			t.Fatalf("scan %s: %v", root, err)
 		}
-		if !sawAnchor {
+		if !scan.sawAgentListenTLS {
 			t.Fatal("scan never saw AgentListenTLS: the scanner is blind")
+		}
+		if !scan.sawALPNPairDecl {
+			t.Fatal("scan never saw const ALPNPair in internal/transport: the exemption anchor is gone")
+		}
+	})
+
+	t.Run("scanner applies the ALPNPair rules", func(t *testing.T) {
+		const imp = "github.com/mauriciomem/quic-link/internal/pairing"
+		for _, tc := range []struct {
+			name, dir, src string
+			violations     int
+			decl           bool
+		}{
+			{"exempt: the ALPNPair constant in internal/transport", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/pair1"`, 0, true},
+			{"exempt: grouped const", "internal/transport",
+				"package transport\nconst (\n\tALPN = \"quic-link/1\"\n\tALPNPair = \"quic-link/pair1\"\n)", 0, true},
+			{"name allowed in internal/pairing", "internal/pairing",
+				`package pairing; import "x/internal/transport"; var _ = transport.ALPNPair`, 0, false},
+			{"name allowed in internal/identity", "internal/identity",
+				`package identity; import "x/internal/transport"; const alpnPair1 = transport.ALPNPair`, 0, false},
+			{"flagged: transport/mem names ALPNPair", "internal/transport/mem",
+				`package mem; import "x/internal/transport"; var _ = transport.ALPNPair`, 1, false},
+			{"flagged: transport.ALPNPair referenced from cmd", "cmd/quic-link",
+				`package main; import "x/internal/transport"; var _ = transport.ALPNPair`, 1, false},
+			{"flagged: ALPNPair declared outside transport", "internal/daemon",
+				`package daemon; const ALPNPair = "quic-link/pair1"`, 2, false},
+			{"flagged: literal under another constant name", "internal/transport",
+				`package transport; const Other = "quic-link/pair1"`, 1, false},
+			{"flagged: ALPNPair as a var", "internal/transport",
+				`package transport; var ALPNPair = "quic-link/pair1"`, 2, false},
+			{"flagged: ALPNPair built by concatenation", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/" + "pair1"`, 1, true},
+			{"flagged: ALPNPair parenthesized", "internal/transport",
+				`package transport; const ALPNPair = ("quic-link/pair1")`, 1, true},
+			{"flagged: literal in transport subpackage", "internal/transport/mem",
+				`package mem; const ALPNPair = "quic-link/pair1"`, 2, false},
+			{"flagged: second name of the same spec", "internal/transport",
+				`package transport; const ALPNPair, B = "quic-link/pair1", "quic-link/pair1"`, 1, true},
+			{"flagged: literal elsewhere in transport", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/pair1"; func f() string { return "quic-link/pair1" }`, 1, true},
+			{"flagged: alias of ALPNPair in transport", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/pair1"; const PairProto = ALPNPair`, 1, true},
+			{"flagged: ALPNPair returned by a transport function", "internal/transport",
+				`package transport; const ALPNPair = "quic-link/pair1"; func PairProtos() []string { return []string{ALPNPair} }`, 1, true},
+			{"flagged: function-local ALPNPair const in transport", "internal/transport",
+				`package transport; func f() string { const ALPNPair = "quic-link/pair1"; return ALPNPair }`, 3, false},
+			{"flagged: pairing import", "internal/daemon",
+				`package daemon; import _ "` + imp + `"`, 1, false},
+			{"flagged: seam constructor", "internal/daemon",
+				`package daemon; var _ = identity.ListenTLSWithPairingConfig`, 1, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				fset := token.NewFileSet()
+				f, err := parser.ParseFile(fset, "synthetic.go", tc.src, 0)
+				if err != nil {
+					t.Fatalf("parse: %v", err)
+				}
+				var scan seamScan
+				v := seamScanFile(fset, f, tc.dir, imp, &scan)
+				if len(v) != tc.violations {
+					t.Errorf("violations = %d %q, want %d", len(v), v, tc.violations)
+				}
+				if scan.sawALPNPairDecl != tc.decl {
+					t.Errorf("sawALPNPairDecl = %v, want %v", scan.sawALPNPairDecl, tc.decl)
+				}
+			})
 		}
 	})
 
@@ -381,6 +433,102 @@ func seamConstString(e ast.Expr) (string, bool) {
 		return l + r, ok
 	}
 	return "", false
+}
+
+// seamScan collects the anchors a full scan must see.
+type seamScan struct {
+	sawAgentListenTLS bool // the scanner reads production identifiers at all
+	sawALPNPairDecl   bool // the exempt ALPNPair constant exists where the exemption allows it
+}
+
+// seamAllowsALPNPairName reports whether production code in dir (module-relative,
+// slash-separated) may name ALPNPair: the pairing packages only; internal/transport
+// may only declare it.
+func seamAllowsALPNPairName(dir string) bool {
+	for _, p := range []string{"internal/identity", "internal/pairing"} {
+		if dir == p || strings.HasPrefix(dir, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// seamScanFile returns one message per seam violation in a production file in
+// dir (module-relative, slash-separated). The "quic-link/pair1" literal is
+// exempt only as the plain value of the top-level const ALPNPair in
+// internal/transport; that declaring identifier is the only use of the name
+// ALPNPair allowed outside internal/identity and internal/pairing.
+func seamScanFile(fset *token.FileSet, f *ast.File, dir, pairingImport string, scan *seamScan) []string {
+	var out []string
+	for _, imp := range f.Imports {
+		if p, _ := strconv.Unquote(imp.Path.Value); p == pairingImport || strings.HasPrefix(p, pairingImport+"/") {
+			out = append(out, fmt.Sprintf("%s: production code imports %s", fset.Position(imp.Pos()), p))
+		}
+	}
+	exempt := map[*ast.BasicLit]bool{}
+	declIdent := map[*ast.Ident]bool{}
+	if dir == "internal/transport" {
+		seamExemptALPNPairDecl(f, scan, exempt, declIdent)
+	}
+	allowName := seamAllowsALPNPairName(dir)
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Ident:
+			if x.Name == "ListenTLSWithPairingConfig" {
+				out = append(out, fmt.Sprintf("%s: production code references ListenTLSWithPairingConfig", fset.Position(x.Pos())))
+			}
+			if x.Name == "AgentListenTLS" {
+				scan.sawAgentListenTLS = true
+			}
+			if x.Name == "ALPNPair" && !allowName && !declIdent[x] {
+				out = append(out, fmt.Sprintf("%s: production code names ALPNPair outside identity and pairing (internal/transport may only declare it)", fset.Position(x.Pos())))
+			}
+		case *ast.BinaryExpr:
+			if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) {
+				out = append(out, fmt.Sprintf("%s: production code builds %q", fset.Position(x.Pos()), v))
+				return false
+			}
+		case *ast.BasicLit:
+			if v, ok := seamConstString(x); ok && strings.Contains(v, seamPair1) && !exempt[x] {
+				out = append(out, fmt.Sprintf("%s: production code contains %q", fset.Position(x.Pos()), v))
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// seamExemptALPNPairDecl marks the exemptions of internal/transport's own
+// declaration: the declaring identifier of each top-level const named ALPNPair
+// and its plain "quic-link/pair1" value. It walks f.Decls only, so a
+// function-local const of that name is never exempt.
+func seamExemptALPNPairDecl(f *ast.File, scan *seamScan, exempt map[*ast.BasicLit]bool, declIdent map[*ast.Ident]bool) {
+	for _, d := range f.Decls {
+		gd, ok := d.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name != "ALPNPair" {
+					continue
+				}
+				scan.sawALPNPairDecl = true
+				declIdent[name] = true
+				if i < len(vs.Values) {
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok {
+						if v, ok := seamConstString(lit); ok && v == seamPair1 {
+							exempt[lit] = true
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 // seamModuleRoot finds the directory holding go.mod, walking up from the

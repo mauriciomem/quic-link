@@ -117,7 +117,7 @@ owning the process's entire shutdown discipline.
 ## `internal/edge`
 
 Owns the local loopback listeners for the daemon's lifetime. Each enabled
-server gets one `localPortEdge`, holding a bound TCP listener each for the
+server gets one `LocalPortEdge`, holding a bound TCP listener each for the
 `ssh` and `docker` targets. Accepted connections splice directly to a QUIC
 stream via `tunnel.DoAttach`, no IPC round trip, because the local
 application already connected straight to the port.
@@ -146,6 +146,27 @@ pinning TLS handshake. A pin is
 endpoint holds an Ed25519 keypair wrapped in a runtime self-signed X.509
 certificate used only as a TLS key carrier: verification ignores every X.509
 semantic (chain, expiry, SANs) and compares pins directly.
+
+The steady-state builders pin the peer. Most take a fixed pin list;
+`AgentListenTLSFrom` and `AgentDialTLSFrom` take an `AllowedSource` instead, a
+function the pin check calls on every handshake, so a change to the
+authorized set reaches the next handshake without rebuilding the config. Both
+refuse, at build time, a source that authorizes nobody. A source that later
+returns an empty set rejects every peer; empty never means "allow all."
+
+Two builders exist for pairing. `PairingTLS` is the config a joiner is served:
+it does not pin and accepts any peer whose certificate parses, because the
+pairing protocol, not TLS, decides whether the joiner is admitted. It is for
+pairing only. `ListenTLSWithPairing` builds the agent listener that picks a
+config per handshake: the pairing one when the peer offers `quic-link/pair1`
+and a window-open predicate reports true, the steady pinning one otherwise, so
+a closed window fails at ALPN like a version mismatch. Its steady side may
+start with no authorized pin, since a fresh agent pairs its first client
+through it. `ListenTLSWithPairingConfig` is the same selection over configs
+the caller already built.
+
+Every config built here disables session tickets and refuses a resumed TLS
+session, because a resumed handshake skips the pin check.
 
 Split across three files by its own doc comment's account: `pin.go` (the
 credential and its parsing), `key.go` (key generation, loading, on-disk
@@ -188,8 +209,29 @@ them (`sni.go`), and the actual listening servers (`server.go`).
 Holds the pairing primitives: the join blob a listener hands to a joiner
 (`blob.go`), the HMAC proof bound to the TLS exporter of the pairing
 connection (`proof.go`), the pairing request and response messages
-(`msg.go`), and their framing (`frame.go`). It performs no I/O beyond the
-reader and writer it is given.
+(`msg.go`), and their framing (`frame.go`).
+
+On top of those sit the listener-side pieces:
+
+- **The window** (`window.go`): `OpenWindow` opens a single-use pairing window
+  holding a one-time secret and a deadline (two minutes by default). Failed
+  proofs are budgeted per source (an IPv4 /32 or IPv6 /64), not per window, and
+  the source table is bounded. The first valid proof closes the window; any
+  close wipes the secret.
+- **The routed listener** (`route.go`): `NewRoutedListener` wraps a transport
+  listener. `Accept` returns only connections that negotiated the steady
+  protocol (`quic-link/1`). A pairing connection goes to the handler in its own
+  goroutine, with a cap on how many run at once (16) and on how many run from
+  one source (2, keyed like the window's budget); a connection over either cap
+  is closed as busy, never queued. Anything else is closed.
+- **The handler** (`serve.go`): `Serve` handles one pairing exchange on one
+  connection. It reads one request, lets the window judge the proof, and
+  records an admitted pin through a `Persister` before answering ok. One
+  deadline (10 seconds) bounds the request and the response together. Once an
+  admitted pin is being saved, shutdown no longer cuts the exchange short: the
+  joiner is answered ok. If the pin was saved but the ok answer could not be
+  written, `Serve` logs a WARN and returns an error wrapping
+  `ErrSavedNotAcknowledged`; the pin stays authorized and unconfirmed.
 
 Not wired yet: nothing in production imports it.
 
@@ -198,12 +240,22 @@ Not wired yet: nothing in production imports it.
 Persists pairing state: the agent's `authorized_clients` file
 (`authorized.go`) and the client's `paired.toml` (`paired.go`).
 `authorized_clients` holds one client pin per line; a valid pin authorizes,
-and the `state=` tag is forensic only. Every writer of `authorized_clients`
-holds an exclusive flock on a sibling `.lock` file across its
-read-modify-write; readers do not lock, because the file is only ever
+and the `state=` tag is forensic only. One unparsable pin rejects the whole
+file, so a damaged file is never half trusted. Every writer of
+`authorized_clients` holds an exclusive flock on a sibling `.lock` file across
+its read-modify-write; readers do not lock, because the file is only ever
 replaced by an atomic rename.
 
-Not wired yet: the agent still reads `authorized_clients` from `config.toml`.
+`AuthorizedHolder` (`holder.go`, opened with `OpenAuthorized`) is the reader a
+listener would use: it re-reads the file on every handshake, so a removed line
+stops being accepted on the next one. When a read is rejected, it keeps
+enforcing the last list that loaded and reports that through a callback, and
+it reports again once the file is accepted. `AuthorizedPersister` adapts
+`internal/pairing`'s `Persister` to the file: it appends an admitted pin as
+unconfirmed and marks it confirmed once the joiner has been told ok.
+
+Not wired yet: the agent still reads the `authorized_clients` key in
+`config.toml`.
 
 ## `internal/probe`
 
@@ -266,6 +318,18 @@ implement them without a redesign, though none is planned. `internal/transport/m
 is a sibling package providing an in-memory implementation used purely as test
 infrastructure — it lets the dial-and-reconnect machinery be tested without UDP
 sockets, QUIC crypto, or OS privileges.
+
+Two ALPN values live here: `ALPN` (`quic-link/1`, the tunnel protocol) and
+`ALPNPair` (`quic-link/pair1`, the pairing protocol, which is versioned with the
+pairing framing rather than with protocol v1). Two optional interfaces expose
+what is known only once the handshake is done: `ALPNProvider` (the negotiated
+ALPN) and `EKMProvider` (TLS exported keying material, which the pairing proof
+is bound to). The QUIC connection implements both; the in-memory one does
+not, and a caller must treat absence as "unknown." An unexported classifier
+for a pairing joiner's dial errors maps a refusal at ALPN to "no pairing
+window is open" and a `bad_certificate` alert to "the join blob does not match
+this listener," and classifies everything else as transient (the attempt may
+succeed if retried). No result is ever reported as an authentication failure.
 
 ## `internal/tunnel`
 

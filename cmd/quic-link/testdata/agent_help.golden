@@ -1,0 +1,32 @@
+Run the QUIC agent (server-side) endpoint. It binds a UDP port, performs
+mutual Ed25519 pin authentication with every connecting client, and forwards
+accepted streams to the configured local services.
+
+At least one --authorized-client pin is required: the agent never accepts
+unauthenticated connections.
+
+Agent settings may come from [agent] in the config file; flags always win
+when both are present.
+
+The name "serve" is a deprecated alias for "agent" and will be removed in a
+future release. Use "agent" in new deployments.
+
+Usage:
+  quic-link agent [flags]
+
+Aliases:
+  agent, serve
+
+Flags:
+      --authorized-client pin   authorized client pin (repeatable; at least one required)
+      --dial string             UDP address of a client that waits for this agent to connect (mutually exclusive with --listen)
+      --docker-addr string      docker daemon address (unix:///path or tcp://host:port) (default "unix:///var/run/docker.sock")
+  -h, --help[=true|false]       help for agent
+      --key string              path to the Ed25519 identity key (PKCS#8 PEM) (default "/home/golden/.config/quic-link/key.pem")
+      --listen string           UDP address to wait for connections on (default :443)
+      --route route             additional route as NAME=ADDR (repeatable; tcp://host:port or unix:///path)
+      --ssh-addr string         ssh route address (tcp://host:port) (default "tcp://127.0.0.1:22")
+
+Global Flags:
+      --config string      path to config file (optional)
+      --log-level string   log verbosity: debug, info, warn, or error (default "info")

@@ -431,3 +431,78 @@ func (c *quicConn) PeerCertificates() []*x509.Certificate {
 }
 
 var _ RemoteAddrProvider = (*quicConn)(nil)
+
+// NegotiatedProtocol returns the ALPN negotiated in the handshake. Valid only
+// after the handshake completed, which holds for every Conn returned by Dial
+// or Accept.
+func (c *quicConn) NegotiatedProtocol() string {
+	return c.c.ConnectionState().TLS.NegotiatedProtocol
+}
+
+// ExportKeyingMaterial exports keying material of the completed handshake
+// (RFC 5705 / RFC 8446 section 7.5). Valid only after the handshake completed.
+func (c *quicConn) ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error) {
+	// ExportKeyingMaterial has a pointer receiver, so the state must be held
+	// in an addressable variable first.
+	cs := c.c.ConnectionState()
+	return cs.TLS.ExportKeyingMaterial(label, context, length)
+}
+
+var (
+	_ ALPNProvider = (*quicConn)(nil)
+	_ EKMProvider  = (*quicConn)(nil)
+)
+
+var (
+	errNoPairingWindow  = errors.New("no pairing window is open on the listener")
+	errPairBlobMismatch = errors.New("the join blob does not match this listener (reissued token, wrong host, or rotated key)")
+	errPairTransient    = errors.New("the pairing attempt failed; it may succeed if retried")
+)
+
+// alertBadCertificate is the QUIC error code of TLS alert bad_certificate (42).
+const alertBadCertificate quic.TransportErrorCode = tlsAlertBase + 42
+
+// classifyPairDialError classifies an error seen by a pairing joiner: the Dial
+// error, or a first-read error / context.Cause(conn.Context()) after a Dial
+// that succeeded. The caller passes both. The input may be raw or already
+// wrapped by classifyDialError; an already classified input is returned as is.
+//
+//   - 0x178 (no_application_protocol): no pairing window is open
+//     (errNoPairingWindow).
+//   - 0x12a (bad_certificate), local or remote: the join blob does not match
+//     the listener (errPairBlobMismatch).
+//   - anything else is transient (errPairTransient). Another TLS alert or an
+//     authentication failure drops the original chain and keeps only the
+//     code; every other error stays in the chain (a timeout still matches
+//     ErrUnreachable, a cancelled ctx still matches context.Canceled).
+//
+// No result ever satisfies ErrAuthFailed or IsAuthFailed: a pairing attempt
+// is never reported as a steady-state authentication failure. The first two
+// classes are the ones meant to get their own exit code once a joiner command
+// exists; the transient class is not.
+func classifyPairDialError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errNoPairingWindow) || errors.Is(err, errPairBlobMismatch) || errors.Is(err, errPairTransient) {
+		return err
+	}
+	var te *quic.TransportError
+	if errors.As(err, &te) {
+		switch te.ErrorCode {
+		case alertNoAppProtocol:
+			return fmt.Errorf("%w (TLS alert no_application_protocol 0x178)", errNoPairingWindow)
+		case alertBadCertificate:
+			return fmt.Errorf("%w (TLS error 0x12a)", errPairBlobMismatch)
+		}
+	}
+	if IsAuthFailed(err) {
+		// Drop the chain: keeping it would let ErrAuthFailed or the raw TLS
+		// alert reach the steady authentication-failure mapping.
+		if te, ok := isTLSAuthAlert(err); ok {
+			return fmt.Errorf("%w (the listener refused the handshake: TLS error 0x%x)", errPairTransient, uint64(te.ErrorCode))
+		}
+		return fmt.Errorf("%w (the listener refused the handshake)", errPairTransient)
+	}
+	return fmt.Errorf("%w: %w", errPairTransient, err)
+}
